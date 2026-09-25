@@ -164,6 +164,95 @@ let chatJson (key: string) (model: string) (system: string) (user: Part list) (c
             | _ -> ""
     }
 
+/// Chat completion streamed as it is written: `onText` gets the answer so far after every piece (reasoning is
+/// left out). Returns the whole answer. `effort` is the reasoning effort ("low", "high") for models that take one.
+let chatStream (key: string) (model: string) (messages: (string * string) list) (effort: string option)
+               (onText: string -> unit) (ct: CancellationToken) : Task<string> =
+    task {
+        let kv (k: string) (v: JsonNode) = Collections.Generic.KeyValuePair(k, v)
+        let msgs = JsonArray()
+        for role, text in messages do
+            msgs.Add(JsonObject([ kv "role" (JsonValue.Create role); kv "content" (JsonValue.Create text) ]))
+        let payload =
+            JsonObject(
+                [ kv "model" (JsonValue.Create model)
+                  kv "stream" (JsonValue.Create true)
+                  kv "temperature" (JsonValue.Create 0.3)
+                  kv "max_tokens" (JsonValue.Create 4000)
+                  kv "messages" msgs ])
+        effort |> Option.iter (fun e -> payload.["reasoning_effort"] <- JsonValue.Create e)
+        let body = payload.ToJsonString()
+        let mutable attempt = 0
+        let mutable response: HttpResponseMessage = null
+        while isNull response do
+            let req = new HttpRequestMessage(HttpMethod.Post, baseUrl + "/v1/chat/completions", Content = new StringContent(body, Encoding.UTF8, "application/json"))
+            req.Headers.Authorization <- AuthenticationHeaderValue("Bearer", key.Trim())
+            // in the browser, responses are buffered whole unless streaming is asked for
+            req.Options.Set(HttpRequestOptionsKey<bool>("WebAssemblyEnableStreamingResponse"), true)
+            let! r = http.SendAsync(req, HttpCompletionOption.ResponseHeadersRead, ct)
+            let status = int r.StatusCode
+            if r.IsSuccessStatusCode then response <- r
+            elif (status = 429 || status >= 500) && attempt < 4 then
+                attempt <- attempt + 1
+                r.Dispose()
+                do! Task.Delay(TimeSpan.FromSeconds(2.0 * float attempt), ct)
+            else
+                let! text = r.Content.ReadAsStringAsync(ct)
+                r.Dispose()
+                raise (MistralError(status, describe r.StatusCode text))
+        use response = response
+        use! stream = response.Content.ReadAsStreamAsync(ct)
+        use reader = new IO.StreamReader(stream)
+        let answer = StringBuilder()
+        let mutable fin = false
+        while not fin do
+            let! line = reader.ReadLineAsync(ct).AsTask()
+            if isNull line then fin <- true
+            elif line.StartsWith "data:" then
+                let data = line.Substring(5).Trim()
+                if data = "[DONE]" then fin <- true
+                elif data <> "" then
+                    use d = JsonDocument.Parse data
+                    match d.RootElement.TryGetProperty "choices" with
+                    | true, choices when choices.GetArrayLength() > 0 ->
+                        match choices.[0].TryGetProperty "delta" with
+                        | true, delta ->
+                            match delta.TryGetProperty "content" with
+                            | true, c when c.ValueKind = JsonValueKind.String && c.GetString() <> "" ->
+                                answer.Append(c.GetString()) |> ignore
+                                onText (answer.ToString())
+                            | true, c when c.ValueKind = JsonValueKind.Array ->
+                                // chunks: "thinking" (skipped) and "text"
+                                let mutable added = false
+                                for part in c.EnumerateArray() do
+                                    match part.TryGetProperty "type", part.TryGetProperty "text" with
+                                    | (true, t), (true, x) when t.GetString() = "text" && x.ValueKind = JsonValueKind.String ->
+                                        answer.Append(x.GetString()) |> ignore
+                                        added <- true
+                                    | _ -> ()
+                                if added then onText (answer.ToString())
+                            | _ -> ()
+                        | _ -> ()
+                    | _ -> ()
+        return answer.ToString()
+    }
+
+/// Speech to text with Voxtral. `fileName`'s extension tells the format (wav, webm, m4a, ogg, mp3).
+let transcribe (key: string) (audio: byte[]) (fileName: string) (ct: CancellationToken) : Task<string> =
+    task {
+        let! body =
+            send key (fun () ->
+                let form = new MultipartFormDataContent()
+                form.Add(new StringContent("voxtral-mini-latest"), "model")
+                form.Add(new ByteArrayContent(audio), "file", fileName)
+                new HttpRequestMessage(HttpMethod.Post, baseUrl + "/v1/audio/transcriptions", Content = form)) ct
+        use d = JsonDocument.Parse body
+        return
+            match d.RootElement.TryGetProperty "text" with
+            | true, t when t.ValueKind = JsonValueKind.String -> t.GetString().Trim()
+            | _ -> ""
+    }
+
 /// A region Mistral OCR recognised, in pixels of its page image.
 type OcrBlock = { X0: float; Y0: float; X1: float; Y1: float; Kind: string; Content: string }
 

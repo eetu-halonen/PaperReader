@@ -16,6 +16,45 @@ type ImportState =
       Progress: float option
       Cancel: CancellationTokenSource }
 
+[<RequireQualifiedAccess>]
+type Mic =
+    | Idle
+    | Recording
+    | Transcribing
+
+/// A question on its way: the answer so far streams into Partial.
+type PendingAnswer = { Id: Guid; Question: string; Partial: string; ByVoice: bool }
+
+/// The Ask panel: questions about the paper while listening.
+type HelpState =
+    { /// Segment the questions are about (where the listener paused).
+      Position: int
+      /// The equation or figure the questions are about, if one was on screen or picked.
+      About: string option
+      /// Every question asked about this paper, oldest first.
+      History: HelpTurn list
+      /// How many of History were asked before the panel opened (shown under "Earlier questions").
+      Earlier: int
+      ShowEarlier: bool
+      /// The paper text and figure notes; None while they are prepared.
+      Knowledge: Help.Knowledge option
+      Preparing: string option
+      /// A question tapped while preparing, asked when ready.
+      Queued: (Help.Ask * bool) option
+      Pending: PendingAnswer option
+      Input: string
+      Error: string option
+      Mic: Mic
+      /// The answer (by its time asked) being read aloud.
+      Speaking: DateTime option
+      /// Its clips made but not played yet, whether one is playing, and whether all are made.
+      SpeakQueue: string list
+      SpeakPlaying: bool
+      SpeakMade: bool
+      /// Playback was on when the panel opened: closing it carries on.
+      ResumeOnClose: bool
+      Cancel: CancellationTokenSource }
+
 type ReaderState =
     { Paper: PaperInfo
       Script: Script
@@ -39,7 +78,9 @@ type ReaderState =
       /// Where "stop at equations" pauses: segment index -> the equation it has just read and explained.
       Stops: Map<int, string>
       /// The equation kept on screen after such a stop, until the listener continues.
-      Held: string option }
+      Held: string option
+      /// The Ask panel, when open.
+      Help: HelpState option }
 
 [<RequireQualifiedAccess>]
 type Screen =
@@ -100,6 +141,29 @@ type Msg =
     | VoicesLoaded of Result<Mistral.Voice list, string>
     | Dismiss
     | BackPressed
+    // ----- Ask
+    /// Opens the Ask panel about what is on screen, or about a given equation or figure.
+    | OpenHelp of about: string option
+    | CloseHelp of resume: bool
+    | HelpStep of paperId: string * step: string
+    | HelpPrepared of paperId: string * Result<Help.Knowledge, string>
+    | AskHelp of Help.Ask * byVoice: bool
+    | HelpText of askId: Guid * text: string
+    | HelpAnswered of askId: Guid * Result<HelpTurn, string>
+    | SetHelpInput of string
+    | SendHelpInput
+    | ToggleEarlier
+    /// Goes back a few sentences and carries on listening.
+    | HelpReplay
+    | MicPressed
+    | MicStarted of Result<unit, string>
+    | Transcribed of Result<string, string>
+    | SpeakAnswer of HelpTurn
+    | AnswerAudio of asked: DateTime * Result<string * bool, string>
+    | AnswerSpoken of asked: DateTime
+    | StopSpeaking
+    | SetAboutMe of string
+    | SetHelpModel of string
 
 let speeds = [| 0.8; 1.0; 1.15; 1.3; 1.5; 1.75; 2.0 |]
 let jumpMs = 15000
@@ -287,6 +351,71 @@ let private pickPdf () : Task<(string * string) option> =
                 return Some(dest, file.Name)
     }
 
+// ---------------------------------------------------------------------------------------------
+// Ask
+// ---------------------------------------------------------------------------------------------
+
+/// Paper text and figure notes, kept while the app runs (they are also cached on disk).
+let private knowledge = Collections.Concurrent.ConcurrentDictionary<string, Help.Knowledge>()
+
+let private prepareHelp (settings: Settings) (r: ReaderState) : Cmd<Msg> =
+    let id = r.Paper.Id
+    let p = paths ()
+    Cmd.ofEffect (fun dispatch ->
+        Task.Run(fun () ->
+            task {
+                try
+                    let! k = Help.prepare settings p id r.Script (fun step -> dispatch (HelpStep(id, step))) CancellationToken.None
+                    knowledge.[id] <- k
+                    dispatch (HelpPrepared(id, Ok k))
+                with e ->
+                    let e = match e with :? AggregateException as a when not (isNull a.InnerException) -> a.InnerException | e -> e
+                    dispatch (HelpPrepared(id, Error(errorText e)))
+            }
+            :> Task)
+        |> ignore)
+
+let private startAsk (settings: Settings) (r: ReaderState) (h: HelpState) (k: Help.Knowledge) (ask: Help.Ask) (byVoice: bool) : HelpState * Cmd<Msg> =
+    let about = h.About |> Option.bind r.Script.Visual
+    let askId = Guid.NewGuid()
+    let pending = { Id = askId; Question = Help.questionText ask about; Partial = ""; ByVoice = byVoice }
+    let ct = h.Cancel.Token
+    let history = h.History
+    let work =
+        Cmd.ofEffect (fun dispatch ->
+            Task.Run(fun () ->
+                task {
+                    try
+                        let! turn = Help.ask settings r.Script k history h.Position about ask (fun t -> dispatch (HelpText(askId, t))) ct
+                        dispatch (HelpAnswered(askId, Ok turn))
+                    with e ->
+                        let e = match e with :? AggregateException as a when not (isNull a.InnerException) -> a.InnerException | e -> e
+                        dispatch (HelpAnswered(askId, Error(errorText e)))
+                }
+                :> Task)
+            |> ignore)
+    { h with Pending = Some pending; Error = None; Queued = None; Input = (match ask with Help.Ask.Free _ -> "" | _ -> h.Input) }, work
+
+/// Synthesis of the answer being read aloud.
+let mutable private speakCancel = new CancellationTokenSource()
+
+let private stopAnswerAudio (h: HelpState) : Cmd<Msg> =
+    speakCancel.Cancel()
+    if h.Speaking.IsSome then stopAudio else Cmd.none
+
+let private notSpeaking (h: HelpState) = { h with Speaking = None; SpeakQueue = []; SpeakPlaying = false; SpeakMade = false }
+
+let private playAnswerClip (speed: float) (asked: DateTime) (path: string) : Cmd<Msg> =
+    Cmd.ofEffect (fun dispatch ->
+        (platform ()).Player.Play(path, 0, speed, (fun () -> dispatch (AnswerSpoken asked)), (fun _ -> dispatch (AnswerSpoken asked))))
+
+let private withHelp (model: Model) (f: ReaderState -> HelpState -> HelpState * Cmd<Msg>) : Model * Cmd<Msg> =
+    match model.Screen with
+    | Screen.Reader ({ Help = Some h } as r) ->
+        let h, cmd = f r h
+        { model with Screen = Screen.Reader { r with Help = Some h } }, cmd
+    | _ -> model, Cmd.none
+
 let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
     match msg with
     | Dismiss -> { model with Notice = None }, Cmd.none
@@ -412,7 +541,8 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
               ShowEquations = false
               Zoom = None
               Stops = Narration.equationStops script
-              Held = None }
+              Held = None
+              Help = None }
         let r, playCmd = play r model.Settings
         { model with Screen = Screen.Reader r }, Cmd.batch [ startSynth r model.Settings; playCmd ]
     | CloseReader ->
@@ -422,6 +552,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             { model with Screen = Screen.Library; Papers = loadLibrary () |> List.map (fun p -> if p.Id = r.Paper.Id then { p with LastSegment = r.Current } else p) },
             Cmd.batch [ cmd; Cmd.ofEffect (fun _ -> stopSynth (); (platform ()).EndPlayback()) ]
         | _ -> model, Cmd.none
+    | TogglePlay when (match model.Screen with Screen.Reader r -> r.Help.IsSome | _ -> false) -> update (CloseHelp true) model
     | TogglePlay ->
         withReader model (fun r ->
             if r.Playing then pause r
@@ -445,7 +576,8 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             seek r model.Settings (Timeline.forward (fun i -> r.Durations.TryFind i) r.Script.Segments.Length amount pos))
     | JumpToSegment i ->
         withReader model (fun r ->
-            let r = { r with ShowOutline = false; ShowEquations = false; Zoom = None }
+            r.Help |> Option.iter (fun h -> h.Cancel.Cancel())
+            let r = { r with ShowOutline = false; ShowEquations = false; Zoom = None; Help = None }
             let r, cmd = seek r model.Settings { Segment = i; OffsetMs = 0 }
             if r.Playing then r, cmd else play r model.Settings)
     | CycleSpeed ->
@@ -497,6 +629,209 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             | Some _ -> { r with Zoom = None }, Cmd.none
             | None -> { r with Zoom = (match r.Held with Some v -> Some v | None -> r.Script.Segments.[r.Current].Show) }, Cmd.none)
     | ZoomVisual v -> withReader model (fun r -> { r with Zoom = Some v }, Cmd.none)
+
+    // ----- Ask
+    | OpenHelp about ->
+        withReader model (fun r ->
+            let wasPlaying = r.Playing
+            let r, pauseCmd = if r.Playing then pause r else r, Cmd.none
+            let seg = r.Script.Segments.[r.Current]
+            // what "this" is: the equation kept on screen, the one shown with the sentence, or the one picked
+            let about =
+                match about with
+                | Some v -> Some v
+                | None ->
+                    match r.Held with
+                    | Some v -> Some v
+                    | None -> seg.Show |> Option.filter (fun v -> r.Script.Visual v |> Option.exists (fun v -> v.Kind <> VisualKind.Inline))
+            // stopped at an equation: Current already points at the next sentence, ask about the one just heard
+            let position = if r.Held.IsSome && r.Current > 0 then r.Current - 1 else r.Current
+            let history = try Store.loadHelp (paths ()) r.Paper.Id with _ -> []
+            let known = match knowledge.TryGetValue r.Paper.Id with | true, k -> Some k | _ -> None
+            let hasKey = Settings.hasKey model.Settings
+            let h =
+                { Position = position
+                  About = about
+                  History = history
+                  Earlier = history.Length
+                  ShowEarlier = false
+                  Knowledge = known
+                  Preparing = (if known.IsNone && hasKey then Some "Getting ready" else None)
+                  Queued = None
+                  Pending = None
+                  Input = ""
+                  Error = None
+                  Mic = Mic.Idle
+                  Speaking = None
+                  SpeakQueue = []
+                  SpeakPlaying = false
+                  SpeakMade = false
+                  ResumeOnClose = wasPlaying
+                  Cancel = new CancellationTokenSource() }
+            { r with Help = Some h; ShowEquations = false; ShowOutline = false; Zoom = None },
+            Cmd.batch [ pauseCmd; (if known.IsNone && hasKey then prepareHelp model.Settings r else Cmd.none) ])
+    | CloseHelp resume ->
+        withReader model (fun r ->
+            match r.Help with
+            | None -> r, Cmd.none
+            | Some h ->
+                h.Cancel.Cancel()
+                (platform ()).Recorder |> Option.iter (fun rec' -> if h.Mic = Mic.Recording then rec'.Cancel())
+                let r = { r with Help = None; Zoom = None }
+                let stop = stopAnswerAudio h
+                if resume || h.ResumeOnClose then
+                    let r, cmd = play r model.Settings
+                    r, Cmd.batch [ stop; cmd ]
+                else r, stop)
+    | HelpStep (id, step) ->
+        withHelp model (fun r h -> (if r.Paper.Id = id && h.Knowledge.IsNone then { h with Preparing = Some step } else h), Cmd.none)
+    | HelpPrepared (id, result) ->
+        withHelp model (fun r h ->
+            if r.Paper.Id <> id then h, Cmd.none
+            else
+                match result with
+                | Ok k ->
+                    let h = { h with Knowledge = Some k; Preparing = None }
+                    match h.Queued with
+                    | Some (ask, byVoice) -> startAsk model.Settings r h k ask byVoice
+                    | None -> h, Cmd.none
+                | Error e -> { h with Preparing = None; Queued = None; Error = Some e }, Cmd.none)
+    | AskHelp (ask, byVoice) ->
+        withHelp model (fun r h ->
+            if not (Settings.hasKey model.Settings) then { h with Error = Some "Add a Mistral API key in Settings to ask questions." }, Cmd.none
+            elif h.Pending.IsSome then h, Cmd.none
+            else
+                let stop = stopAnswerAudio h
+                let h = notSpeaking h
+                match h.Knowledge with
+                | Some k ->
+                    let h, cmd = startAsk model.Settings r h k ask byVoice
+                    h, Cmd.batch [ stop; cmd ]
+                | None when h.Preparing.IsSome ->
+                    // asked while the paper is being prepared: show the question now, ask when ready
+                    { h with Queued = Some(ask, byVoice); Error = None
+                             Pending = Some { Id = Guid.Empty; Question = Help.questionText ask (h.About |> Option.bind r.Script.Visual); Partial = ""; ByVoice = byVoice } },
+                    stop
+                | None ->
+                    { h with Queued = Some(ask, byVoice); Preparing = Some "Getting ready"; Error = None
+                             Pending = Some { Id = Guid.Empty; Question = Help.questionText ask (h.About |> Option.bind r.Script.Visual); Partial = ""; ByVoice = byVoice } },
+                    Cmd.batch [ stop; prepareHelp model.Settings r ])
+    | HelpText (askId, text) ->
+        withHelp model (fun _ h ->
+            match h.Pending with
+            | Some p when p.Id = askId -> { h with Pending = Some { p with Partial = text } }, Cmd.none
+            | _ -> h, Cmd.none)
+    | HelpAnswered (askId, result) ->
+        withHelp model (fun r h ->
+            match h.Pending, result with
+            | Some p, Ok turn when p.Id = askId ->
+                let history = h.History @ [ turn ]
+                let save = Cmd.ofEffect (fun _ -> try Store.saveHelp (paths ()) r.Paper.Id history with _ -> ())
+                { h with History = history; Pending = None },
+                Cmd.batch [ save; (if p.ByVoice then Cmd.ofMsg (SpeakAnswer turn) else Cmd.none) ]
+            | Some p, Error e when p.Id = askId -> { h with Pending = None; Error = Some e }, Cmd.none
+            | _ -> h, Cmd.none)
+    | SetHelpInput text -> withHelp model (fun _ h -> { h with Input = text }, Cmd.none)
+    | SendHelpInput ->
+        match model.Screen with
+        | Screen.Reader { Help = Some h } when h.Input.Trim() <> "" -> update (AskHelp(Help.Ask.Free h.Input, false)) model
+        | _ -> model, Cmd.none
+    | ToggleEarlier -> withHelp model (fun _ h -> { h with ShowEarlier = not h.ShowEarlier }, Cmd.none)
+    | HelpReplay ->
+        match model.Screen with
+        | Screen.Reader ({ Help = Some h } as r) ->
+            // back to the start of the last few sentences, then listen again
+            let target = max 0 (h.Position - 2)
+            let model, cmd = update (CloseHelp false) { model with Screen = Screen.Reader { r with Help = Some { h with ResumeOnClose = false } } }
+            let model, cmd2 = update (JumpToSegment target) model
+            model, Cmd.batch [ cmd; cmd2 ]
+        | _ -> model, Cmd.none
+    | MicPressed ->
+        withHelp model (fun _ h ->
+            match (platform ()).Recorder, h.Mic with
+            | None, _ -> { h with Error = Some "Recording isn't available on this device." }, Cmd.none
+            | Some _, _ when not (Settings.hasKey model.Settings) -> { h with Error = Some "Add a Mistral API key in Settings to ask questions." }, Cmd.none
+            | Some recorder, Mic.Idle ->
+                { notSpeaking h with Error = None },
+                Cmd.batch [ stopAnswerAudio h; runTask (fun () -> recorder.Start()) (Ok >> MicStarted) (errorText >> Error >> MicStarted) ]
+            | Some recorder, Mic.Recording ->
+                let key = model.Settings.MistralApiKey
+                let ct = h.Cancel.Token
+                let work () =
+                    task {
+                        let! audio, name = recorder.Stop()
+                        return! Mistral.transcribe key audio name ct
+                    }
+                { h with Mic = Mic.Transcribing }, runTask work (Ok >> Transcribed) (errorText >> Error >> Transcribed)
+            | Some _, Mic.Transcribing -> h, Cmd.none)
+    | MicStarted result ->
+        withHelp model (fun _ h ->
+            match result with
+            | Ok () -> { h with Mic = Mic.Recording }, Cmd.none
+            | Error e -> { h with Mic = Mic.Idle; Error = Some("Couldn't use the microphone: " + e) }, Cmd.none)
+    | Transcribed result ->
+        match result with
+        | Ok text when text.Trim().Length > 1 ->
+            let model, _ = withHelp model (fun _ h -> { h with Mic = Mic.Idle }, Cmd.none)
+            update (AskHelp(Help.Ask.Free text, true)) model
+        | Ok _ -> withHelp model (fun _ h -> { h with Mic = Mic.Idle; Error = Some "I didn't catch that. Try again, a little closer to the microphone." }, Cmd.none)
+        | Error e -> withHelp model (fun _ h -> { h with Mic = Mic.Idle; Error = Some e }, Cmd.none)
+    | SpeakAnswer turn ->
+        withHelp model (fun r h ->
+            match engineFor model.Settings with
+            | None -> { h with Error = Some "No voice is available to read the answer." }, Cmd.none
+            | Some engine ->
+                let stop = stopAnswerAudio h
+                speakCancel <- CancellationTokenSource.CreateLinkedTokenSource h.Cancel.Token
+                let ct = speakCancel.Token
+                let p = paths ()
+                let asked = turn.AskedUtc
+                let chunks = Help.speechChunks turn.Answer
+                // clips are made in order and played as soon as each is ready
+                let work =
+                    Cmd.ofEffect (fun dispatch ->
+                        Task.Run(fun () ->
+                            task {
+                                try
+                                    Directory.CreateDirectory(p.HelpDir r.Paper.Id) |> ignore
+                                    for i, text in List.indexed chunks do
+                                        let! wav = engine.Synthesize(text, ct)
+                                        ct.ThrowIfCancellationRequested()
+                                        let path = p.AnswerAudio(r.Paper.Id, i)
+                                        File.WriteAllBytes(path, wav)
+                                        dispatch (AnswerAudio(asked, Ok(path, (i = chunks.Length - 1))))
+                                with
+                                | :? OperationCanceledException -> ()
+                                | e -> dispatch (AnswerAudio(asked, Error(errorText e)))
+                            }
+                            :> Task)
+                        |> ignore)
+                { notSpeaking h with Speaking = Some asked }, Cmd.batch [ stop; work ])
+    | AnswerAudio (asked, result) ->
+        withHelp model (fun _ h ->
+            if h.Speaking <> Some asked then h, Cmd.none
+            else
+                match result with
+                | Ok (path, last) ->
+                    let h = { h with SpeakMade = last }
+                    if h.SpeakPlaying then { h with SpeakQueue = h.SpeakQueue @ [ path ] }, Cmd.none
+                    else { h with SpeakPlaying = true }, playAnswerClip model.Settings.Speed asked path
+                | Error e -> { notSpeaking h with Error = Some e }, Cmd.none)
+    | AnswerSpoken asked ->
+        withHelp model (fun _ h ->
+            if h.Speaking <> Some asked then h, Cmd.none
+            else
+                match h.SpeakQueue with
+                | next :: rest -> { h with SpeakQueue = rest }, playAnswerClip model.Settings.Speed asked next
+                | [] when h.SpeakMade -> notSpeaking h, Cmd.none
+                | [] -> { h with SpeakPlaying = false }, Cmd.none)
+    | StopSpeaking -> withHelp model (fun _ h -> notSpeaking h, stopAnswerAudio h)
+    | SetAboutMe text ->
+        let settings = { model.Settings with AboutMe = text }
+        { model with Settings = settings }, saveSettings settings
+    | SetHelpModel m ->
+        let settings = { model.Settings with HelpModel = (if String.IsNullOrWhiteSpace m then Settings.defaults.HelpModel else m.Trim()) }
+        { model with Settings = settings }, saveSettings settings
 
     // ----- settings
     | SetShowSettings show ->
@@ -557,6 +892,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         else
             match model.Screen with
             | Screen.Reader r when r.Zoom.IsSome -> update ToggleZoom model
+            | Screen.Reader r when r.Help.IsSome -> update (CloseHelp false) model
             | Screen.Reader r when r.ShowOutline -> update ToggleOutline model
             | Screen.Reader r when r.ShowEquations -> update ToggleEquations model
             | Screen.Reader _ -> update CloseReader model

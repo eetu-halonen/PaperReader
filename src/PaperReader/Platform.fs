@@ -17,6 +17,15 @@ type IPdfPages =
     /// A page region at `scale` pixels per point, as ARGB pixels on white: (pixels, width, height).
     abstract Render: page: int * region: PageRect * scale: float -> int[] * int * int
 
+/// Records a spoken question from the microphone.
+type IRecorder =
+    /// Starts recording (asking for microphone permission first where needed).
+    abstract Start: unit -> Task<unit>
+    /// Stops and returns the audio with a file name whose extension tells its format (wav, m4a, webm).
+    abstract Stop: unit -> Task<byte[] * string>
+    /// Stops and throws the recording away.
+    abstract Cancel: unit -> unit
+
 /// What the device provides to the shared app.
 type IPlatform =
     /// Folder for the paper cache and settings.
@@ -26,6 +35,8 @@ type IPlatform =
     /// The phone's own text-to-speech, used without a Mistral key.
     abstract SystemSpeech: Synth.ISpeechEngine option
     abstract Player: IAudioPlayer
+    /// The microphone, for asking questions by voice (None where recording isn't available).
+    abstract Recorder: IRecorder option
     abstract KeepScreenOn: bool -> unit
     /// Background playback and the media notification: paper title, current section, playing or paused.
     abstract SetPlayback: title: string * detail: string * playing: bool -> unit

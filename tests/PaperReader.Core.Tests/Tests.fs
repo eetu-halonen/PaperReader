@@ -274,3 +274,80 @@ let ``"Figure 1" and "Equation 1" point at different images`` () =
     let s = Narration.buildLocal a
     Assert.Equal(Some "Fig1", s.Segments.[0].Show)
     Assert.Equal(Some "E1", s.Segments.[3].Show)
+
+// ---- Ask
+
+let private helpScript () =
+    let seg i say show = { Index = i; Kind = UnitKind.Sentence; Say = say; Show = show; Reason = ShowReason.Own; Section = 1; Page = 0; PauseAfterMs = 0 }
+    { Version = 1; Title = "T"; PageCount = 1; Narrator = "test"
+      Sections = [| { Title = "T"; FirstSegment = 0 }; { Title = "1 Method"; FirstSegment = 0 } |]
+      Segments = [| seg 0 "We train with SGD on ImageNet." None; seg 1 "The block computes F(x) + x." (Some "E1") |]
+      Visuals = [| { eq "E1" with EqNumber = Some "1"; Latex = Some "y = F(x) + x" } |] }
+
+[<Fact>]
+let ``a reply is split into answer, image to show and follow-ups`` () =
+    let s = helpScript ()
+    let r = Help.parseReply s "The shortcut adds x back.\n\nSo F only learns the change.\n---\nSHOW: [E1]\nNEXT: Why add x? | What is F? | Show an example"
+    Assert.Equal("The shortcut adds x back.\n\nSo F only learns the change.", r.Answer)
+    Assert.Equal(Some "E1", r.Show)
+    Assert.Equal<string list>([ "Why add x?"; "What is F?"; "Show an example" ], r.Followups)
+    // an id that isn't in the paper, or none, shows nothing
+    Assert.Equal(None, (Help.parseReply s "Answer.\n---\nSHOW: none\nNEXT: a").Show)
+    Assert.Equal(None, (Help.parseReply s "Answer.\n---\nSHOW: E9\nNEXT: a").Show)
+
+[<Fact>]
+let ``while streaming, the separator and what follows it are held back`` () =
+    Assert.Equal("Part of the answer", Help.visibleAnswer "Part of the answer\n-")
+    Assert.Equal("Part of the answer", Help.visibleAnswer "Part of the answer\n--")
+    Assert.Equal("Part of the answer", Help.visibleAnswer "Part of the answer\n---\nSHOW: E")
+
+[<Fact>]
+let ``jargon just heard is offered as what-is questions`` () =
+    Assert.Equal<string list>([ "ReLU"; "CIFAR-10"; "ImageNet" ], Help.terms [ "Trained on CIFAR-10 and ImageNet."; "Then a ReLU follows, see Section II." ])
+    let s = helpScript ()
+    let asks = Help.suggestions s 1 (s.Visual "E1")
+    Assert.Equal(Help.Ask.Walkthrough, asks.Head)
+    Assert.Contains(Help.Ask.Define "SGD", asks)
+
+[<Fact>]
+let ``formulas are split out of answers and left to the screen when spoken`` () =
+    let answer = "The output is **the sum**:\n$$y = F(x) + x$$\nwhere $x$ is the input."
+    match Help.pieces answer with
+    | [ Help.Piece.Prose a; Help.Piece.Formula f; Help.Piece.Prose b ] ->
+        Assert.Equal("The output is **the sum**:", a)
+        Assert.Equal("y = F(x) + x", f)
+        Assert.Equal("where $x$ is the input.", b)
+    | other -> failwithf "unexpected %A" other
+    Assert.Equal("The output is the sum: y equals F(x) plus x. where x is the input.", Help.spoken answer)
+
+[<Fact>]
+let ``LaTeX is read the way a lecturer says it`` () =
+    Assert.Equal("W sub i to the power Q", Help.speakLatex "W_i^Q")
+    Assert.Equal("the square root of d sub k", Help.speakLatex @"\sqrt{d_k}")
+    Assert.Equal("Q K transpose over the square root of d sub k", Help.speakLatex @"\frac{QK^T}{\sqrt{d_k}}")
+    Assert.Equal("x squared minus 1", Help.speakLatex "x^2 - 1")
+
+[<Fact>]
+let ``the prompt carries the paper, the visuals and where the listener is`` () =
+    let s = helpScript ()
+    let k = ({ PaperText = "FULL PAPER TEXT"; FigureNotes = Map.empty }: Help.Knowledge)
+    let msgs = Help.messages Settings.defaults s k [] 1 (s.Visual "E1") "Why?"
+    let system = snd msgs.Head
+    let user = snd (List.last msgs)
+    Assert.Contains("FULL PAPER TEXT", system)
+    Assert.Contains("[E1] Equation (1), page 1. LaTeX: y = F(x) + x", system)
+    Assert.Contains("section \"1 Method\"", user)
+    Assert.Contains(">>> The block computes F(x) + x.", user)
+    Assert.Contains("We train with SGD on ImageNet.", user)
+    Assert.Contains("The question is about [E1]", user)
+    Assert.EndsWith("QUESTION: Why?", user)
+
+[<Fact>]
+let ``an answer is read in clips, the first one short so it starts quickly`` () =
+    let answer = "Short start. " + String.replicate 12 "This sentence is part of a longer explanation of the method. "
+    let chunks = Help.speechChunks answer
+    Assert.True(chunks.Head.Length <= 120)
+    Assert.StartsWith("Short start.", chunks.Head)
+    Assert.True(chunks.Length >= 3)
+    Assert.All(chunks, fun c -> Assert.True(c.Length <= 330))
+    Assert.Equal(Help.spoken answer, String.Join(" ", chunks))

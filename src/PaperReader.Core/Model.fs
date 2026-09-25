@@ -112,6 +112,20 @@ type PaperInfo =
       /// Last listened segment, for resuming and progress display.
       LastSegment: int }
 
+/// One question the listener asked about a paper, and the answer.
+type HelpTurn =
+    { Question: string
+      Answer: string
+      /// Segment the listener was at when asking.
+      Segment: int
+      /// The equation or figure the question was about, if any.
+      About: string option
+      /// An equation or figure the answer points to, shown with it.
+      Show: string option
+      /// Follow-up questions offered as one-tap chips.
+      Followups: string list
+      AskedUtc: System.DateTime }
+
 type Settings =
     { MistralApiKey: string
       /// Narrate with a Mistral chat model (explains equations, fixes extraction errors).
@@ -125,7 +139,11 @@ type Settings =
       /// Pause after an equation has been read and explained, until the listener continues.
       StopAtEquations: bool
       /// The same for figures and tables, after they are first shown and discussed.
-      StopAtFigures: bool }
+      StopAtFigures: bool
+      /// Model that answers the listener's questions (Ask).
+      HelpModel: string
+      /// A line about the listener ("biology PhD student, rusty on linear algebra"), so answers fit them.
+      AboutMe: string }
 
 module Settings =
     let defaults =
@@ -137,7 +155,9 @@ module Settings =
           VoiceName = "Paul - Neutral"
           Speed = 1.0
           StopAtEquations = false
-          StopAtFigures = false }
+          StopAtFigures = false
+          HelpModel = "zai-glm-5-3"
+          AboutMe = "" }
 
     let hasKey (s: Settings) = not (System.String.IsNullOrWhiteSpace s.MistralApiKey)
 

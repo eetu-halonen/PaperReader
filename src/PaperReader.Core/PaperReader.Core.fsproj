@@ -15,6 +15,7 @@
     <Compile Include="Narration.fs" />
     <Compile Include="Store.fs" />
     <Compile Include="Synth.fs" />
+    <Compile Include="Help.fs" />
     <Compile Include="CropTidy.fs" />
   </ItemGroup>
   <ItemGroup>

@@ -60,6 +60,10 @@ type MainActivity() =
             this.RequestPermissions([| Android.Manifest.Permission.PostNotifications |], 1)
         this.Receive this.Intent
 
+    override this.OnRequestPermissionsResult(requestCode, permissions, grantResults) =
+        base.OnRequestPermissionsResult(requestCode, permissions, grantResults)
+        Permissions.answered requestCode (grantResults.Length > 0 && grantResults.[0] = Permission.Granted)
+
     override this.OnNewIntent(intent) =
         base.OnNewIntent intent
         this.Receive intent

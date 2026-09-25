@@ -7,6 +7,7 @@ open Avalonia
 open Avalonia.Controls
 open Avalonia.Controls.Primitives
 open Avalonia.Controls.Shapes
+open Avalonia.Controls.Documents
 open Avalonia.FuncUI
 open Avalonia.FuncUI.Builder
 open Avalonia.FuncUI.DSL
@@ -71,6 +72,11 @@ module Icons =
     let expand = "M4 9 V4 H9 M15 4 H20 V9 M20 15 V20 H15 M9 20 H4 V15"
     let plus = "M12 5 V19 M5 12 H19"
     let sigma = "M17 5 H7 L13 12 L7 19 H17"
+    let ask = "M5 4.5 H19 A2 2 0 0 1 21 6.5 V15 A2 2 0 0 1 19 17 H10.5 L6.5 20.5 V17 H5 A2 2 0 0 1 3 15 V6.5 A2 2 0 0 1 5 4.5 Z M9.8 9 A2.2 2.2 0 1 1 12.9 11 C12.3 11.3 12 11.8 12 12.5 M12 14.7 V14.8"
+    let mic = "M12 3 A3 3 0 0 1 15 6 V11 A3 3 0 0 1 9 11 V6 A3 3 0 0 1 12 3 Z M5.5 11 A6.5 6.5 0 0 0 18.5 11 M12 17.5 V21"
+    let send = "M5 12 H19 M13 6 L19 12 L13 18"
+    let speaker = "M4 9.5 H7.5 L12 5.5 V18.5 L7.5 14.5 H4 Z M15.5 9 A4 4 0 0 1 15.5 15 M18 6.5 A7.5 7.5 0 0 1 18 17.5"
+    let stop = "M7 7 H17 V17 H7 Z"
 
 let icon (data: string) (color: string) (size: float) (filled: bool) : IView =
     Viewbox.create [
@@ -354,17 +360,9 @@ let private importingView (s: ImportState) (dispatch: Msg -> unit) : IView =
 // ---------------------------------------------------------------------------------------------
 
 let private visualName (v: Visual) =
-    match v.Kind, v.EqNumber with
-    | VisualKind.Algorithm, Some n -> sprintf "Algorithm %s" n
-    | VisualKind.Algorithm, None -> "Algorithm"
-    | VisualKind.Equation, Some n when n.Contains "–" -> sprintf "Equations (%s)" n
-    | VisualKind.Equation, Some n -> sprintf "Equation (%s)" n
-    | VisualKind.Equation, None -> "Equation"
-    | VisualKind.Figure, Some n -> sprintf "Figure %s" n
-    | VisualKind.Figure, None -> "Figure"
-    | VisualKind.Table, Some n -> sprintf "Table %s" n
-    | VisualKind.Table, None -> "Table"
-    | VisualKind.Inline, _ -> "From the text"
+    match v.Kind with
+    | VisualKind.Inline -> "From the text"
+    | _ -> Help.visualName v
 
 let private visualCaption (script: Script) (seg: Segment) (v: Visual) =
     let name = visualName v
@@ -462,6 +460,7 @@ let private stage (r: ReaderState) (seg: Segment) (dispatch: Msg -> unit) : IVie
                                     match firstReading r.Script v.Id with
                                     | Some i -> pill "Hear it again" (fun () -> dispatch (JumpToSegment i)) false
                                     | None -> ()
+                                    pill "Ask" (fun () -> dispatch (OpenHelp(Some v.Id))) false
                                 ]
                             ]
                         ]
@@ -776,13 +775,25 @@ let private equationCard (r: ReaderState) (v: Visual) (firstSegment: int) (ahead
                     ]
                 )
             ]
-            plainButton "Transparent" [
-                Button.horizontalAlignment HorizontalAlignment.Left
-                Button.padding (Thickness(4.0, 2.0))
-                Button.foreground Palette.accent
-                Button.fontSize 14.0
-                Button.content (if ahead then "Skip ahead to it" else "Listen from here")
-                Button.onClick ((fun _ -> dispatch (JumpToSegment firstSegment)), SubPatchOptions.OnChangeOf firstSegment)
+            StackPanel.create [
+                StackPanel.orientation Orientation.Horizontal
+                StackPanel.spacing 18.0
+                StackPanel.children [
+                    plainButton "Transparent" [
+                        Button.padding (Thickness(4.0, 2.0))
+                        Button.foreground Palette.accent
+                        Button.fontSize 14.0
+                        Button.content (if ahead then "Skip ahead to it" else "Listen from here")
+                        Button.onClick ((fun _ -> dispatch (JumpToSegment firstSegment)), SubPatchOptions.OnChangeOf firstSegment)
+                    ]
+                    plainButton "Transparent" [
+                        Button.padding (Thickness(4.0, 2.0))
+                        Button.foreground Palette.accent
+                        Button.fontSize 14.0
+                        Button.content "Ask about it"
+                        Button.onClick ((fun _ -> dispatch (OpenHelp(Some v.Id))), SubPatchOptions.OnChangeOf v.Id)
+                    ]
+                ]
             ]
         ]
     ]
@@ -873,6 +884,431 @@ let private zoomOverlay (r: ReaderState) (visual: string) (dispatch: Msg -> unit
         ]
     ]
 
+
+// ---------------------------------------------------------------------------------------------
+// Ask
+// ---------------------------------------------------------------------------------------------
+
+/// Math in answers, typeset light on the dark background: (image, depth below the baseline in dp).
+let private mathImages = Dictionary<string, (Bitmap * float) option>()
+
+/// Pixels per dp the math is drawn at, for sharp text on dense screens.
+let private mathDensity = 3.0
+
+let private mathImage (latex: string) (display: bool) (emDp: float) : (Bitmap * float) option =
+    let key = sprintf "%b|%g|%s" display emDp latex
+    match mathImages.TryGetValue key with
+    | true, b -> b
+    | _ ->
+        let made =
+            try
+                let painter = CSharpMath.SkiaSharp.MathPainter(FontSize = float32 (emDp * mathDensity), TextColor = SkiaSharp.SKColor.Parse Palette.text)
+                painter.LineStyle <- (if display then CSharpMath.Atom.LineStyle.Display else CSharpMath.Atom.LineStyle.Text)
+                painter.LaTeX <- latex
+                if not (isNull painter.ErrorMessage) then None
+                else
+                    let r = painter.Measure(0.0f)
+                    let pad = 2.0f
+                    let w, h = int (ceil (r.Width + 2.0f * pad + 4.0f)), int (ceil (r.Height + 2.0f * pad))
+                    if w <= 0 || h <= 0 then None
+                    else
+                        use bmp = new SkiaSharp.SKBitmap(w, h)
+                        do
+                            use c = new SkiaSharp.SKCanvas(bmp)
+                            c.Clear SkiaSharp.SKColors.Transparent
+                            painter.Draw(c, pad - r.X, pad - r.Y)
+                        use data = bmp.Encode(SkiaSharp.SKEncodedImageFormat.Png, 100)
+                        use ms = new MemoryStream(data.ToArray())
+                        // r.Y is the top relative to the baseline, so the part below it is the rest of the height
+                        let depth = float (r.Height + r.Y + pad) / mathDensity
+                        Some(new Bitmap(ms), depth)
+            with _ -> None
+        mathImages.[key] <- made
+        made
+
+let private mathControl (bmp: Bitmap) (depth: float) (inline': bool) : IView =
+    Image.create [
+        Image.source bmp
+        Image.stretch Stretch.Fill
+        Image.width (float bmp.PixelSize.Width / mathDensity)
+        Image.height (float bmp.PixelSize.Height / mathDensity)
+        // inline math sits on the text's baseline, with its descenders below it
+        if inline' then Image.margin (Thickness(1.0, 0.0, 1.0, -depth))
+        else Image.horizontalAlignment HorizontalAlignment.Center
+    ]
+
+let private emphasisRx = Text.RegularExpressions.Regex(@"\*\*(.+?)\*\*|(?<![\w*])\*(?![\s*])(.+?)(?<![\s*])\*(?![\w*])")
+
+/// A paragraph with **bold** and *italic* spans and inline $math$.
+let private richParagraph (text: string) (size: float) (color: string) : IView =
+    // (text, bold, italic) spans
+    let spans =
+        [ let mutable last = 0
+          for m in emphasisRx.Matches text do
+              if m.Index > last then yield text.Substring(last, m.Index - last), false, false
+              if m.Groups.[1].Success then yield m.Groups.[1].Value, true, false
+              else yield m.Groups.[2].Value, false, true
+              last <- m.Index + m.Length
+          if last < text.Length then yield text.Substring last, false, false ]
+    TextBlock.create [
+        TextBlock.fontSize size
+        TextBlock.lineHeight (size * 1.5)
+        TextBlock.foreground color
+        TextBlock.textWrapping TextWrapping.Wrap
+        TextBlock.inlines [
+            for span, bold, italic in spans do
+                let math = Text.RegularExpressions.Regex.Split(span, @"\$([^$\n]+)\$")
+                for j in 0 .. math.Length - 1 do
+                    if math.[j] <> "" then
+                        match (if j % 2 = 1 then mathImage math.[j] false size else None) with
+                        | Some (bmp, depth) ->
+                            InlineUIContainer.create [ InlineUIContainer.child (mathControl bmp depth true) ] :> IView
+                        | None ->
+                            Run.create [
+                                Run.text math.[j]
+                                if bold then Run.fontWeight FontWeight.SemiBold
+                                if italic then Run.fontStyle FontStyle.Italic
+                            ]
+                            :> IView
+        ]
+    ]
+
+/// An answer: paragraphs, bullet lists and formulas.
+let private answerBody (answer: string) : IView =
+    StackPanel.create [
+        StackPanel.spacing 10.0
+        StackPanel.children [
+            for piece in Help.pieces answer do
+                match piece with
+                | Help.Piece.Prose text ->
+                    for para in Text.RegularExpressions.Regex.Split(text, @"\n\s*\n") do
+                        let para = Text.RegularExpressions.Regex.Replace(para.Trim(), @"(?m)^\s*[-*]\s+", "• ")
+                        if para <> "" then richParagraph para 16.0 Palette.text
+                | Help.Piece.Formula latex ->
+                    match mathImage latex true 17.0 with
+                    | Some (bmp, depth) ->
+                        ScrollViewer.create [
+                            ScrollViewer.horizontalScrollBarVisibility ScrollBarVisibility.Auto
+                            ScrollViewer.verticalScrollBarVisibility ScrollBarVisibility.Disabled
+                            ScrollViewer.content (mathControl bmp depth false)
+                        ]
+                    | None -> label latex 15.0 Palette.muted
+        ]
+    ]
+
+let private chip (text: string) (onClick: unit -> unit) : IView =
+    Button.create [
+        Button.content text
+        Button.fontSize 14.0
+        Button.padding (Thickness(14.0, 8.0))
+        Button.margin (Thickness(0.0, 0.0, 8.0, 8.0))
+        Button.cornerRadius 18.0
+        Button.background Palette.surfaceHigh
+        Button.foreground Palette.text
+        Button.borderBrush Palette.line
+        Button.borderThickness 1.0
+        Button.onClick ((fun _ -> onClick ()), SubPatchOptions.OnChangeOf text)
+    ]
+
+/// A small image of an equation or figure, tapped to see it full size.
+let private visualThumb (r: ReaderState) (id: string) (maxHeight: float) (dispatch: Msg -> unit) : IView =
+    let paths = Store.Paths((Services.get ()).DataDir)
+    match r.Script.Visual id, bitmap (paths.Image(r.Paper.Id, id)) with
+    | Some v, Some bmp ->
+        Border.create [
+            Border.background Palette.paper
+            Border.cornerRadius 12.0
+            Border.padding (Thickness(10.0, 6.0, 10.0, 10.0))
+            Border.horizontalAlignment HorizontalAlignment.Left
+            Border.onTapped ((fun _ -> dispatch (ZoomVisual id)), SubPatchOptions.OnChangeOf id)
+            Border.child (
+                StackPanel.create [
+                    StackPanel.spacing 4.0
+                    StackPanel.children [
+                        TextBlock.create [
+                            TextBlock.text (sprintf "%s · page %d" (visualName v) (v.Page + 1))
+                            TextBlock.fontSize 11.0
+                            TextBlock.foreground Palette.ink
+                        ]
+                        Image.create [
+                            Image.source bmp
+                            Image.stretch Stretch.Uniform
+                            Image.maxWidth (float bmp.PixelSize.Width * 0.6)
+                            Image.maxHeight (min maxHeight (float bmp.PixelSize.Height * 0.6))
+                            Image.horizontalAlignment HorizontalAlignment.Left
+                        ]
+                    ]
+                ]
+            )
+        ]
+    | _ -> Border.create []
+
+let private textLink (text: string) (onClick: unit -> unit) (key: obj) : IView =
+    plainButton "Transparent" [
+        Button.padding (Thickness(0.0, 4.0, 16.0, 4.0))
+        Button.foreground Palette.accent
+        Button.fontSize 14.0
+        Button.content text
+        Button.onClick ((fun _ -> onClick ()), SubPatchOptions.OnChangeOf key)
+    ]
+
+/// One question and its answer.
+let private turnView (r: ReaderState) (h: HelpState) (t: HelpTurn) (earlier: bool) (dispatch: Msg -> unit) : IView =
+    let speaking = h.Speaking = Some t.AskedUtc
+    StackPanel.create [
+        StackPanel.spacing 10.0
+        StackPanel.children [
+            label t.Question 15.0 Palette.accent
+            answerBody t.Answer
+            match t.Show with
+            | Some v when t.About <> Some v -> visualThumb r v 180.0 dispatch
+            | _ -> ()
+            StackPanel.create [
+                StackPanel.orientation Orientation.Horizontal
+                StackPanel.children [
+                    textLink (if speaking then "Stop reading" else "Read it to me") (fun () -> dispatch (if speaking then StopSpeaking else SpeakAnswer t)) (t.AskedUtc, speaking)
+                    if earlier then textLink "Listen from there" (fun () -> dispatch (JumpToSegment(max 0 (t.Segment - 1)))) t.AskedUtc
+                ]
+            ]
+        ]
+    ]
+
+let private helpOverlay (model: Model) (r: ReaderState) (h: HelpState) (dispatch: Msg -> unit) : IView =
+    let about = h.About |> Option.bind r.Script.Visual
+    let seg = r.Script.Segments.[max 0 (min h.Position (r.Script.Segments.Length - 1))]
+    let session = h.History |> List.skip (min h.Earlier h.History.Length) |> List.rev
+    let earlier = h.History |> List.truncate h.Earlier |> List.rev
+    let hasKey = Settings.hasKey model.Settings
+    let busy = h.Pending.IsSome || h.Mic = Mic.Transcribing
+    let taps =
+        match session with
+        | last :: _ ->
+            [ for q in last.Followups -> Help.Ask.Followup q, q.Replace("$", "")
+              yield Help.Ask.TellMore, "Tell me more" ]
+        | [] ->
+            [ for a in Help.suggestions r.Script h.Position about ->
+                  let text =
+                      match a with
+                      | Help.Ask.Walkthrough ->
+                          match about with
+                          | Some v when v.Kind = VisualKind.Figure || v.Kind = VisualKind.Table -> sprintf "What does %s show?" (Help.spokenName v)
+                          | Some v -> sprintf "Walk me through %s" (Help.spokenName v)
+                          | None -> "Walk me through it"
+                      | Help.Ask.Simpler -> "I didn't get that"
+                      | Help.Ask.Example -> "Give an example"
+                      | Help.Ask.WhyItMatters -> "Why does it matter?"
+                      | Help.Ask.Recap -> "Recap so far"
+                      | Help.Ask.Define t -> sprintf "What is %s?" t
+                      | a -> Help.questionText a about
+                  a, text ]
+    Border.create [
+        Border.background Palette.bg
+        Border.child (
+            DockPanel.create [
+                DockPanel.children [
+                    // header
+                    Grid.create [
+                        DockPanel.dock Dock.Top
+                        Grid.columnDefinitions "*,Auto"
+                        Grid.margin (Thickness(20.0, 12.0, 8.0, 4.0))
+                        Grid.children [
+                            StackPanel.create [
+                                Grid.column 0
+                                StackPanel.verticalAlignment VerticalAlignment.Center
+                                StackPanel.children [
+                                    TextBlock.create [
+                                        TextBlock.text "Ask"
+                                        TextBlock.fontSize 22.0
+                                        TextBlock.fontWeight FontWeight.Bold
+                                        TextBlock.foreground Palette.text
+                                    ]
+                                    label "Answers come from the paper, about where you are in it." 12.0 Palette.muted
+                                ]
+                            ]
+                            Border.create [ Grid.column 1; Border.child (iconButton Icons.close 22.0 (fun () -> dispatch (CloseHelp false)) "close-help") ]
+                        ]
+                    ]
+                    // taps, typing, the microphone, and back to listening
+                    Border.create [
+                        DockPanel.dock Dock.Bottom
+                        Border.background Palette.surface
+                        Border.cornerRadius (24.0, 24.0, 0.0, 0.0)
+                        Border.padding (Thickness(16.0, 14.0, 16.0, 16.0))
+                        Border.child (
+                            StackPanel.create [
+                                StackPanel.spacing 10.0
+                                StackPanel.children [
+                                    match h.Error with
+                                    | Some e -> label e 14.0 Palette.danger
+                                    | None -> ()
+                                    if hasKey && not busy then
+                                        WrapPanel.create [
+                                            WrapPanel.children [ for a, text in taps -> chip text (fun () -> dispatch (AskHelp(a, false))) ]
+                                        ]
+                                    if hasKey then
+                                        Grid.create [
+                                            Grid.columnDefinitions "*,Auto,Auto"
+                                            Grid.children [
+                                                match h.Mic with
+                                                | Mic.Recording ->
+                                                    label "Listening… tap the button when you're done." 15.0 Palette.text
+                                                | Mic.Transcribing -> label "Getting your question…" 15.0 Palette.muted
+                                                | Mic.Idle ->
+                                                    TextBox.create [
+                                                        Grid.column 0
+                                                        TextBox.text h.Input
+                                                        TextBox.watermark "Ask anything about the paper"
+                                                        TextBox.fontSize 15.0
+                                                        TextBox.cornerRadius 20.0
+                                                        TextBox.padding (Thickness(14.0, 9.0))
+                                                        TextBox.verticalContentAlignment VerticalAlignment.Center
+                                                        TextBox.onTextChanged ((fun t -> if t <> h.Input then dispatch (SetHelpInput t)), SubPatchOptions.OnChangeOf h.Input)
+                                                        TextBox.onKeyDown ((fun e -> if e.Key = Input.Key.Enter then e.Handled <- true; dispatch SendHelpInput), SubPatchOptions.Never)
+                                                    ]
+                                                if h.Mic = Mic.Idle && h.Input.Trim() <> "" then
+                                                    Button.create [
+                                                        Grid.column 1
+                                                        Button.width 44.0
+                                                        Button.height 44.0
+                                                        Button.margin (Thickness(8.0, 0.0, 0.0, 0.0))
+                                                        Button.cornerRadius 22.0
+                                                        Button.padding 0.0
+                                                        Button.background Palette.accent
+                                                        Button.horizontalContentAlignment HorizontalAlignment.Center
+                                                        Button.verticalContentAlignment VerticalAlignment.Center
+                                                        Button.isEnabled (not busy)
+                                                        Button.onClick ((fun _ -> dispatch SendHelpInput), SubPatchOptions.Never)
+                                                        Button.content (icon Icons.send Palette.onAccent 20.0 false)
+                                                    ]
+                                                if (Services.get ()).Recorder.IsSome then
+                                                    Button.create [
+                                                        Grid.column 2
+                                                        Button.width 44.0
+                                                        Button.height 44.0
+                                                        Button.margin (Thickness(8.0, 0.0, 0.0, 0.0))
+                                                        Button.cornerRadius 22.0
+                                                        Button.padding 0.0
+                                                        Button.background (if h.Mic = Mic.Recording then Palette.danger else Palette.surfaceHigh)
+                                                        Button.horizontalContentAlignment HorizontalAlignment.Center
+                                                        Button.verticalContentAlignment VerticalAlignment.Center
+                                                        Button.isEnabled (h.Mic <> Mic.Transcribing && h.Pending.IsNone)
+                                                        Button.onClick ((fun _ -> dispatch MicPressed), SubPatchOptions.Never)
+                                                        Button.content (
+                                                            if h.Mic = Mic.Recording then icon Icons.stop Palette.onAccent 18.0 true
+                                                            else icon Icons.mic Palette.text 22.0 false)
+                                                    ]
+                                            ]
+                                        ]
+                                    Grid.create [
+                                        Grid.columnDefinitions "*,Auto"
+                                        Grid.children [
+                                            Button.create [
+                                                Grid.column 0
+                                                Button.height 48.0
+                                                Button.cornerRadius 24.0
+                                                Button.horizontalAlignment HorizontalAlignment.Stretch
+                                                Button.horizontalContentAlignment HorizontalAlignment.Center
+                                                Button.verticalContentAlignment VerticalAlignment.Center
+                                                Button.background Palette.accent
+                                                Button.foreground Palette.onAccent
+                                                Button.fontSize 16.0
+                                                Button.fontWeight FontWeight.SemiBold
+                                                Button.content "Continue listening"
+                                                Button.onClick ((fun _ -> dispatch (CloseHelp true)), SubPatchOptions.Never)
+                                            ]
+                                            Border.create [
+                                                Grid.column 1
+                                                Border.margin (Thickness(8.0, 0.0, 0.0, 0.0))
+                                                Border.child (pill "Replay" (fun () -> dispatch HelpReplay) false)
+                                            ]
+                                        ]
+                                    ]
+                                ]
+                            ]
+                        )
+                    ]
+                    // a new question starts a fresh scroll view, at the top where the newest exchange is
+                    View.withKey (sprintf "help-%d-%b" h.History.Length h.Pending.IsSome) (
+                    ScrollViewer.create [
+                        ScrollViewer.content (
+                            StackPanel.create [
+                                StackPanel.margin (Thickness(20.0, 8.0, 20.0, 20.0))
+                                StackPanel.spacing 18.0
+                                StackPanel.children [
+                                    // what the questions are about
+                                    StackPanel.create [
+                                        StackPanel.spacing 8.0
+                                        StackPanel.children [
+                                            sectionLabel "ABOUT"
+                                            match about with
+                                            | Some v -> visualThumb r v.Id 150.0 dispatch
+                                            | None -> ()
+                                            TextBlock.create [
+                                                TextBlock.text ("“" + seg.Say + "”")
+                                                TextBlock.fontSize 14.0
+                                                TextBlock.lineHeight 20.0
+                                                TextBlock.fontStyle FontStyle.Italic
+                                                TextBlock.foreground Palette.muted
+                                                TextBlock.textWrapping TextWrapping.Wrap
+                                                TextBlock.maxLines 3
+                                                TextBlock.textTrimming TextTrimming.WordEllipsis
+                                            ]
+                                        ]
+                                    ]
+                                    if not hasKey then
+                                        StackPanel.create [
+                                            StackPanel.spacing 10.0
+                                            StackPanel.children [
+                                                label "Asking questions needs a Mistral API key: the answers come from a model that has read the whole paper." 15.0 Palette.text
+                                                StackPanel.create [
+                                                    StackPanel.orientation Orientation.Horizontal
+                                                    StackPanel.children [ pill "Open settings" (fun () -> dispatch (SetShowSettings true)) false ]
+                                                ]
+                                            ]
+                                        ]
+                                    match h.Pending with
+                                    | Some p ->
+                                        StackPanel.create [
+                                            StackPanel.spacing 10.0
+                                            StackPanel.children [
+                                                label p.Question 15.0 Palette.accent
+                                                if p.Partial = "" then
+                                                    StackPanel.create [
+                                                        StackPanel.orientation Orientation.Horizontal
+                                                        StackPanel.spacing 10.0
+                                                        StackPanel.children [
+                                                            ProgressBar.create [
+                                                                ProgressBar.isIndeterminate true
+                                                                ProgressBar.width 48.0
+                                                                ProgressBar.minWidth 48.0
+                                                                ProgressBar.height 4.0
+                                                                ProgressBar.minHeight 4.0
+                                                                ProgressBar.verticalAlignment VerticalAlignment.Center
+                                                                ProgressBar.foreground Palette.accent
+                                                            ]
+                                                            label (match h.Preparing with Some step -> step + "…" | None -> "Thinking…") 14.0 Palette.muted
+                                                        ]
+                                                    ]
+                                                else answerBody p.Partial
+                                            ]
+                                        ]
+                                    | None -> ()
+                                    for t in session do turnView r h t false dispatch
+                                    if not earlier.IsEmpty then
+                                        textLink
+                                            (if h.ShowEarlier then "Hide earlier questions" else sprintf "Earlier questions about this paper (%d)" earlier.Length)
+                                            (fun () -> dispatch ToggleEarlier) h.ShowEarlier
+                                        if h.ShowEarlier then
+                                            for t in earlier do turnView r h t true dispatch
+                                ]
+                            ]
+                        )
+                    ])
+                ]
+            ]
+        )
+    ]
+
 let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) : IView =
     let seg = r.Script.Segments.[r.Current]
     let sectionTitle =
@@ -883,7 +1319,7 @@ let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) :
                 DockPanel.children [
                     Grid.create [
                         DockPanel.dock Dock.Top
-                        Grid.columnDefinitions "Auto,*,Auto,Auto"
+                        Grid.columnDefinitions "Auto,*,Auto,Auto,Auto"
                         Grid.margin (Thickness(4.0, 6.0, 4.0, 2.0))
                         Grid.children [
                             Border.create [ Grid.column 0; Border.child (iconButton Icons.chevronLeft 24.0 (fun () -> dispatch CloseReader) "close-reader") ]
@@ -907,8 +1343,35 @@ let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) :
                                     ]
                                 ]
                             ]
-                            Border.create [ Grid.column 2; Border.child (iconButton Icons.sigma 22.0 (fun () -> dispatch ToggleEquations) "equations") ]
-                            Border.create [ Grid.column 3; Border.child (iconButton Icons.sliders 22.0 (fun () -> dispatch (SetShowSettings true)) "reader-settings") ]
+                            Button.create [
+                                Grid.column 2
+                                Button.height 38.0
+                                Button.cornerRadius 19.0
+                                Button.padding (Thickness(12.0, 0.0, 14.0, 0.0))
+                                Button.margin (Thickness(6.0, 0.0, 2.0, 0.0))
+                                Button.verticalAlignment VerticalAlignment.Center
+                                Button.verticalContentAlignment VerticalAlignment.Center
+                                Button.background Palette.surfaceHigh
+                                Button.onClick ((fun _ -> dispatch (OpenHelp None)), SubPatchOptions.Never)
+                                Button.content (
+                                    StackPanel.create [
+                                        StackPanel.orientation Orientation.Horizontal
+                                        StackPanel.spacing 6.0
+                                        StackPanel.children [
+                                            icon Icons.ask Palette.accent 20.0 false
+                                            TextBlock.create [
+                                                TextBlock.text "Ask"
+                                                TextBlock.fontSize 15.0
+                                                TextBlock.fontWeight FontWeight.SemiBold
+                                                TextBlock.foreground Palette.text
+                                                TextBlock.verticalAlignment VerticalAlignment.Center
+                                            ]
+                                        ]
+                                    ]
+                                )
+                            ]
+                            Border.create [ Grid.column 3; Border.child (iconButton Icons.sigma 22.0 (fun () -> dispatch ToggleEquations) "equations") ]
+                            Border.create [ Grid.column 4; Border.child (iconButton Icons.sliders 22.0 (fun () -> dispatch (SetShowSettings true)) "reader-settings") ]
                         ]
                     ]
                     Border.create [ DockPanel.dock Dock.Bottom; Border.child (controls model r dispatch) ]
@@ -917,6 +1380,9 @@ let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) :
             ]
             if r.ShowOutline then outlineOverlay r dispatch
             if r.ShowEquations then equationsOverlay r dispatch
+            match r.Help with
+            | Some h -> helpOverlay model r h dispatch
+            | None -> ()
             match r.Zoom with
             | Some v -> zoomOverlay r v dispatch
             | None -> ()
@@ -994,6 +1460,23 @@ let private settingsView (model: Model) (dispatch: Msg -> unit) : IView =
                                     sectionTitle "LISTENING"
                                     toggle "Stop at equations" "Pause once an equation or algorithm has been read and explained, with it on screen, until you tap Continue." s.StopAtEquations (SetStopAtEquations >> dispatch)
                                     toggle "Stop at figures and tables" "The same for figures and tables, after they are first shown and discussed." s.StopAtFigures (SetStopAtFigures >> dispatch)
+                                    sectionTitle "ASK"
+                                    label "About you" 16.0 Palette.text
+                                    TextBox.create [
+                                        TextBox.text s.AboutMe
+                                        TextBox.watermark "e.g. biology PhD student, rusty on linear algebra"
+                                        TextBox.fontSize 15.0
+                                        TextBox.textWrapping TextWrapping.Wrap
+                                        TextBox.onTextChanged ((fun t -> if t <> model.Settings.AboutMe then dispatch (SetAboutMe t)), SubPatchOptions.OnChangeOf s.AboutMe)
+                                    ]
+                                    label "Optional. Answers to your questions are pitched at this level." 12.0 Palette.faint
+                                    label "Answer model" 14.0 Palette.muted
+                                    TextBox.create [
+                                        TextBox.text s.HelpModel
+                                        TextBox.fontSize 15.0
+                                        TextBox.onTextChanged ((fun t -> if t <> model.Settings.HelpModel then dispatch (SetHelpModel t)), SubPatchOptions.OnChangeOf s.HelpModel)
+                                    ]
+                                    label "zai-glm-5-3 (GLM 5.3, hosted by Mistral) reads the whole paper for every answer." 12.0 Palette.faint
                                     sectionTitle "MISTRAL AI"
                                     label "API key" 16.0 Palette.text
                                     TextBox.create [

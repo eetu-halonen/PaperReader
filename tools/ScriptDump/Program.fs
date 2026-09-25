@@ -21,8 +21,35 @@ let renderCrop (pdf: string) (dir: string) (v: Visual) =
     run "convert" (sprintf "%s -bordercolor white -border 0x12 -append \"%s\"" (parts |> Array.map (sprintf "\"%s\"") |> String.concat " ") (Path.Combine(dir, v.Id + ".png")))
     for f in parts do File.Delete f
 
+/// --ask <paper id> <segment> <question>: asks about a paper in the desktop app's cache, as the Ask panel does.
+let private askMode (argv: string[]) =
+    let paths = Store.Paths(Path.Combine(Environment.GetFolderPath Environment.SpecialFolder.LocalApplicationData, "PaperReader"))
+    let settings = Store.loadSettings paths
+    let id, position, question = argv.[1], int argv.[2], argv.[3]
+    let script = (Store.loadScript paths id).Value
+    let k = (Help.prepare settings paths id script (eprintfn "%s") Threading.CancellationToken.None).Result
+    let about = script.Segments.[position].Show |> Option.bind script.Visual
+    let ask =
+        match question with
+        | "simpler" -> Help.Ask.Simpler
+        | "example" -> Help.Ask.Example
+        | "why" -> Help.Ask.WhyItMatters
+        | "recap" -> Help.Ask.Recap
+        | "walk" -> Help.Ask.Walkthrough
+        | q -> Help.Ask.Free q
+    printfn "AT [%d] %s" position script.Segments.[position].Say
+    printfn "SUGGESTED: %s" (Help.suggestions script position about |> List.map (fun a -> Help.questionText a about) |> String.concat " / ")
+    let sw = Stopwatch.StartNew()
+    let mutable first = 0L
+    let turn =
+        (Help.ask settings script k [] position about ask (fun t -> if first = 0L && t <> "" then first <- sw.ElapsedMilliseconds) Threading.CancellationToken.None).Result
+    printfn "Q: %s\n\n%s\n\nSHOW: %A\nNEXT: %A\n(first text %d ms, done %d ms; prompt %d chars)" turn.Question turn.Answer turn.Show turn.Followups first sw.ElapsedMilliseconds
+        (Help.messages settings script k [] position about turn.Question |> List.sumBy (fun (_, t) -> t.Length))
+    0
+
 [<EntryPoint>]
 let main argv =
+    if argv.[0] = "--ask" then askMode argv else
     let pdf = argv.[0]
     let opt name = argv |> Array.tryFindIndex ((=) name) |> Option.map (fun i -> argv.[i + 1])
     if argv |> Array.contains "--lines" then Layout.trace <- Some(fun s -> printfn "%s" s)

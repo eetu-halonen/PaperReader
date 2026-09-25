@@ -199,6 +199,65 @@ type DesktopPdf(path: string) =
             with _ -> ()
 
 // ---------------------------------------------------------------------------------------------
+// Microphone
+// ---------------------------------------------------------------------------------------------
+
+/// Records a spoken question with ffmpeg from the default PulseAudio/PipeWire source (16 kHz mono WAV).
+type FfmpegRecorder(exe: string, dir: string) =
+    let file = Path.Combine(dir, "question.wav")
+    let mutable current: Process = null
+    let errors = Text.StringBuilder()
+
+    let quit (p: Process) =
+        try
+            p.StandardInput.Write "q"
+            p.StandardInput.Flush()
+        with _ -> ()
+
+    let kill () =
+        match current with
+        | null -> ()
+        | p ->
+            (try if not p.HasExited then p.Kill() with _ -> ())
+            p.Dispose()
+            current <- null
+
+    interface IRecorder with
+        member _.Start() =
+            task {
+                kill ()
+                Directory.CreateDirectory dir |> ignore
+                errors.Clear() |> ignore
+                let psi = ProcessStartInfo(exe, UseShellExecute = false, RedirectStandardInput = true, RedirectStandardError = true)
+                for a in [ "-hide_banner"; "-loglevel"; "error"; "-f"; "pulse"; "-i"; "default"; "-ac"; "1"; "-ar"; "16000"; "-y"; file ] do
+                    psi.ArgumentList.Add a
+                let p = Process.Start psi
+                p.ErrorDataReceived.Add(fun e -> if not (isNull e.Data) then lock errors (fun () -> errors.AppendLine e.Data |> ignore))
+                p.BeginErrorReadLine()
+                current <- p
+                // a missing or busy source fails right away
+                do! Task.Delay 300
+                if p.HasExited then
+                    current <- null
+                    let e = (lock errors (fun () -> errors.ToString())).Trim()
+                    failwith (if e = "" then "no microphone found" else e)
+            }
+
+        member _.Stop() =
+            task {
+                match current with
+                | null -> return failwith "not recording"
+                | p ->
+                    // "q" makes ffmpeg finish the file properly
+                    quit p
+                    let! _ = Task.WhenAny(p.WaitForExitAsync(), Task.Delay 3000)
+                    kill ()
+                    return File.ReadAllBytes file, "question.wav"
+            }
+
+        member _.Cancel() = kill ()
+
+// ---------------------------------------------------------------------------------------------
 // Platform
 // ---------------------------------------------------------------------------------------------
 
@@ -209,6 +268,8 @@ type DesktopPlatform() =
     let speech =
         Tools.find "espeak-ng"
         |> Option.map (fun exe -> EspeakEngine(exe, Path.Combine(Path.GetTempPath(), "paperreader-tts")) :> Synth.ISpeechEngine)
+    let recorder =
+        Tools.find "ffmpeg" |> Option.map (fun exe -> FfmpegRecorder(exe, Path.Combine(Path.GetTempPath(), "paperreader-mic")) :> IRecorder)
     let pending = ConcurrentQueue<string * string>()
     let mutable handler: (string * string -> unit) option = None
 
@@ -235,6 +296,7 @@ type DesktopPlatform() =
         member _.OpenPdf(pdf) = new DesktopPdf(pdf) :> IPdfPages
         member _.SystemSpeech = speech
         member _.Player = player :> IAudioPlayer
+        member _.Recorder = recorder
         member _.KeepScreenOn(_) = ()
         member _.SetPlayback(_, _, _) = ()
         member _.EndPlayback() = ()

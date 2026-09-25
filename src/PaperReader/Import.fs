@@ -34,6 +34,8 @@ let private runOcr (settings: Settings) (pdf: string) (visuals: Visual[]) (ct: C
         try
             let! pages = Mistral.ocr settings.MistralApiKey "application/pdf" (File.ReadAllBytes pdf) ct
             let sizes = Layout.pageSizes pdf
+            // the text is kept for answering questions about the paper (Ask)
+            File.WriteAllText(Path.Combine(Path.GetDirectoryName pdf, "paper.md"), Help.paperText pages)
             return Ok(Ocr.refine pages sizes visuals, Ocr.figures pages sizes)
         with
         | :? OperationCanceledException -> return raise (OperationCanceledException())

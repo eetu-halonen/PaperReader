@@ -48,6 +48,7 @@ type MainView() as this =
                         | Input.Key.Space when not typing -> Some State.TogglePlay
                         | Input.Key.Left when not typing -> Some State.Back15
                         | Input.Key.Right when not typing -> Some State.Forward15
+                        | Input.Key.A when not typing && e.KeyModifiers = Input.KeyModifiers.None -> Some(State.OpenHelp None)
                         | Input.Key.Escape when Views.canGoBack -> Some State.BackPressed
                         | _ -> None
                     match msg, dispatch with

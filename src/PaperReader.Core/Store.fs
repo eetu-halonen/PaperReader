@@ -51,6 +51,15 @@ type Paths(root: string) =
     member this.Image(id, visualId: string) = Path.Combine(this.Images id, visualId + ".png")
     member this.AudioDir(id, voiceKey: string) = Path.Combine(this.Paper id, "audio", voiceKey)
     member this.Audio(id, voiceKey, index: int) = Path.Combine(this.AudioDir(id, voiceKey), sprintf "%05d.wav" index)
+    /// The paper's full text as Mistral OCR read it (markdown with LaTeX), the source for answering questions.
+    member this.PaperText(id) = Path.Combine(this.Paper id, "paper.md")
+    member this.HelpDir(id) = Path.Combine(this.Paper id, "help")
+    /// Questions asked about the paper and their answers.
+    member this.HelpLog(id) = Path.Combine(this.HelpDir id, "turns.json")
+    /// Detailed descriptions of the figures (made once with a vision model), since the answering model can't see images.
+    member this.FigureNotes(id) = Path.Combine(this.HelpDir id, "figures.json")
+    /// The answer being read aloud, a few sentences per clip.
+    member this.AnswerAudio(id, part: int) = Path.Combine(this.HelpDir id, sprintf "answer-%d.wav" part)
 
 let paperId (pdfPath: string) =
     use fs = File.OpenRead pdfPath
@@ -72,6 +81,8 @@ let saveSettings (p: Paths) (s: Settings) =
         w.WriteNumber("speed", s.Speed)
         w.WriteBoolean("stopAtEquations", s.StopAtEquations)
         w.WriteBoolean("stopAtFigures", s.StopAtFigures)
+        w.WriteString("helpModel", s.HelpModel)
+        w.WriteString("aboutMe", s.AboutMe)
         w.WriteEndObject())
 
 let loadSettings (p: Paths) : Settings =
@@ -87,7 +98,9 @@ let loadSettings (p: Paths) : Settings =
           VoiceName = str e "voiceName" def.VoiceName
           Speed = num e "speed" def.Speed
           StopAtEquations = boolean e "stopAtEquations" def.StopAtEquations
-          StopAtFigures = boolean e "stopAtFigures" def.StopAtFigures }
+          StopAtFigures = boolean e "stopAtFigures" def.StopAtFigures
+          HelpModel = str e "helpModel" def.HelpModel
+          AboutMe = str e "aboutMe" def.AboutMe }
     with _ -> Settings.defaults
 
 // ---- paper metadata (library entry + listening position)
@@ -261,4 +274,53 @@ let loadScript (p: Paths) (id: string) : Script option =
                           Page = int (num g "page" 0.0)
                           PauseAfterMs = int (num g "pause" 0.0) })
                     |> Array.ofSeq }
+    with _ -> None
+
+// ---- questions and answers
+
+let saveHelp (p: Paths) (id: string) (turns: HelpTurn list) =
+    Directory.CreateDirectory(p.HelpDir id) |> ignore
+    writeAtomic (p.HelpLog id) (fun w ->
+        w.WriteStartArray()
+        for t in turns do
+            w.WriteStartObject()
+            w.WriteString("q", t.Question)
+            w.WriteString("a", t.Answer)
+            w.WriteNumber("segment", t.Segment)
+            t.About |> Option.iter (fun v -> w.WriteString("about", v))
+            t.Show |> Option.iter (fun v -> w.WriteString("show", v))
+            w.WriteStartArray "next"
+            for f in t.Followups do w.WriteStringValue f
+            w.WriteEndArray()
+            w.WriteString("utc", t.AskedUtc.ToString("o"))
+            w.WriteEndObject()
+        w.WriteEndArray())
+
+let loadHelp (p: Paths) (id: string) : HelpTurn list =
+    try
+        use d = JsonDocument.Parse(File.ReadAllText(p.HelpLog id))
+        [ for e in d.RootElement.EnumerateArray() ->
+              { Question = str e "q" ""
+                Answer = str e "a" ""
+                Segment = int (num e "segment" 0.0)
+                About = optStr e "about"
+                Show = optStr e "show"
+                Followups =
+                    match e.TryGetProperty "next" with
+                    | true, a when a.ValueKind = JsonValueKind.Array -> [ for f in a.EnumerateArray() -> f.GetString() ]
+                    | _ -> []
+                AskedUtc = (match DateTime.TryParse(str e "utc" "") with | true, t -> t.ToUniversalTime() | _ -> DateTime.UtcNow) } ]
+    with _ -> []
+
+let saveFigureNotes (p: Paths) (id: string) (notes: Map<string, string>) =
+    Directory.CreateDirectory(p.HelpDir id) |> ignore
+    writeAtomic (p.FigureNotes id) (fun w ->
+        w.WriteStartObject()
+        for KeyValue (k, v) in notes do w.WriteString(k, v)
+        w.WriteEndObject())
+
+let loadFigureNotes (p: Paths) (id: string) : Map<string, string> option =
+    try
+        use d = JsonDocument.Parse(File.ReadAllText(p.FigureNotes id))
+        Some(d.RootElement.EnumerateObject() |> Seq.map (fun e -> e.Name, e.Value.GetString()) |> Map.ofSeq)
     with _ -> None

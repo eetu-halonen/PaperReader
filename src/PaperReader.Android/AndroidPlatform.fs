@@ -215,8 +215,79 @@ module Incoming =
         handler <- Some h
         flush ()
 
+/// Runtime permission requests, answered by the activity's OnRequestPermissionsResult.
+module Permissions =
+    let private waiting = ConcurrentDictionary<int, TaskCompletionSource<bool>>()
+    let mutable private next = 100
+
+    /// Asks for a permission unless it was already given.
+    let ensure (activity: Android.App.Activity) (permission: string) : Task<bool> =
+        if isNull activity then Task.FromResult false
+        elif activity.CheckSelfPermission permission = Android.Content.PM.Permission.Granted then Task.FromResult true
+        else
+            let code = Interlocked.Increment &next
+            let tcs = TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously)
+            waiting.[code] <- tcs
+            activity.RunOnUiThread(fun () -> activity.RequestPermissions([| permission |], code))
+            tcs.Task
+
+    let answered (code: int) (granted: bool) =
+        match waiting.TryRemove code with
+        | true, tcs -> tcs.TrySetResult granted |> ignore
+        | _ -> ()
+
+// ---------------------------------------------------------------------------------------------
+// Microphone
+// ---------------------------------------------------------------------------------------------
+
+/// Records a spoken question as AAC in an .m4a file.
+type AndroidRecorder(context: Context, activity: unit -> Android.App.Activity) =
+    let file = Path.Combine(context.CacheDir.AbsolutePath, "question.m4a")
+    let mutable current: MediaRecorder = null
+
+    let release () =
+        match current with
+        | null -> ()
+        | r ->
+            current <- null
+            (try r.Stop() with _ -> ())
+            r.Release()
+
+    interface IRecorder with
+        member _.Start() =
+            task {
+                let! allowed = Permissions.ensure (activity ()) Android.Manifest.Permission.RecordAudio
+                if not allowed then failwith "the app isn't allowed to use it. Allow the microphone in the app's settings."
+                release ()
+                let r = if Build.VERSION.SdkInt >= BuildVersionCodes.S then new MediaRecorder(context) else new MediaRecorder()
+                r.SetAudioSource AudioSource.Mic
+                r.SetOutputFormat OutputFormat.Mpeg4
+                r.SetAudioEncoder AudioEncoder.Aac
+                r.SetAudioChannels 1
+                r.SetAudioSamplingRate 16000
+                r.SetAudioEncodingBitRate 48000
+                r.SetOutputFile file
+                r.Prepare()
+                r.Start()
+                current <- r
+            }
+
+        member _.Stop() =
+            task {
+                match current with
+                | null -> return failwith "not recording"
+                | r ->
+                    current <- null
+                    r.Stop()
+                    r.Release()
+                    return File.ReadAllBytes file, "question.m4a"
+            }
+
+        member _.Cancel() = release ()
+
 type AndroidPlatform(context: Context) =
     let player = AndroidPlayer()
+    let recorder = AndroidRecorder(context, (fun () -> AndroidPlatform.Activity)) :> IRecorder
     let speech = lazy (SystemSpeech(context) :> Synth.ISpeechEngine)
 
     /// The visible activity, for window flags.
@@ -229,6 +300,7 @@ type AndroidPlatform(context: Context) =
 
         member _.SystemSpeech = Some speech.Value
         member _.Player = player :> IAudioPlayer
+        member _.Recorder = Some recorder
 
         member _.KeepScreenOn(on) =
             match AndroidPlatform.Activity with
