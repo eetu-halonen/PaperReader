@@ -38,6 +38,24 @@ type MainView() as this =
                 if Views.canGoBack then
                     args.Handled <- true
                     dispatch |> Option.iter (fun d -> d State.BackPressed))
+            // keyboard: space play/pause, arrows 15 s, Escape back (not while typing in a text box)
+            top.AddHandler(
+                Input.InputElement.KeyDownEvent,
+                (fun _ (e: Input.KeyEventArgs) ->
+                    let typing = e.Source :? TextBox
+                    let msg =
+                        match e.Key with
+                        | Input.Key.Space when not typing -> Some State.TogglePlay
+                        | Input.Key.Left when not typing -> Some State.Back15
+                        | Input.Key.Right when not typing -> Some State.Forward15
+                        | Input.Key.Escape when Views.canGoBack -> Some State.BackPressed
+                        | _ -> None
+                    match msg, dispatch with
+                    | Some m, Some d ->
+                        e.Handled <- true
+                        d m
+                    | _ -> ()),
+                Interactivity.RoutingStrategies.Tunnel)
             // Avalonia keeps the content clear of the status and navigation bars itself
 
 type App() =
@@ -50,6 +68,6 @@ type App() =
     override this.OnFrameworkInitializationCompleted() =
         match this.ApplicationLifetime with
         | :? ISingleViewApplicationLifetime as single -> single.MainView <- MainView()
-        | :? IClassicDesktopStyleApplicationLifetime as desktop -> desktop.MainWindow <- HostWindow(Content = MainView(), Width = 420.0, Height = 860.0)
+        | :? IClassicDesktopStyleApplicationLifetime as desktop -> desktop.MainWindow <- HostWindow(Content = MainView(), Title = "Paper Reader", Width = 480.0, Height = 860.0, MinWidth = 360.0, MinHeight = 560.0)
         | _ -> ()
         base.OnFrameworkInitializationCompleted()

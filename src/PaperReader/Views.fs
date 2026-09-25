@@ -207,7 +207,7 @@ let private keyHint (dispatch: Msg -> unit) : IView =
                 StackPanel.spacing 10.0
                 StackPanel.children [
                     label "Add your Mistral API key for the best experience" 15.0 Palette.text
-                    label "Mistral rewrites the paper for listening, explains every equation out loud, and reads it with a natural voice. Without a key, the phone's own voice reads the text directly." 13.0 Palette.muted
+                    label "Mistral rewrites the paper for listening, explains every equation out loud, and reads it with a natural voice. Without a key, the device's own voice reads the text directly." 13.0 Palette.muted
                     StackPanel.create [
                         StackPanel.orientation Orientation.Horizontal
                         StackPanel.children [ pill "Open settings" (fun () -> dispatch (SetShowSettings true)) false ]
@@ -290,7 +290,7 @@ let private libraryView (model: Model) (dispatch: Msg -> unit) : IView =
                                             TextBlock.horizontalAlignment HorizontalAlignment.Center
                                         ]
                                         TextBlock.create [
-                                            TextBlock.text "Open a PDF, or share one to Paper Reader from another app. It is prepared once and kept on the phone, so it opens instantly afterwards."
+                                            TextBlock.text "Open a PDF, or share one to Paper Reader from another app. It is prepared once and kept on this device, so it opens instantly afterwards."
                                             TextBlock.fontSize 14.0
                                             TextBlock.foreground Palette.muted
                                             TextBlock.textWrapping TextWrapping.Wrap
@@ -340,7 +340,7 @@ let private importingView (s: ImportState) (dispatch: Msg -> unit) : IView =
                 | None -> ProgressBar.isIndeterminate true
             ]
             label s.Step 15.0 Palette.text
-            label "This happens once. The narration, equation images and voice are cached on the phone." 13.0 Palette.faint
+            label "This happens once. The narration, equation images and voice are cached on this device." 13.0 Palette.faint
             StackPanel.create [
                 StackPanel.orientation Orientation.Horizontal
                 StackPanel.children [ pill "Cancel" (fun () -> dispatch CancelImport) false ]
@@ -547,7 +547,7 @@ let private controls (model: Model) (r: ReaderState) (dispatch: Msg -> unit) : I
                                         StackPanel.orientation Orientation.Horizontal
                                         StackPanel.spacing 8.0
                                         StackPanel.children [
-                                            pill "Use the phone's voice" (fun () -> dispatch UsePhoneVoice) false
+                                            pill "Use the device's voice" (fun () -> dispatch UsePhoneVoice) false
                                             pill "Settings" (fun () -> dispatch (SetShowSettings true)) false
                                         ]
                                     ]
@@ -862,7 +862,7 @@ let private settingsView (model: Model) (dispatch: Msg -> unit) : IView =
                                         TextBox.fontSize 15.0
                                         TextBox.onTextChanged ((fun t -> if t <> model.Settings.MistralApiKey then dispatch (SetApiKey t)), SubPatchOptions.OnChangeOf s.MistralApiKey)
                                     ]
-                                    label "Stored only on this phone and sent only to api.mistral.ai." 12.0 Palette.faint
+                                    label "Stored only on this device and sent only to api.mistral.ai." 12.0 Palette.faint
                                     toggle "Explain with Mistral" "A Mistral model rewrites each paper for listening: it reads formulas the way a lecturer would, walks through every equation and algorithm, and removes citation clutter." s.UseMistralNarration (SetNarration >> dispatch)
                                     label "Model" 14.0 Palette.muted
                                     TextBox.create [
@@ -871,7 +871,7 @@ let private settingsView (model: Model) (dispatch: Msg -> unit) : IView =
                                         TextBox.onTextChanged ((fun t -> if t <> model.Settings.NarrationModel then dispatch (SetNarrationModel t)), SubPatchOptions.OnChangeOf s.NarrationModel)
                                     ]
                                     label "mistral-medium-latest works well; mistral-large-latest is more thorough, mistral-small-latest is faster. Applies to papers you add next." 12.0 Palette.faint
-                                    toggle "Mistral voice" "Read aloud with Voxtral. Off: the phone's own text-to-speech voice." s.UseMistralVoice (SetMistralVoice >> dispatch)
+                                    toggle "Mistral voice" "Read aloud with Voxtral. Off: the device's own text-to-speech voice." s.UseMistralVoice (SetMistralVoice >> dispatch)
                                     if s.UseMistralVoice then
                                         sectionTitle "VOICE"
                                         Grid.create [

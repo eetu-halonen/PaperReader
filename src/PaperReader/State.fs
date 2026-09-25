@@ -115,7 +115,7 @@ let private startSynth (r: ReaderState) (settings: Settings) : Cmd<Msg> =
     Cmd.ofEffect (fun dispatch ->
         stopSynth ()
         match engineFor settings with
-        | None -> dispatch (ClipFailed(r.Paper.Id, r.Current, "This phone has no text-to-speech engine. Add a Mistral API key in Settings."))
+        | None -> dispatch (ClipFailed(r.Paper.Id, r.Current, "No offline text-to-speech engine was found. Add a Mistral API key in Settings (or install espeak-ng on Linux)."))
         | Some engine ->
             let p = paths ()
             let paperId = r.Paper.Id

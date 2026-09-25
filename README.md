@@ -23,6 +23,7 @@ Written in F# with Avalonia, FuncUI and Elmish, for .NET 10.
 | `src/PaperReader.Core` | Everything without UI: PDF layout analysis (PdfPig), math verbalisation, narration, Mistral client, WAV cache |
 | `src/PaperReader` | The shared Elmish UI |
 | `src/PaperReader.Android` | Android head: audio player, phone TTS, PDF crops, playback service |
+| `src/PaperReader.Desktop` | Linux desktop head: ffplay audio, pdftoppm crops, optional espeak-ng |
 | `tools/ScriptDump` | Desktop tool that analyses a PDF and prints the narration, for tuning the layout rules |
 | `tests/PaperReader.Core.Tests` | Unit tests |
 
@@ -45,10 +46,25 @@ adb install -r bin/Release/net10.0-android/app.paperreader-Signed.apk
 The APK is signed with the debug key. To publish it, sign it with your own keystore
 (`-p:AndroidKeyStore=true -p:AndroidSigningKeyStore=... -p:AndroidSigningKeyAlias=...`).
 
+## Linux desktop
+
+Needs `pdftoppm` (poppler-utils) and `ffplay` (ffmpeg); `espeak-ng` is used as the offline voice
+when there is no Mistral key.
+
+```bash
+src/PaperReader.Desktop/install.sh
+```
+
+This publishes a self-contained build to `dist/linux-x64/paper-reader` and adds *Paper Reader*
+to the application menu and to *Open with* for PDFs. It can also be started directly:
+`dist/linux-x64/paper-reader paper.pdf`. Data lives in `~/.local/share/PaperReader`.
+
+Keys: Space play/pause, ← / → 15 seconds, Esc back.
+
 ## Mistral
 
 Open *Settings* and paste an API key from [console.mistral.ai](https://console.mistral.ai).
-The key is stored only on the phone and sent only to `api.mistral.ai`.
+The key is stored only on the device and sent only to `api.mistral.ai`.
 
 - **Explain with Mistral**: narration by a chat model (default `mistral-medium-latest`).
   Applies to papers added after the change.
