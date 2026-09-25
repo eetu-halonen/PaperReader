@@ -417,6 +417,10 @@ let private renderWord (line: Line) (w: Word) =
 
 type private Placed = { Word: Word; Line: Line }
 
+/// A line that opens a figure or table caption: "Figure 3: …", "Fig. 3.", "Table 2 |".
+let private captionStartRx = Regex(@"^\W*(Figure|Fig\.?|Table)\s*[A-Z]?\d+[a-z]?\s*[:.|]", RegexOptions.Compiled)
+let private captionWordRx = Regex(@"^(Figure|Fig\.?|Table)$", RegexOptions.Compiled)
+
 /// Width and height of every page's crop box in points (the space PageRect coordinates live in).
 let pageSizes (path: string) : (float * float)[] =
     use doc = PdfDocument.Open(path)
@@ -693,7 +697,7 @@ let analyze (path: string) (progress: int -> int -> unit) : Analysis =
                     { Id = id; Kind = UnitKind.Sentence; Text = text; Spoken = spoken; Visual = visual
                       Page = (List.head words).Line.Page; Section = section; ParagraphEnd = paragraphEnd }
 
-    let flushParagraph (paragraphEnd: bool) =
+    let flushBody (paragraphEnd: bool) =
         if para.Count > 0 then
             // join hyphenated line breaks
             let merged = ResizeArray<Placed>()
@@ -721,11 +725,23 @@ let analyze (path: string) (progress: int -> int -> unit) : Analysis =
                 current.Add merged.[i]
                 let next = if i + 1 < merged.Count then merged.[i + 1].Word.Text else ""
                 let tooLong = current.Count >= 70 && (merged.[i].Word.Text.EndsWith ";" || merged.[i].Word.Text.EndsWith ",")
-                if (next <> "" && SpeechText.endsSentence merged.[i].Word.Text next) || tooLong then
+                // "Figure 1." / "Table 2." opening a caption is a label, not a sentence
+                let label = current.Count = 2 && captionWordRx.IsMatch current.[0].Word.Text
+                if not label && ((next <> "" && SpeechText.endsSentence merged.[i].Word.Text next) || tooLong) then
                     emitSentence (List.ofSeq current) false
                     current.Clear()
             emitSentence (List.ofSeq current) paragraphEnd
             para.Clear()
+
+    // Captions interrupt a column's text wherever the figure sits. They are collected separately so the
+    // paragraph around them stays whole, and read after it.
+    let captions = ResizeArray<ResizeArray<Placed>>()
+    let flushParagraph (paragraphEnd: bool) =
+        flushBody paragraphEnd
+        for c in captions do
+            para.AddRange c
+            flushBody true
+        captions.Clear()
 
     let textRight =
         classified
@@ -741,6 +757,7 @@ let analyze (path: string) (progress: int -> int -> unit) : Analysis =
         |> dict
 
     let mutable prevText: Line option = None
+    let mutable captionLine: Line option = None // the last line of the caption being collected
     let mutable skipping = false // inside the references section
     let mutable i = 0
     let n = classified.Length
@@ -879,7 +896,21 @@ let analyze (path: string) (progress: int -> int -> unit) : Analysis =
                     prevText <- None
                 i <- j
             | LineKind.Fragment -> i <- i + 1
+            | _ when captionStartRx.IsMatch l.Text ->
+                captions.Add(ResizeArray(l.Words |> Seq.map (fun w -> { Word = w; Line = l })))
+                captionLine <- Some l
+                i <- i + 1
+            | _ when (match captionLine with
+                      | Some c ->
+                          c.Page = l.Page && c.Region = l.Region && abs (c.Size - l.Size) < 0.3
+                          && c.Baseline - l.Baseline > 0.0 && c.Baseline - l.Baseline < body * 1.9
+                      | None -> false) ->
+                // the caption continues: same size, right below
+                captions.[captions.Count - 1].AddRange(l.Words |> Seq.map (fun w -> { Word = w; Line = l }))
+                captionLine <- Some l
+                i <- i + 1
             | _ ->
+                captionLine <- None
                 // text line: decide whether it starts a new paragraph
                 match prevText with
                 | Some p ->

@@ -71,6 +71,7 @@ let saveSettings (p: Paths) (s: Settings) =
         w.WriteString("voiceName", s.VoiceName)
         w.WriteNumber("speed", s.Speed)
         w.WriteBoolean("stopAtEquations", s.StopAtEquations)
+        w.WriteBoolean("stopAtFigures", s.StopAtFigures)
         w.WriteEndObject())
 
 let loadSettings (p: Paths) : Settings =
@@ -85,7 +86,8 @@ let loadSettings (p: Paths) : Settings =
           VoiceId = str e "voiceId" def.VoiceId
           VoiceName = str e "voiceName" def.VoiceName
           Speed = num e "speed" def.Speed
-          StopAtEquations = boolean e "stopAtEquations" def.StopAtEquations }
+          StopAtEquations = boolean e "stopAtEquations" def.StopAtEquations
+          StopAtFigures = boolean e "stopAtFigures" def.StopAtFigures }
     with _ -> Settings.defaults
 
 // ---- paper metadata (library entry + listening position)
@@ -176,7 +178,12 @@ let saveScript (p: Paths) (id: string) (s: Script) =
         for v in s.Visuals do
             w.WriteStartObject()
             w.WriteString("id", v.Id)
-            w.WriteString("kind", (match v.Kind with VisualKind.Equation -> "equation" | VisualKind.Algorithm -> "algorithm" | VisualKind.Inline -> "inline"))
+            w.WriteString("kind", (match v.Kind with
+                                   | VisualKind.Equation -> "equation"
+                                   | VisualKind.Algorithm -> "algorithm"
+                                   | VisualKind.Figure -> "figure"
+                                   | VisualKind.Table -> "table"
+                                   | VisualKind.Inline -> "inline"))
             w.WriteStartArray "parts"
             for r in v.Parts do
                 w.WriteStartObject()
@@ -230,7 +237,12 @@ let loadScript (p: Paths) (id: string) : Script option =
                   Visuals =
                     [| for v in e.GetProperty("visuals").EnumerateArray() ->
                            { Id = str v "id" ""
-                             Kind = (match str v "kind" "" with "equation" -> VisualKind.Equation | "algorithm" -> VisualKind.Algorithm | _ -> VisualKind.Inline)
+                             Kind = (match str v "kind" "" with
+                                     | "equation" -> VisualKind.Equation
+                                     | "algorithm" -> VisualKind.Algorithm
+                                     | "figure" -> VisualKind.Figure
+                                     | "table" -> VisualKind.Table
+                                     | _ -> VisualKind.Inline)
                              Parts =
                                [| for r in v.GetProperty("parts").EnumerateArray() ->
                                       { Page = int (num r "page" 0.0); X = num r "x" 0.0; Y = num r "y" 0.0; W = num r "w" 0.0; H = num r "h" 0.0 } |]

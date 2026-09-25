@@ -16,6 +16,10 @@ type VisualKind =
     | Inline
     /// A pseudo-code listing ("Algorithm 1: ...").
     | Algorithm
+    /// A figure (chart, diagram, photo) with its caption, found by Mistral OCR.
+    | Figure
+    /// A table with its caption, found by Mistral OCR.
+    | Table
 
 /// An image cut out of the PDF and shown while the related narration plays.
 type Visual =
@@ -23,7 +27,7 @@ type Visual =
       Kind: VisualKind
       /// Regions of one page, shown stacked top to bottom (inline math is cut into its fragments).
       Parts: PageRect[]
-      /// Equation (or algorithm) number as printed in the paper, e.g. "3" or "A.2".
+      /// Number as printed in the paper (equation, algorithm, figure or table), e.g. "3" or "A.2".
       EqNumber: string option
       /// Text extracted from the region (garbled for math, but useful context for the narrator).
       RawText: string
@@ -119,7 +123,9 @@ type Settings =
       VoiceName: string
       Speed: float
       /// Pause after an equation has been read and explained, until the listener continues.
-      StopAtEquations: bool }
+      StopAtEquations: bool
+      /// The same for figures and tables, after they are first shown and discussed.
+      StopAtFigures: bool }
 
 module Settings =
     let defaults =
@@ -130,7 +136,8 @@ module Settings =
           VoiceId = "en_paul_neutral"
           VoiceName = "Paul - Neutral"
           Speed = 1.0
-          StopAtEquations = false }
+          StopAtEquations = false
+          StopAtFigures = false }
 
     let hasKey (s: Settings) = not (System.String.IsNullOrWhiteSpace s.MistralApiKey)
 

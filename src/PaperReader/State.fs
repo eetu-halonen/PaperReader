@@ -88,6 +88,7 @@ type Msg =
     | ZoomVisual of string
     | ToggleEquations
     | SetStopAtEquations of bool
+    | SetStopAtFigures of bool
     | SetShowSettings of bool
     | SetApiKey of string
     | SetNarration of bool
@@ -232,6 +233,15 @@ let private currentPosition (r: ReaderState) : Timeline.Position =
 // Init and update
 // ---------------------------------------------------------------------------------------------
 
+/// True when the clip that just ended finishes explaining an equation or figure the listener wants to stop at.
+let private stopsHere (settings: Settings) (r: ReaderState) =
+    match r.Stops.TryFind r.Current |> Option.bind r.Script.Visual with
+    | Some v ->
+        match v.Kind with
+        | VisualKind.Figure | VisualKind.Table -> settings.StopAtFigures
+        | _ -> settings.StopAtEquations
+    | None -> false
+
 let init () : Model * Cmd<Msg> =
     let settings = try Store.loadSettings (paths ()) with _ -> Settings.defaults
     { Screen = Screen.Library
@@ -344,7 +354,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         { model with Papers = loadLibrary (); ConfirmDelete = None }, Cmd.none
 
     // ----- reader
-    | OpenPaper paper when Import.needsRefresh (paths ()) paper.Id ->
+    | OpenPaper paper when Import.needsRefresh model.Settings (paths ()) paper.Id ->
         // images from an older version: redraw them first (with an OCR check when a key is set)
         let p = paths ()
         let settings = model.Settings
@@ -369,7 +379,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                 |> ignore)
         { model with
             ConfirmDelete = None
-            Screen = Screen.Importing { Id = importId; Name = paper.Title; Step = "Updating the equation images"; Progress = None; Cancel = new CancellationTokenSource() } },
+            Screen = Screen.Importing { Id = importId; Name = paper.Title; Step = "Updating the equations and figures"; Progress = None; Cancel = new CancellationTokenSource() } },
         work
     | OpenPaper paper ->
         let model = { model with ConfirmDelete = None }
@@ -449,7 +459,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
     | ClipEnded gen ->
         withReader model (fun r ->
             if gen <> r.Generation || not r.Playing then r, Cmd.none
-            elif model.Settings.StopAtEquations && r.Stops.ContainsKey r.Current && r.Current + 1 < r.Script.Segments.Length then
+            elif stopsHere model.Settings r && r.Current + 1 < r.Script.Segments.Length then
                 // the equation has been read and explained: keep it up and wait for the listener
                 let r =
                     { r with
@@ -515,6 +525,9 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         { model with Settings = settings }, saveSettings settings
     | SetNarrationModel m ->
         let settings = { model.Settings with NarrationModel = (if String.IsNullOrWhiteSpace m then Settings.defaults.NarrationModel else m.Trim()) }
+        { model with Settings = settings }, saveSettings settings
+    | SetStopAtFigures on ->
+        let settings = { model.Settings with StopAtFigures = on }
         { model with Settings = settings }, saveSettings settings
     | SetStopAtEquations on ->
         let settings = { model.Settings with StopAtEquations = on }

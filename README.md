@@ -4,7 +4,7 @@ An Android app that reads research papers (PDF) aloud and shows the math on scre
 
 - Open a PDF from the app, or use *Open with* / *Share* from any other app.
 - The paper is analysed once: reading order, two-column layout, headings, display equations,
-  algorithms and inline math. Citations, headers, footers and tables are skipped.
+  algorithms and inline math. Citations, headers and footers are skipped.
 - Equations are cut out of the page as images and shown while the narration talks about them.
 - With a Mistral API key, a Mistral chat model rewrites the paper for listening (it sees the
   equation images) and Voxtral reads it aloud. Without one, an offline narration and the
@@ -14,10 +14,13 @@ An Android app that reads research papers (PDF) aloud and shows the math on scre
   edge, and with a Mistral key every display equation is read by Mistral OCR, which also corrects crops
   that miss part of an equation. An equation that still can't be cut out whole is typeset from the OCR'd
   LaTeX instead (CSharpMath).
-- *Stop at equations* (Settings): after an equation or algorithm has been read and explained, playback
-  pauses with it on screen until you tap Continue (or *Hear it again*).
-- The Σ button lists every equation: the ones heard so far (latest first) and the ones coming up, each
-  with *Listen from here*; tap one to see it full size.
+- Figures and tables (with a Mistral key): Mistral OCR finds each figure, chart and table with its caption,
+  and it is cut out whole. The caption is read where it sits, followed by a short description of the
+  picture, and the image is on screen then and whenever the text refers to it ("see Fig. 3", "Table 2").
+- *Stop at equations* / *Stop at figures and tables* (Settings): after one has been read and explained,
+  playback pauses with it on screen until you tap Continue (or *Hear it again*).
+- The Σ button lists every equation, figure and table: the ones heard so far (latest first) and the ones
+  coming up, each with *Listen from here*; tap one to see it full size.
 - Controls: play/pause, back and forward 15 s, speed, contents list. Playback continues in the
   background, with a media notification, lock-screen and headset controls; it pauses for calls
   and when headphones are unplugged.
@@ -84,12 +87,15 @@ The key is stored only on the device and sent only to `api.mistral.ai`.
 ```bash
 dotnet run --project tools/ScriptDump -- paper.pdf --lines            # line classes
 dotnet run --project tools/ScriptDump -- paper.pdf --crops /tmp/crops # equation images (needs pdftoppm, ImageMagick)
-MISTRAL_API_KEY=... dotnet run --project tools/ScriptDump -- paper.pdf --mistral mistral-medium-latest
+MISTRAL_API_KEY=... dotnet run --project tools/ScriptDump -- paper.pdf --ocr --crops /tmp/crops --mistral mistral-medium-latest
 ```
 
 ## Limitations
 
 - Scanned (image-only) PDFs are not supported.
-- Figure labels and math-heavy table cells sometimes reach the offline narration.
+- Without a Mistral key there are no figures or tables, and figure labels and table cells sometimes reach
+  the offline narration.
+- Papers narrated before figure support get their figures on the next open, shown when referenced, but
+  their captions are only read aloud after removing and adding the paper again.
 - Occasionally a line that isn't an equation (a table header, a sentence full of symbols) is treated as one.
 - Changing the narration model does not re-narrate papers already added (remove and add them again).

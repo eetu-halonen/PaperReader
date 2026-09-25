@@ -360,6 +360,10 @@ let private visualName (v: Visual) =
     | VisualKind.Equation, Some n when n.Contains "–" -> sprintf "Equations (%s)" n
     | VisualKind.Equation, Some n -> sprintf "Equation (%s)" n
     | VisualKind.Equation, None -> "Equation"
+    | VisualKind.Figure, Some n -> sprintf "Figure %s" n
+    | VisualKind.Figure, None -> "Figure"
+    | VisualKind.Table, Some n -> sprintf "Table %s" n
+    | VisualKind.Table, None -> "Table"
     | VisualKind.Inline, _ -> "From the text"
 
 let private visualCaption (script: Script) (seg: Segment) (v: Visual) =
@@ -764,7 +768,7 @@ let private equationCard (r: ReaderState) (v: Visual) (firstSegment: int) (ahead
                                     Image.source bmp
                                     Image.stretch Stretch.Uniform
                                     Image.maxWidth (float bmp.PixelSize.Width * 0.7)
-                                    Image.maxHeight (min 260.0 (float bmp.PixelSize.Height * 0.7))
+                                    Image.maxHeight (min 420.0 (float bmp.PixelSize.Height * 0.7))
                                     Image.horizontalAlignment HorizontalAlignment.Left
                                 ]
                             | None -> label "(image missing)" 13.0 Palette.ink
@@ -783,7 +787,7 @@ let private equationCard (r: ReaderState) (v: Visual) (firstSegment: int) (ahead
         ]
     ]
 
-/// Every display equation and algorithm: the ones heard so far (latest first), then the ones coming up.
+/// Every display equation, algorithm, figure and table: the ones heard so far (latest first), then the ones coming up.
 let private equationsOverlay (r: ReaderState) (dispatch: Msg -> unit) : IView =
     let order = Narration.equationOrder r.Script
     let heard = order |> Array.filter (fun (_, i) -> i <= r.Current) |> Array.rev
@@ -800,7 +804,7 @@ let private equationsOverlay (r: ReaderState) (dispatch: Msg -> unit) : IView =
                         Grid.children [
                             TextBlock.create [
                                 Grid.column 0
-                                TextBlock.text "Equations"
+                                TextBlock.text "Equations and figures"
                                 TextBlock.fontSize 22.0
                                 TextBlock.fontWeight FontWeight.Bold
                                 TextBlock.foreground Palette.text
@@ -815,7 +819,7 @@ let private equationsOverlay (r: ReaderState) (dispatch: Msg -> unit) : IView =
                                 StackPanel.margin (Thickness(16.0, 0.0, 16.0, 24.0))
                                 StackPanel.spacing 14.0
                                 StackPanel.children [
-                                    if order.Length = 0 then label "This paper has no display equations." 15.0 Palette.muted
+                                    if order.Length = 0 then label "This paper has no display equations, figures or tables." 15.0 Palette.muted
                                     if heard.Length > 0 then sectionLabel "HEARD SO FAR, LATEST FIRST"
                                     for (v, i) in heard do equationCard r v i false dispatch
                                     if ahead.Length > 0 then sectionLabel "COMING UP"
@@ -989,6 +993,7 @@ let private settingsView (model: Model) (dispatch: Msg -> unit) : IView =
                                 StackPanel.children [
                                     sectionTitle "LISTENING"
                                     toggle "Stop at equations" "Pause once an equation or algorithm has been read and explained, with it on screen, until you tap Continue." s.StopAtEquations (SetStopAtEquations >> dispatch)
+                                    toggle "Stop at figures and tables" "The same for figures and tables, after they are first shown and discussed." s.StopAtFigures (SetStopAtFigures >> dispatch)
                                     sectionTitle "MISTRAL AI"
                                     label "API key" 16.0 Palette.text
                                     TextBox.create [
@@ -998,7 +1003,7 @@ let private settingsView (model: Model) (dispatch: Msg -> unit) : IView =
                                         TextBox.fontSize 15.0
                                         TextBox.onTextChanged ((fun t -> if t <> model.Settings.MistralApiKey then dispatch (SetApiKey t)), SubPatchOptions.OnChangeOf s.MistralApiKey)
                                     ]
-                                    label "Stored only on this device and sent only to api.mistral.ai. With a key, every equation is also checked with Mistral OCR, so none is shown cut off." 12.0 Palette.faint
+                                    label "Stored only on this device and sent only to api.mistral.ai. With a key, Mistral OCR also checks every equation (so none is shown cut off) and finds the figures and tables, shown when the text refers to them." 12.0 Palette.faint
                                     toggle "Explain with Mistral" "A Mistral model rewrites each paper for listening: it reads formulas the way a lecturer would, walks through every equation and algorithm, and removes citation clutter." s.UseMistralNarration (SetNarration >> dispatch)
                                     label "Model" 14.0 Palette.muted
                                     TextBox.create [

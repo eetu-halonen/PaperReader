@@ -1,5 +1,5 @@
 /// Development tool: runs the paper analysis and narration on a desktop and prints the result.
-/// Usage: ScriptDump <paper.pdf> [--crops <dir>] [--mistral <model>]   (API key from MISTRAL_API_KEY)
+/// Usage: ScriptDump <paper.pdf> [--crops <dir>] [--ocr] [--mistral <model>]   (API key from MISTRAL_API_KEY)
 open System
 open System.IO
 open System.Diagnostics
@@ -28,6 +28,14 @@ let main argv =
     if argv |> Array.contains "--lines" then Layout.trace <- Some(fun s -> printfn "%s" s)
     let sw = Stopwatch.StartNew()
     let a = Layout.analyze pdf (fun _ _ -> ())
+    // --ocr: Mistral OCR checks the equations and finds figures and tables, as the app's import does
+    let a =
+        if not (argv |> Array.contains "--ocr") then a
+        else
+            let pages = (Mistral.ocr (Environment.GetEnvironmentVariable "MISTRAL_API_KEY") "application/pdf" (File.ReadAllBytes pdf) Threading.CancellationToken.None).Result
+            let sizes = Layout.pageSizes pdf
+            let figures = Ocr.figures pages sizes
+            { a with Visuals = Array.append (Ocr.refine pages sizes a.Visuals) (Array.ofList figures); Units = Ocr.linkCaptions figures a.Units }
     eprintfn "analysed %d pages in %dms: %d units, %d visuals" a.PageCount sw.ElapsedMilliseconds a.Units.Length a.Visuals.Length
     printfn "TITLE: %s" a.Title
     printfn "SECTIONS: %s" (String.Join(" | ", a.Sections))

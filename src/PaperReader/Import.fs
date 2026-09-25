@@ -13,28 +13,32 @@ let private sentenceCount (a: Analysis) =
     a.Units |> Array.filter (fun u -> u.Kind = UnitKind.Sentence) |> Array.length
 
 /// Bumped when the crop renderer changes, so papers imported earlier get their images redrawn.
-let private cropsVersion = 6
+let private cropsVersion = 7
 
 let private cropsMarker (paths: Store.Paths) id = Path.Combine(paths.Images id, sprintf "crops-v%d" cropsVersion)
 
-/// True when a paper's images were made by an older renderer and will be redrawn when it is opened.
-let needsRefresh (paths: Store.Paths) (id: string) =
-    File.Exists(paths.Pdf id) && not (File.Exists(cropsMarker paths id))
+/// Written once Mistral OCR has checked a paper's equations and found its figures and tables.
+let private ocrMarker (paths: Store.Paths) id = Path.Combine(paths.Paper id, "ocr-v1")
 
-/// Reads every display equation with Mistral OCR (one call for the whole PDF), grows crops that would
-/// cut part of an equation off, and records the LaTeX. Without a key, or if OCR fails, returns the visuals as they are.
-let private checkWithOcr (settings: Settings) (pdf: string) (visuals: Visual[]) (ct: CancellationToken) : Task<Visual[] * string option> =
+/// True when opening the paper has work to do first: images from an older renderer, or (with a key)
+/// the OCR check and figures, which papers imported before didn't get.
+let needsRefresh (settings: Settings) (paths: Store.Paths) (id: string) =
+    File.Exists(paths.Pdf id)
+    && (not (File.Exists(cropsMarker paths id)) || (Settings.hasKey settings && not (File.Exists(ocrMarker paths id))))
+
+/// Reads the paper with Mistral OCR (one call for the whole PDF): grows equation crops that would cut part
+/// of an equation off, records their LaTeX, and finds the figures and tables with their captions.
+let private runOcr (settings: Settings) (pdf: string) (visuals: Visual[]) (ct: CancellationToken)
+    : Task<Result<Visual[] * Visual list, string>> =
     task {
-        if not (Settings.hasKey settings) || not (visuals |> Array.exists (fun v -> v.Kind = VisualKind.Equation)) then
-            return visuals, None
-        else
-            try
-                let! pages = Mistral.ocr settings.MistralApiKey "application/pdf" (File.ReadAllBytes pdf) ct
-                return Ocr.refine pages (Layout.pageSizes pdf) visuals, None
-            with
-            | :? OperationCanceledException -> return raise (OperationCanceledException())
-            | Mistral.MistralError(_, m) -> return visuals, Some("the equation check with Mistral OCR failed: " + m)
-            | e -> return visuals, Some("the equation check with Mistral OCR failed: " + e.Message)
+        try
+            let! pages = Mistral.ocr settings.MistralApiKey "application/pdf" (File.ReadAllBytes pdf) ct
+            let sizes = Layout.pageSizes pdf
+            return Ok(Ocr.refine pages sizes visuals, Ocr.figures pages sizes)
+        with
+        | :? OperationCanceledException -> return raise (OperationCanceledException())
+        | Mistral.MistralError(_, m) -> return Error m
+        | e -> return Error e.Message
     }
 
 /// OCR of one cut-off crop, for typesetting it instead. Inline crops hold only formula pieces, so all
@@ -67,23 +71,32 @@ let private renderCrops (platform: IPlatform) (settings: Settings) (paths: Store
         return outcomes
     }
 
-/// Redraws a paper's images if they were made by an older renderer, checking its equations with OCR first
-/// when a key is set. Returns the script, updated when OCR changed it.
+/// Brings a paper imported earlier up to date: redraws its images if an older renderer made them, and with
+/// a key runs the OCR check and adds figures and tables. Returns the script, updated when that changed it.
 let refreshCrops (platform: IPlatform) (settings: Settings) (paths: Store.Paths) (id: string) (script: Script) (progress: Progress) : Task<Script> =
     task {
-        if not (needsRefresh paths id) then return script
+        let redraw = not (File.Exists(cropsMarker paths id))
+        let wantOcr = Settings.hasKey settings && not (File.Exists(ocrMarker paths id))
+        if not (File.Exists(paths.Pdf id)) || (not redraw && not wantOcr) then return script
         else
-            let needsOcr = script.Visuals |> Array.exists (fun v -> v.Kind = VisualKind.Equation && v.Latex.IsNone)
-            if needsOcr && Settings.hasKey settings then progress "Checking the equations with Mistral OCR" None
-            let! visuals, _ = if needsOcr then checkWithOcr settings (paths.Pdf id) script.Visuals CancellationToken.None else Task.FromResult(script.Visuals, None)
-            let script = if obj.ReferenceEquals(visuals, script.Visuals) then script else { script with Visuals = visuals }
-            if Directory.Exists(paths.Images id) then
+            let! script =
+                task {
+                    if not wantOcr then return script
+                    else
+                        progress "Checking the equations and figures with Mistral OCR" None
+                        match! runOcr settings (paths.Pdf id) script.Visuals CancellationToken.None with
+                        | Ok (visuals, figures) ->
+                            File.WriteAllText(ocrMarker paths id, "")
+                            return Narration.attachFigures figures { script with Visuals = visuals }
+                        | Error _ -> return script // tried again next time
+                }
+            if redraw && Directory.Exists(paths.Images id) then
                 for f in Directory.GetFiles(paths.Images id, "*.png") do
                     File.Delete f
-            let total = max 1 visuals.Length
+            let total = max 1 script.Visuals.Length
             let! _ =
-                renderCrops platform settings paths id visuals (fun k ->
-                    progress (sprintf "Redrawing the equations (%d of %d)" k total) (Some(float k / float total))) CancellationToken.None
+                renderCrops platform settings paths id script.Visuals (fun k ->
+                    progress (sprintf "Drawing the equations and figures (%d of %d)" k total) (Some(float k / float total))) CancellationToken.None
             Store.saveScript paths id script
             return script
     }
@@ -109,9 +122,19 @@ let run (platform: IPlatform) (settings: Settings) (source: string) (displayName
                 failwith "No readable text was found in this PDF. Scanned papers (pictures of pages) aren't supported."
             ct.ThrowIfCancellationRequested()
 
-            if Settings.hasKey settings then progress "Checking the equations with Mistral OCR" (Some 0.3)
-            let! visuals, ocrWarning = checkWithOcr settings pdf analysis.Visuals ct
-            let analysis = { analysis with Visuals = visuals }
+            let! analysis, ocrWarning =
+                task {
+                    if not (Settings.hasKey settings) then return analysis, None
+                    else
+                        progress "Checking the equations and figures with Mistral OCR" (Some 0.3)
+                        match! runOcr settings pdf analysis.Visuals ct with
+                        | Ok (visuals, figures) ->
+                            File.WriteAllText(ocrMarker paths id, "")
+                            return
+                                { analysis with Visuals = Array.append visuals (Array.ofList figures); Units = Ocr.linkCaptions figures analysis.Units },
+                                None
+                        | Error m -> return analysis, Some("the equation and figure check with Mistral OCR failed: " + m)
+                }
             ct.ThrowIfCancellationRequested()
 
             let total = max 1 analysis.Visuals.Length

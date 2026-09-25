@@ -61,7 +61,7 @@ let endsSentence (word: string) (next: string) =
         let w = word.TrimEnd(')', '"', '”', '’', ']')
         let terminal = w.EndsWith "." || w.EndsWith "?" || w.EndsWith "!"
         if not terminal then false
-        elif noSplitAfter.Contains(w.ToLowerInvariant()) then false
+        elif noSplitAfter.Contains(w.TrimStart('(', '[', '"', '“').ToLowerInvariant()) then false
         // single initials like "J." inside names
         elif w.Length = 2 && Char.IsUpper w.[0] then false
         else

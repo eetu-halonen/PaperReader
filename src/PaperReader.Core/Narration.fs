@@ -18,6 +18,16 @@ let private pauseFor (u: SourceUnit) (lastOfUnit: bool) =
     | _ when lastOfUnit && u.ParagraphEnd -> 450
     | _ -> 120
 
+let private figRefRx = Regex(@"\b(Figures?|Figs?\.?|Tables?)\s*([A-Z]?\d+[a-z]?)\b", RegexOptions.Compiled ||| RegexOptions.IgnoreCase)
+
+/// The figure or table a sentence refers to ("Figure 2", "Fig. 3", "Table 1"), if the paper has it.
+let private figureReference (has: string -> bool) (text: string) =
+    figRefRx.Matches text
+    |> Seq.tryPick (fun m ->
+        let kind = if m.Groups.[1].Value.StartsWith("T", StringComparison.OrdinalIgnoreCase) then VisualKind.Table else VisualKind.Figure
+        let id = Ocr.figureId kind m.Groups.[2].Value
+        if has id then Some id else None)
+
 let private eqRefRx = Regex(@"\b(?:Equations?|Eqs?\.?|Formula)\s*\(?([A-Z]?\.?\d+(?:\.\d+)?[a-z]?)\)?", RegexOptions.Compiled ||| RegexOptions.IgnoreCase)
 
 /// Splits long narration so each clip stays well inside the TTS input limit.
@@ -40,6 +50,7 @@ let finalize (a: Analysis) (narrator: string) (drafts: Draft list) : Script =
     let visuals = a.Visuals |> Array.map (fun v -> v.Id, v) |> dict
     let byNumber =
         a.Visuals
+        |> Array.filter (fun v -> v.Kind = VisualKind.Equation)
         |> Array.choose (fun v -> v.EqNumber |> Option.map (fun n -> n, v.Id))
         |> Array.collect (fun (n, id) ->
             // "4–6" makes 4, 5 and 6 point at the same image
@@ -79,6 +90,7 @@ let finalize (a: Analysis) (narrator: string) (drafts: Draft list) : Script =
                                 match byNumber.TryGetValue m.Groups.[1].Value with
                                 | true, id -> Some id
                                 | _ -> None)
+                            |> Option.orElse (figureReference visuals.ContainsKey d.Say)
                         match referenced with
                         | Some v -> Some v, ShowReason.Reference
                         | None ->
@@ -124,19 +136,21 @@ let buildLocal (a: Analysis) = finalize a "offline" (localDrafts a.Units)
 // Mistral narration
 // ---------------------------------------------------------------------------------------------
 
-let systemPrompt = """You write the narration script for a phone app that reads scientific papers aloud. A text-to-speech voice speaks your text while the listener watches the phone, where images of the paper's equations appear.
+let systemPrompt = """You write the narration script for a phone app that reads scientific papers aloud. A text-to-speech voice speaks your text while the listener watches the phone, where images of the paper's equations, figures and tables appear.
 
 You receive the text of part of a paper, extracted from a PDF, as numbered source units in reading order:
 - [T#] the title, [H#] a section heading,
 - [S#] a sentence. Extraction garbles inline math: subscripts appear as x_{i}, superscripts as x^{2}, symbols may be missing or odd.
 - [E#] a display equation. Its image is attached right after it; the extracted text is only a rough hint, the OCR LaTeX (when given) is usually exact.
+- [S#] marked CAPTION of Figure N or Table N: the figure's or table's image is attached right after it.
 
 Write segments that narrate every unit, in order. Rules:
 1. Be faithful. Narrate every sentence; do not summarise, skip, reorder, or add claims. Rephrase only as much as needed for listening; keep the authors' wording otherwise.
 2. Read inline math the way a lecturer says it aloud: "x sub i", "theta transpose x", "the norm of w, squared", "the sum over i from 1 to n of ...". Use the context to repair garbled extraction.
 3. For each [E#] write one segment (or a few) with "src" and "show" set to that id. Start with "Equation N." if it is numbered (never read the number in brackets); for an unnumbered one just say what it states. Then say what it states: read it fully in words when it is short; when it is long, walk through it clearly, left side then right side, without skipping terms. Use the image; trust it over the extracted text.
    For an ALGORITHM unit: read its caption, then walk through the steps in order, briefly, reading the math in words.
-4. When a sentence explains or refers to an equation (for example "where x is ..." right after it, or "as in Equation 3"), set "show" to that equation's id so the listener can look at it. Earlier equations are listed under KNOWN EQUATIONS.
+4. When a sentence explains or refers to an equation (for example "where x is ..." right after it, or "as in Equation 3"), set "show" to that equation's id so the listener can look at it. Likewise, when a sentence refers to a figure or table ("Figure 2 shows", "see Table 3"), set "show" to its id (Fig2, Tab3). Earlier ones are listed under KNOWN EQUATIONS AND FIGURES.
+   For a CAPTION: read the caption, then add one to three sentences saying what the image shows, with "show" set to its id: for a chart, what is plotted against what and the main trend; for a diagram, its main parts and how they connect; for a table, what is compared and the headline result (do not read out every number).
    If an [E#] is not a real equation (a table cell, a figure label), output it with "say": "" so it is skipped.
 5. Drop citation markers like [12] or (Smith et al., 2020) unless the authors are the subject of the sentence; drop footnote marks, and say "a link" for URLs. Skip stray text from inside figures or tables.
 6. Headings: say them as "Section 3. Method." or "Appendix A. Proofs." A title is read as is.
@@ -144,7 +158,7 @@ Write segments that narrate every unit, in order. Rules:
 8. Each segment is one sentence, or two short ones; at most 60 words. Plain spoken English: no markdown, no LaTeX, no symbols a voice cannot pronounce.
 
 Answer with JSON only: {"segments":[{"src":"S12","say":"...","show":null}]}
-"src" is the id of the unit narrated; "show" is an E id or null."""
+"src" is the id of the unit narrated; "show" is an E, Fig or Tab id, or null."""
 
 type private Chunk = { Units: SourceUnit list }
 
@@ -172,7 +186,11 @@ let private label (u: SourceUnit) (visuals: Collections.Generic.IDictionary<stri
     match u.Kind with
     | UnitKind.Title -> sprintf "[%s] TITLE: %s" u.Id u.Text
     | UnitKind.Heading -> sprintf "[%s] HEADING: %s" u.Id u.Text
-    | UnitKind.Sentence -> sprintf "[%s] %s" u.Id u.Text
+    | UnitKind.Sentence ->
+        match u.Visual |> Option.bind (fun v -> match visuals.TryGetValue v with | true, x -> Some x | _ -> None) with
+        | Some v when v.Kind = VisualKind.Figure || v.Kind = VisualKind.Table ->
+            sprintf "[%s] CAPTION of %s %s: %s\n(image of %s follows)" u.Id (if v.Kind = VisualKind.Table then "Table" else "Figure") (defaultArg v.EqNumber "") u.Text v.Id
+        | _ -> sprintf "[%s] %s" u.Id u.Text
     | UnitKind.Equation when (u.Visual |> Option.exists (fun v -> visuals.ContainsKey v && visuals.[v].Kind = VisualKind.Algorithm)) ->
         sprintf "[%s] ALGORITHM (pseudo-code listing with its caption). Extracted text: %s\n(image of %s follows)" u.Id (u.Text.Replace("\n", " / ")) u.Id
     | UnitKind.Equation ->
@@ -266,9 +284,13 @@ let buildWithMistral
         let knownBefore (c: Chunk) =
             let firstPage = c.Units.Head.Page
             a.Visuals
-            |> Array.filter (fun v -> v.Kind = VisualKind.Equation && v.EqNumber.IsSome && v.Page <= firstPage)
-            |> Array.filter (fun v -> not (c.Units |> List.exists (fun u -> u.Id = v.Id)))
-            |> Array.map (fun v -> sprintf "%s = Equation (%s)" v.Id v.EqNumber.Value)
+            |> Array.filter (fun v ->
+                (v.Kind = VisualKind.Equation || v.Kind = VisualKind.Figure || v.Kind = VisualKind.Table)
+                && v.EqNumber.IsSome && v.Page <= firstPage)
+            |> Array.filter (fun v -> not (c.Units |> List.exists (fun u -> u.Id = v.Id || u.Visual = Some v.Id)))
+            |> Array.map (fun v ->
+                let name = match v.Kind with VisualKind.Figure -> "Figure " | VisualKind.Table -> "Table " | _ -> "Equation "
+                sprintf "%s = %s%s" v.Id name (if v.Kind = VisualKind.Equation then "(" + v.EqNumber.Value + ")" else v.EqNumber.Value))
         let run (i: int) =
             task {
                 do! gate.WaitAsync(ct)
@@ -278,13 +300,18 @@ let buildWithMistral
                     let header =
                         let k = knownBefore c
                         let sectionTitle = a.Sections.[min (a.Sections.Length - 1) c.Units.Head.Section]
-                        sprintf "PAPER: %s\nCURRENT SECTION: %s\nKNOWN EQUATIONS: %s\n\nSOURCE UNITS:\n"
+                        sprintf "PAPER: %s\nCURRENT SECTION: %s\nKNOWN EQUATIONS AND FIGURES: %s\n\nSOURCE UNITS:\n"
                             a.Title sectionTitle (if k.Length = 0 then "none" else String.Join("; ", k))
                     let text = Text.StringBuilder(header)
                     for u in c.Units do
                         text.AppendLine(label u visuals) |> ignore
-                        match u.Kind, u.Visual with
-                        | UnitKind.Equation, Some v when visuals.ContainsKey v ->
+                        let withImage =
+                            match u.Visual with
+                            | Some v when visuals.ContainsKey v ->
+                                u.Kind = UnitKind.Equation || visuals.[v].Kind = VisualKind.Figure || visuals.[v].Kind = VisualKind.Table
+                            | _ -> false
+                        match u.Visual with
+                        | Some v when withImage ->
                             match image visuals.[v] with
                             | Some png ->
                                 parts.Add(Mistral.Text(text.ToString()))
@@ -352,3 +379,36 @@ let equationStops (s: Script) : Map<int, string> =
             i <- j + 1
         | _ -> i <- i + 1
     stops
+
+/// Adds figures and tables found after a paper was narrated: a segment that reads a caption shows its
+/// figure, one that refers to it ("Figure 2", "Table 1") shows it too, and the next two sentences keep it up.
+let attachFigures (figures: Visual list) (s: Script) : Script =
+    if figures.IsEmpty then s
+    else
+        let ids = figures |> List.map (fun v -> v.Id) |> Collections.Generic.HashSet
+        let visuals = Array.append (s.Visuals |> Array.filter (fun v -> not (ids.Contains v.Id))) (Array.ofList figures)
+        let mutable recent: (string * int * int) option = None
+        let segments =
+            s.Segments
+            |> Array.map (fun g ->
+                let free = g.Show.IsNone || g.Reason = ShowReason.Recent
+                let caption = Ocr.captionOf g.Say |> Option.map (fun (k, n) -> Ocr.figureId k n) |> Option.filter ids.Contains
+                if g.Kind = UnitKind.Heading || g.Kind = UnitKind.Title then recent <- None
+                match caption with
+                | Some id when free ->
+                    recent <- Some(id, g.Section, 2)
+                    { g with Show = Some id; Reason = ShowReason.Own }
+                | _ ->
+                    match figureReference ids.Contains g.Say with
+                    | Some id when free ->
+                        recent <- Some(id, g.Section, 2)
+                        { g with Show = Some id; Reason = ShowReason.Reference }
+                    | _ ->
+                        match recent with
+                        | Some (id, sec, left) when g.Show.IsNone && sec = g.Section && left > 0 && g.Kind = UnitKind.Sentence ->
+                            recent <- Some(id, sec, left - 1)
+                            { g with Show = Some id; Reason = ShowReason.Recent }
+                        | _ ->
+                            if g.Show.IsSome && g.Reason <> ShowReason.Recent then recent <- None
+                            g)
+        { s with Visuals = visuals; Segments = segments }

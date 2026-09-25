@@ -140,7 +140,15 @@ let render (pdf: IPdfPages) (sizes: (float * float)[]) (crops: (Visual * string)
                 let widest = v.Parts |> Array.map (fun r -> r.W) |> Array.max
                 let scale = min 3.0 (2400.0 / max 1.0 widest)
                 let dropNumber = v.Kind = VisualKind.Equation && v.EqNumber.IsSome
-                let results = v.Parts |> Array.map (fun r -> renderPart pdf sizes.[r.Page] r scale dropNumber)
+                let results =
+                    match v.Kind with
+                    | VisualKind.Figure | VisualKind.Table ->
+                        // the region comes from OCR and includes the caption: draw it as it is
+                        v.Parts |> Array.map (fun r ->
+                            let px, w, h = pdf.Render(r.Page, r, scale)
+                            let px, w, h = CropTidy.trim px w h
+                            (px, w, h), false, CropTidy.blank px)
+                    | _ -> v.Parts |> Array.map (fun r -> renderPart pdf sizes.[r.Page] r scale dropNumber)
                 let parts = results |> Array.map (fun (p, _, _) -> toBitmap p) |> List.ofArray
                 let cropped = stack parts
                 for b in parts do b.Dispose()

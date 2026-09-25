@@ -88,6 +88,7 @@ let ``sentence ends are not found after abbreviations or initials`` () =
     Assert.False(SpeechText.endsSentence "e.g." "The")
     Assert.False(SpeechText.endsSentence "J." "Smith")
     Assert.True(SpeechText.endsSentence "results." "We")
+    Assert.False(SpeechText.endsSentence "(Fig." "2).")
 
 [<Fact>]
 let ``math glyphs are spoken`` () =
@@ -211,3 +212,65 @@ let ``a glyph running into the right edge counts as cut off`` () =
         for x in 10 .. 39 do px.[y * w + x] <- black // a thick bar reaching the right edge
     CropTidy.clean px w h false
     Assert.Equal((false, false, true, false), CropTidy.clipped px w h)
+
+// ---- figures and tables
+
+let private block kind x0 y0 x1 y1 content =
+    { Mistral.X0 = x0; Mistral.Y0 = y0; Mistral.X1 = x1; Mistral.Y1 = y1; Mistral.Kind = kind; Mistral.Content = content }
+
+[<Fact>]
+let ``OCR images, sub-captions and tables are paired with their numbered captions`` () =
+    // page image 600 x 800 px for a 600 x 800 pt page: 1 px per point
+    let page =
+        { Mistral.Index = 0; Mistral.Width = 600.0; Mistral.Height = 800.0; Mistral.Markdown = ""
+          Mistral.Blocks =
+            [ block "caption" 100.0 40.0 200.0 50.0 "(a) Left panel"
+              block "image" 100.0 55.0 280.0 200.0 "![img-0](img-0)"
+              block "image" 320.0 55.0 500.0 200.0 "![img-1](img-1)"
+              block "caption" 100.0 210.0 500.0 230.0 "Figure 2: Two panels."
+              block "text" 100.0 240.0 500.0 400.0 "Body text."
+              block "caption" 100.0 420.0 500.0 440.0 "Table 1: Results."
+              block "table" 110.0 445.0 490.0 600.0 "| a | b |" ] }
+    let found = Ocr.figures [ page ] [| 600.0, 800.0 |]
+    Assert.Equal<string list>([ "Fig2"; "Tab1" ], found |> List.map (fun v -> v.Id))
+    let fig, tab = found.[0].Parts.[0], found.[1].Parts.[0]
+    Assert.Equal(36.0, fig.Y, 3)          // sub-caption above the images, minus the 4 pt margin
+    Assert.Equal(234.0, fig.Y + fig.H, 3) // through the caption
+    Assert.Equal(504.0, fig.X + fig.W, 3)
+    Assert.Equal(416.0, tab.Y, 3)
+    Assert.Equal(604.0, tab.Y + tab.H, 3)
+    Assert.Equal(VisualKind.Table, found.[1].Kind)
+    Assert.Equal(Some "1", found.[1].EqNumber)
+
+[<Fact>]
+let ``figures found later are shown where their caption is read and where they are referred to`` () =
+    let fig = { eq "Fig1" with Kind = VisualKind.Figure; EqNumber = Some "1" }
+    let say i text = { seg i None ShowReason.Own with Say = text }
+    let s =
+        scriptWith
+            [| say 0 "Figure 1: The model architecture."
+               say 1 "It has two stacks."
+               { say 2 "As in Equation 1." with Show = Some "E1" }
+               say 3 "Figure 1 shows the encoder on the left."
+               say 4 "Nothing to see." |]
+            [| eq "E1" |]
+    let s = Narration.attachFigures [ fig ] s
+    let shown = s.Segments |> Array.map (fun g -> g.Show, g.Reason)
+    Assert.Equal((Some "Fig1", ShowReason.Own), shown.[0])
+    Assert.Equal((Some "Fig1", ShowReason.Recent), shown.[1])
+    Assert.Equal((Some "E1", ShowReason.Own), shown.[2]) // an equation already shown stays
+    Assert.Equal((Some "Fig1", ShowReason.Reference), shown.[3])
+    Assert.Contains(s.Visuals, fun v -> v.Id = "Fig1")
+
+[<Fact>]
+let ``"Figure 1" and "Equation 1" point at different images`` () =
+    let unit id text vis = { Id = id; Kind = UnitKind.Sentence; Text = text; Spoken = text; Visual = vis; Page = 0; Section = 1; ParagraphEnd = false }
+    let e1 = { eq "E1" with EqNumber = Some "1" }
+    let f1 = { eq "Fig1" with Kind = VisualKind.Figure; EqNumber = Some "1" }
+    let a =
+        { Title = "T"; PageCount = 1; Sections = [| "T"; "S" |]; Visuals = [| e1; f1 |]
+          Units = [| unit "S1" "See Figure 1 for the model." None; unit "S2" "Heading break." None
+                     { unit "H1" "2 Method" None with Kind = UnitKind.Heading }; unit "S3" "By Equation 1 we get it." None |] }
+    let s = Narration.buildLocal a
+    Assert.Equal(Some "Fig1", s.Segments.[0].Show)
+    Assert.Equal(Some "E1", s.Segments.[3].Show)
