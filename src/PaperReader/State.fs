@@ -64,6 +64,8 @@ type Msg =
     | DeletePaper of string
     | CloseReader
     | TogglePlay
+    /// Play (true) or pause (false) from the notification, a headset or an incoming call.
+    | Remote of play: bool
     | Back15
     | Forward15
     | CycleSpeed
@@ -134,8 +136,15 @@ let private moveSynth (i: int) : Cmd<Msg> =
 let private stopAudio: Cmd<Msg> =
     Cmd.ofEffect (fun _ -> (platform ()).Player.Stop())
 
-let private keepScreenOn (on: bool) : Cmd<Msg> =
-    Cmd.ofEffect (fun _ -> (platform ()).KeepScreenOn on)
+/// Screen and media notification follow playback: on while reading aloud, with the paper and section shown.
+let private playbackState (r: ReaderState) (on: bool) : Cmd<Msg> =
+    Cmd.ofEffect (fun _ ->
+        let p = platform ()
+        p.KeepScreenOn on
+        let section = r.Script.Segments.[r.Current].Section
+        let detail =
+            if section > 0 && section < r.Script.Sections.Length then r.Script.Sections.[section].Title else "Beginning"
+        p.SetPlayback(r.Script.Title, detail, on))
 
 let private saveProgress (r: ReaderState) : Cmd<Msg> =
     Cmd.ofEffect (fun _ ->
@@ -177,19 +186,26 @@ let private errorText (e: exn) =
 let private play (r: ReaderState) (settings: Settings) : ReaderState * Cmd<Msg> =
     let gen = r.Generation + 1
     let r = { r with Playing = true; Finished = false; Generation = gen }
+    let path = (paths ()).Audio(r.Paper.Id, r.VoiceKey, r.Current)
+    // a clip cached on disk but not yet known here (the synthesizer only reports clips it makes)
+    let r =
+        if r.Durations.ContainsKey r.Current || not (File.Exists path) then r
+        else
+            match (try Wav.durationMs path with _ -> 0) with
+            | d when d > 0 -> { r with Durations = r.Durations.Add(r.Current, d) }
+            | _ -> r
     if r.Durations.ContainsKey r.Current then
-        let path = (paths ()).Audio(r.Paper.Id, r.VoiceKey, r.Current)
         let start =
             Cmd.ofEffect (fun dispatch ->
                 (platform ()).Player.Play(path, r.Offset, settings.Speed, (fun () -> dispatch (ClipEnded gen)), (fun e -> dispatch (PlayerFailed e))))
-        { r with Waiting = false }, Cmd.batch [ start; moveSynth r.Current; keepScreenOn true ]
+        { r with Waiting = false }, Cmd.batch [ start; moveSynth r.Current; playbackState r true ]
     else
-        { r with Waiting = true }, Cmd.batch [ stopAudio; moveSynth r.Current; keepScreenOn true ]
+        { r with Waiting = true }, Cmd.batch [ stopAudio; moveSynth r.Current; playbackState r true ]
 
 let private pause (r: ReaderState) : ReaderState * Cmd<Msg> =
     let offset = if r.Playing && not r.Waiting then (platform ()).Player.PositionMs else r.Offset
     { r with Playing = false; Waiting = false; Offset = offset; Generation = r.Generation + 1 },
-    Cmd.batch [ stopAudio; keepScreenOn false; saveProgress r ]
+    Cmd.batch [ stopAudio; playbackState r false; saveProgress r ]
 
 /// Moves to a position, keeping the play/pause state.
 let private seek (r: ReaderState) (settings: Settings) (pos: Timeline.Position) : ReaderState * Cmd<Msg> =
@@ -216,7 +232,8 @@ let init () : Model * Cmd<Msg> =
       Notice = None
       ConfirmDelete = None },
     Cmd.ofEffect (fun dispatch ->
-        (platform ()).SetIncomingPdfHandler(fun (path, name) -> dispatch (ImportFile(path, name))))
+        (platform ()).SetIncomingPdfHandler(fun (path, name) -> dispatch (ImportFile(path, name)))
+        (platform ()).SetRemoteHandler(fun play -> dispatch (Remote play)))
 
 let private withReader (model: Model) (f: ReaderState -> ReaderState * Cmd<Msg>) : Model * Cmd<Msg> =
     match model.Screen with
@@ -267,7 +284,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             let importId = Guid.NewGuid()
             let leave =
                 match model.Screen with
-                | Screen.Reader r -> Cmd.batch [ snd (pause r); Cmd.ofEffect (fun _ -> stopSynth ()) ]
+                | Screen.Reader r -> Cmd.batch [ snd (pause r); Cmd.ofEffect (fun _ -> stopSynth (); (platform ()).EndPlayback()) ]
                 | _ -> Cmd.none
             let settings = model.Settings
             let work =
@@ -304,9 +321,10 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         | _ -> model, Cmd.none
     | ImportFinished (importId, result) ->
         match model.Screen, result with
-        | Screen.Importing s, Ok (paper, script, warning) when s.Id = importId ->
+        | Screen.Importing s, Ok (paper, _, warning) when s.Id = importId ->
             let model = { model with Papers = loadLibrary (); Notice = warning |> Option.map (fun w -> "Some parts use the offline narration: " + w) }
-            model, Cmd.ofMsg (PaperLoaded(Ok(paper, script, Map.empty)))
+            // a paper imported before may already have audio: load it like a library paper
+            model, Cmd.ofMsg (OpenPaper paper)
         | Screen.Importing s, Error e when s.Id = importId -> { model with Screen = Screen.Library; Notice = Some e }, Cmd.none
         | _ -> model, Cmd.none // cancelled meanwhile
     | AskDelete id -> { model with ConfirmDelete = Some id }, Cmd.none
@@ -324,6 +342,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                 match Store.loadScript p paper.Id with
                 | None -> return failwith "This paper's cache is from an older version. Remove it and add the PDF again."
                 | Some script ->
+                    do! Import.refreshCrops (platform ()) p paper.Id script
                     let durations = Synth.cachedDurations (fun i -> p.Audio(paper.Id, key, i)) script.Segments.Length
                     return paper, script, durations
             }
@@ -351,13 +370,19 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         | Screen.Reader r ->
             let _, cmd = pause r
             { model with Screen = Screen.Library; Papers = loadLibrary () |> List.map (fun p -> if p.Id = r.Paper.Id then { p with LastSegment = r.Current } else p) },
-            Cmd.batch [ cmd; Cmd.ofEffect (fun _ -> stopSynth ()) ]
+            Cmd.batch [ cmd; Cmd.ofEffect (fun _ -> stopSynth (); (platform ()).EndPlayback()) ]
         | _ -> model, Cmd.none
     | TogglePlay ->
         withReader model (fun r ->
             if r.Playing then pause r
             elif r.Finished then play { r with Current = 0; Offset = 0 } model.Settings
             else play r model.Settings)
+    | Remote wanted ->
+        withReader model (fun r ->
+            if wanted && not r.Playing then
+                if r.Finished then play { r with Current = 0; Offset = 0 } model.Settings else play r model.Settings
+            elif not wanted && r.Playing then pause r
+            else r, Cmd.none)
     | Back15 ->
         withReader model (fun r ->
             let pos = currentPosition r
@@ -390,7 +415,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                 r, Cmd.batch [ cmd; saveProgress r ]
             else
                 { r with Playing = false; Waiting = false; Finished = true; Offset = 0 },
-                Cmd.batch [ keepScreenOn false; saveProgress { r with Current = 0 } ])
+                Cmd.batch [ playbackState r false; saveProgress { r with Current = 0 } ])
     | ClipReady (paperId, key, i, d) ->
         withReader model (fun r ->
             if r.Paper.Id <> paperId || r.VoiceKey <> key then r, Cmd.none
@@ -402,7 +427,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             if r.Paper.Id = paperId && (i = r.Current || i = r.Current + 1) then { r with Error = Some message }, Cmd.none
             else r, Cmd.none)
     | PlayerFailed message ->
-        withReader model (fun r -> { r with Playing = false; Waiting = false; Error = Some("Playback failed: " + message) }, keepScreenOn false)
+        withReader model (fun r -> { r with Playing = false; Waiting = false; Error = Some("Playback failed: " + message) }, playbackState r false)
     | ToggleOutline -> withReader model (fun r -> { r with ShowOutline = not r.ShowOutline; Zoomed = false }, Cmd.none)
     | ToggleZoom -> withReader model (fun r -> { r with Zoomed = not r.Zoomed }, Cmd.none)
 

@@ -1,0 +1,71 @@
+# Paper Reader
+
+An Android app that reads research papers (PDF) aloud and shows the math on screen while it talks.
+
+- Open a PDF from the app, or use *Open with* / *Share* from any other app.
+- The paper is analysed once: reading order, two-column layout, headings, display equations,
+  algorithms and inline math. Citations, headers, footers and tables are skipped.
+- Equations are cut out of the page as images and shown while the narration talks about them.
+- With a Mistral API key, a Mistral chat model rewrites the paper for listening (it sees the
+  equation images) and Voxtral reads it aloud. Without one, an offline narration and the
+  phone's own text-to-speech are used.
+- Audio is made a few sentences ahead of the listener and cached, so nothing is generated twice.
+- Controls: play/pause, back and forward 15 s, speed, contents list. Playback continues in the
+  background, with a media notification, lock-screen and headset controls; it pauses for calls
+  and when headphones are unplugged.
+
+Written in F# with Avalonia, FuncUI and Elmish, for .NET 10.
+
+## Projects
+
+| Path | What it is |
+| --- | --- |
+| `src/PaperReader.Core` | Everything without UI: PDF layout analysis (PdfPig), math verbalisation, narration, Mistral client, WAV cache |
+| `src/PaperReader` | The shared Elmish UI |
+| `src/PaperReader.Android` | Android head: audio player, phone TTS, PDF crops, playback service |
+| `tools/ScriptDump` | Desktop tool that analyses a PDF and prints the narration, for tuning the layout rules |
+| `tests/PaperReader.Core.Tests` | Unit tests |
+
+## Build
+
+Needs the .NET 10 SDK with the `android` workload, the Android SDK and a JDK.
+
+```bash
+# unit tests
+dotnet test --project tests/PaperReader.Core.Tests
+
+# APK (self-contained, arm64 and x64)
+cd src/PaperReader.Android
+dotnet build -c Release -p:AndroidSdkDirectory=$HOME/Android/Sdk -p:JavaSdkDirectory=/opt/android-studio/jbr
+# -> bin/Release/net10.0-android/app.paperreader-Signed.apk
+
+adb install -r bin/Release/net10.0-android/app.paperreader-Signed.apk
+```
+
+The APK is signed with the debug key. To publish it, sign it with your own keystore
+(`-p:AndroidKeyStore=true -p:AndroidSigningKeyStore=... -p:AndroidSigningKeyAlias=...`).
+
+## Mistral
+
+Open *Settings* and paste an API key from [console.mistral.ai](https://console.mistral.ai).
+The key is stored only on the phone and sent only to `api.mistral.ai`.
+
+- **Explain with Mistral**: narration by a chat model (default `mistral-medium-latest`).
+  Applies to papers added after the change.
+- **Mistral voice**: Voxtral text-to-speech; pick a voice with *Load voices*.
+  Each voice has its own audio cache.
+
+## Desktop analysis tool
+
+```bash
+dotnet run --project tools/ScriptDump -- paper.pdf --lines            # line classes
+dotnet run --project tools/ScriptDump -- paper.pdf --crops /tmp/crops # equation images (needs pdftoppm, ImageMagick)
+MISTRAL_API_KEY=... dotnet run --project tools/ScriptDump -- paper.pdf --mistral mistral-medium-latest
+```
+
+## Limitations
+
+- Scanned (image-only) PDFs are not supported.
+- Figure labels and math-heavy table cells sometimes reach the offline narration.
+- Some inline-math crops miss a glyph at the edge, where the layout analysis cuts a formula short.
+- Changing the narration model does not re-narrate papers already added (remove and add them again).

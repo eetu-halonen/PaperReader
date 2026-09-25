@@ -54,6 +54,10 @@ type MainActivity() =
     override this.OnCreate(savedInstanceState) =
         AndroidPlatform.Activity <- this
         base.OnCreate savedInstanceState
+        // the media notification (pause from the lock screen) needs this from Android 13
+        if Android.OS.Build.VERSION.SdkInt >= Android.OS.BuildVersionCodes.Tiramisu
+           && this.CheckSelfPermission(Android.Manifest.Permission.PostNotifications) <> Permission.Granted then
+            this.RequestPermissions([| Android.Manifest.Permission.PostNotifications |], 1)
         this.Receive this.Intent
 
     override this.OnNewIntent(intent) =

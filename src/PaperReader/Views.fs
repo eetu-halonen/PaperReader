@@ -378,6 +378,9 @@ let private remainingMs (r: ReaderState) (speed: float) =
                | None -> Timeline.estimateMs segs.[i].Say + segs.[i].PauseAfterMs)
     int (float (total - r.Offset) / speed)
 
+/// Display size of a crop pixel, in dp.
+let private mathScale = 0.9
+
 let private stage (r: ReaderState) (seg: Segment) (dispatch: Msg -> unit) : IView =
     let paths = Store.Paths((Services.get ()).DataDir)
     let visual = seg.Show |> Option.bind r.Script.Visual
@@ -419,6 +422,10 @@ let private stage (r: ReaderState) (seg: Segment) (dispatch: Msg -> unit) : IVie
                                     Grid.row 1
                                     Image.source bmp
                                     Image.stretch Stretch.Uniform
+                                    // one size for all math: crops are 3 px per point, so 10 pt text shows at
+                                    // about 27 dp; only crops too big for the card are scaled down
+                                    Image.maxWidth (float bmp.PixelSize.Width * mathScale)
+                                    Image.maxHeight (float bmp.PixelSize.Height * mathScale)
                                     Image.horizontalAlignment HorizontalAlignment.Center
                                     Image.verticalAlignment VerticalAlignment.Center
                                 ]

@@ -14,6 +14,8 @@ type MainView() as this =
     inherit HostControl()
 
     let mutable dispatch: (State.Msg -> unit) option = None
+    /// The top level whose events are hooked up (the view can be attached again, e.g. after an activity restart).
+    let mutable hooked: TopLevel = null
 
     do
         this.Background <- Media.SolidColorBrush(Media.Color.Parse Views.Palette.bg)
@@ -28,19 +30,15 @@ type MainView() as this =
     override this.OnAttachedToVisualTree(e) =
         base.OnAttachedToVisualTree e
         let top = TopLevel.GetTopLevel this
-        if not (isNull top) then
+        if not (isNull top) && not (obj.ReferenceEquals(top, hooked)) then
+            hooked <- top
             Services.topLevel <- Some top
             // Android back button: close whatever is open inside the app first
             top.BackRequested.Add(fun args ->
                 if Views.canGoBack then
                     args.Handled <- true
                     dispatch |> Option.iter (fun d -> d State.BackPressed))
-            // keep content clear of the status and navigation bars
-            match top.InsetsManager with
-            | null -> ()
-            | insets ->
-                this.Padding <- insets.SafeAreaPadding
-                insets.SafeAreaChanged.Add(fun a -> this.Padding <- a.SafeAreaPadding)
+            // Avalonia keeps the content clear of the status and navigation bars itself
 
 type App() =
     inherit Application()

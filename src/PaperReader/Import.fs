@@ -12,6 +12,29 @@ type Progress = string -> float option -> unit
 let private sentenceCount (a: Analysis) =
     a.Units |> Array.filter (fun u -> u.Kind = UnitKind.Sentence) |> Array.length
 
+/// Bumped when the crop renderer changes, so papers imported earlier get their images redrawn.
+let private cropsVersion = 4
+
+let private cropsMarker (paths: Store.Paths) id = Path.Combine(paths.Images id, sprintf "crops-v%d" cropsVersion)
+
+let private renderCrops (platform: IPlatform) (paths: Store.Paths) id (visuals: Visual[]) (progress: int -> unit) (ct: CancellationToken) =
+    task {
+        Directory.CreateDirectory(paths.Images id) |> ignore
+        let crops = visuals |> Array.map (fun v -> v, paths.Image(id, v.Id)) |> List.ofArray
+        do! platform.RenderCrops(paths.Pdf id, crops, progress, ct)
+        File.WriteAllText(cropsMarker paths id, "")
+    }
+
+/// Redraws a paper's images if they were made by an older crop renderer.
+let refreshCrops (platform: IPlatform) (paths: Store.Paths) (id: string) (script: Script) : Task =
+    task {
+        if not (File.Exists(cropsMarker paths id)) && File.Exists(paths.Pdf id) then
+            if Directory.Exists(paths.Images id) then
+                for f in Directory.GetFiles(paths.Images id) do
+                    File.Delete f
+            do! renderCrops platform paths id script.Visuals ignore CancellationToken.None
+    }
+
 /// Analyses, crops the math, narrates and caches a PDF. A paper imported before is returned from the cache.
 let run (platform: IPlatform) (settings: Settings) (source: string) (displayName: string) (progress: Progress) (ct: CancellationToken)
     : Task<PaperInfo * Script * string option> =
@@ -33,12 +56,10 @@ let run (platform: IPlatform) (settings: Settings) (source: string) (displayName
                 failwith "No readable text was found in this PDF. Scanned papers (pictures of pages) aren't supported."
             ct.ThrowIfCancellationRequested()
 
-            Directory.CreateDirectory(paths.Images id) |> ignore
-            let crops = analysis.Visuals |> Array.map (fun v -> v, paths.Image(id, v.Id)) |> List.ofArray
-            let total = max 1 crops.Length
+            let total = max 1 analysis.Visuals.Length
             progress "Cutting out the equations" (Some 0.33)
-            do! platform.RenderCrops(pdf, crops, (fun k ->
-                    progress (sprintf "Cutting out the math (%d of %d)" k total) (Some(0.33 + 0.12 * float k / float total))), ct)
+            do! renderCrops platform paths id analysis.Visuals (fun k ->
+                    progress (sprintf "Cutting out the math (%d of %d)" k total) (Some(0.33 + 0.12 * float k / float total))) ct
 
             let title =
                 if String.IsNullOrWhiteSpace analysis.Title || analysis.Title = "paper" then Path.GetFileNameWithoutExtension displayName
