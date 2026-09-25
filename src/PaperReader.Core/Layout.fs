@@ -417,6 +417,13 @@ let private renderWord (line: Line) (w: Word) =
 
 type private Placed = { Word: Word; Line: Line }
 
+/// Width and height of every page's crop box in points (the space PageRect coordinates live in).
+let pageSizes (path: string) : (float * float)[] =
+    use doc = PdfDocument.Open(path)
+    [| for p in 1 .. doc.NumberOfPages ->
+           let b = (doc.GetPage p).CropBox.Bounds
+           b.Width, b.Height |]
+
 /// Set by development tools to see how every line was classified.
 let mutable trace: (string -> unit) option = None
 
@@ -678,7 +685,7 @@ let analyze (path: string) (progress: int -> int -> unit) : Analysis =
                         |> List.choose (fun (_, (l, _, box)) -> toPageRectPadded (body * 0.22) (body * 0.08) l.Page box)
                     if chosen.IsEmpty then None
                     else
-                        let v = { Id = id; Kind = VisualKind.Inline; Parts = Array.ofList chosen; EqNumber = None; RawText = text }
+                        let v = { Id = id; Kind = VisualKind.Inline; Parts = Array.ofList chosen; EqNumber = None; RawText = text; Latex = None }
                         visuals.Add v
                         Some v.Id
             if spoken.Length > 0 && (spoken |> Seq.exists Char.IsLetterOrDigit) then
@@ -789,7 +796,7 @@ let analyze (path: string) (progress: int -> int -> unit) : Analysis =
                 let id = nextId "E"
                 match toPageRect l.Page (bounds glyphs) with
                 | Some rect ->
-                    visuals.Add { Id = id; Kind = VisualKind.Algorithm; Parts = [| rect |]; EqNumber = algo; RawText = raw }
+                    visuals.Add { Id = id; Kind = VisualKind.Algorithm; Parts = [| rect |]; EqNumber = algo; RawText = raw; Latex = None }
                     units.Add
                         { Id = id; Kind = UnitKind.Equation; Text = raw
                           Spoken = SpeechText.forSpeech (MathText.tidy caption + " The algorithm is shown on screen.")
@@ -857,7 +864,7 @@ let analyze (path: string) (progress: int -> int -> unit) : Analysis =
                     let id = nextId "E"
                     match toPageRect l.Page (bl, br, bb, bt) with
                     | Some rect ->
-                        visuals.Add { Id = id; Kind = VisualKind.Equation; Parts = [| rect |]; EqNumber = eqNumber; RawText = raw }
+                        visuals.Add { Id = id; Kind = VisualKind.Equation; Parts = [| rect |]; EqNumber = eqNumber; RawText = raw; Latex = None }
                         let name = match eqNumber with Some e when e.Contains "–" -> sprintf "Equations %s" e | Some e -> sprintf "Equation %s" e | None -> "An equation"
                         let spoken =
                             let s = MathText.tidy spokenEq

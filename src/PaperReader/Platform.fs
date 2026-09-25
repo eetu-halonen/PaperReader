@@ -11,12 +11,18 @@ type IAudioPlayer =
     abstract PositionMs: int
     abstract SetSpeed: float -> unit
 
-/// What the phone provides to the shared app.
+/// An open PDF whose pages can be rendered. Used from one thread at a time.
+type IPdfPages =
+    inherit System.IDisposable
+    /// A page region at `scale` pixels per point, as ARGB pixels on white: (pixels, width, height).
+    abstract Render: page: int * region: PageRect * scale: float -> int[] * int * int
+
+/// What the device provides to the shared app.
 type IPlatform =
     /// Folder for the paper cache and settings.
     abstract DataDir: string
-    /// Renders page regions of a PDF to PNG files.
-    abstract RenderCrops: pdfPath: string * crops: (Visual * string) list * progress: (int -> unit) * ct: CancellationToken -> Task
+    /// Opens a PDF for rendering page regions (the equation images).
+    abstract OpenPdf: pdfPath: string -> IPdfPages
     /// The phone's own text-to-speech, used without a Mistral key.
     abstract SystemSpeech: Synth.ISpeechEngine option
     abstract Player: IAudioPlayer

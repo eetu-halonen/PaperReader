@@ -3,6 +3,8 @@
     <AvaloniaVersion>12.1.3</AvaloniaVersion>
     <FuncUIVersion>2.0.0</FuncUIVersion>
     <PdfPigVersion>0.1.16</PdfPigVersion>
+    <SkiaSharpVersion>3.119.4</SkiaSharpVersion>
+    <CSharpMathVersion>0.5.1</CSharpMathVersion>
     <LangVersion>latest</LangVersion>
     <Nullable>disable</Nullable>
     <TreatWarningsAsErrors>false</TreatWarningsAsErrors>

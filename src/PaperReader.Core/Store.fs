@@ -70,6 +70,7 @@ let saveSettings (p: Paths) (s: Settings) =
         w.WriteString("voiceId", s.VoiceId)
         w.WriteString("voiceName", s.VoiceName)
         w.WriteNumber("speed", s.Speed)
+        w.WriteBoolean("stopAtEquations", s.StopAtEquations)
         w.WriteEndObject())
 
 let loadSettings (p: Paths) : Settings =
@@ -83,7 +84,8 @@ let loadSettings (p: Paths) : Settings =
           UseMistralVoice = boolean e "useMistralVoice" def.UseMistralVoice
           VoiceId = str e "voiceId" def.VoiceId
           VoiceName = str e "voiceName" def.VoiceName
-          Speed = num e "speed" def.Speed }
+          Speed = num e "speed" def.Speed
+          StopAtEquations = boolean e "stopAtEquations" def.StopAtEquations }
     with _ -> Settings.defaults
 
 // ---- paper metadata (library entry + listening position)
@@ -124,7 +126,9 @@ let library (p: Paths) : PaperInfo list =
         |> List.ofSeq
 
 let deletePaper (p: Paths) (id: string) =
-    try Directory.Delete(p.Paper id, true) with _ -> ()
+    // only ever a paper folder: its name is the 16-hex-digit hash from paperId
+    if id.Length = 16 && id |> Seq.forall Uri.IsHexDigit then
+        try Directory.Delete(p.Paper id, true) with _ -> ()
 
 // ---- script
 
@@ -187,6 +191,9 @@ let saveScript (p: Paths) (id: string) (s: Script) =
             | Some n -> w.WriteString("number", n)
             | None -> ()
             w.WriteString("raw", v.RawText)
+            match v.Latex with
+            | Some l -> w.WriteString("latex", l)
+            | None -> ()
             w.WriteEndObject()
         w.WriteEndArray()
         w.WriteStartArray "segments"
@@ -228,7 +235,8 @@ let loadScript (p: Paths) (id: string) : Script option =
                                [| for r in v.GetProperty("parts").EnumerateArray() ->
                                       { Page = int (num r "page" 0.0); X = num r "x" 0.0; Y = num r "y" 0.0; W = num r "w" 0.0; H = num r "h" 0.0 } |]
                              EqNumber = optStr v "number"
-                             RawText = str v "raw" "" } |]
+                             RawText = str v "raw" ""
+                             Latex = optStr v "latex" } |]
                   Segments =
                     e.GetProperty("segments").EnumerateArray()
                     |> Seq.mapi (fun i g ->

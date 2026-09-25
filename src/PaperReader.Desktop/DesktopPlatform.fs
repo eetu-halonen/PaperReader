@@ -142,85 +142,61 @@ type EspeakEngine(exe: string, tempDir: string) =
             }
 
 // ---------------------------------------------------------------------------------------------
-// Cropping the math out of the PDF (pdftoppm renders, SkiaSharp stacks)
+// Rendering PDF regions (the equation images are assembled in the shared Crops module)
 // ---------------------------------------------------------------------------------------------
 
-module Crops =
-    let private gapPx = 24
+/// Renders regions of one PDF: pdftoppm draws each whole page once, regions are cut from memory.
+type DesktopPdf(path: string) =
+    let pdftoppm = Tools.require "pdftoppm" "poppler-utils"
+    let temp = Path.Combine(Path.GetTempPath(), "paperreader-" + Guid.NewGuid().ToString("N"))
+    // the last two rendered pages: (page, dpi) -> ARGB pixels
+    let cache = Collections.Generic.List<(int * int) * (int[] * int * int)>()
 
-    let private toArgb (bmp: SKBitmap) =
-        use bgra = bmp.Copy(SKColorType.Bgra8888)
-        let bytes = bgra.Bytes
-        Array.init (bgra.Width * bgra.Height) (fun i ->
-            let b, g, r, a = int bytes.[4 * i], int bytes.[4 * i + 1], int bytes.[4 * i + 2], int bytes.[4 * i + 3]
-            (a <<< 24) ||| (r <<< 16) ||| (g <<< 8) ||| b)
-
-    let private fromArgb (px: int[]) (w: int) (h: int) =
-        let bytes = Array.zeroCreate<byte> (w * h * 4)
-        for i in 0 .. px.Length - 1 do
-            let c = px.[i]
-            bytes.[4 * i] <- byte c
-            bytes.[4 * i + 1] <- byte (c >>> 8)
-            bytes.[4 * i + 2] <- byte (c >>> 16)
-            bytes.[4 * i + 3] <- byte (c >>> 24)
-        let bmp = new SKBitmap(w, h, SKColorType.Bgra8888, SKAlphaType.Premul)
-        Marshal.Copy(bytes, 0, bmp.GetPixels(), bytes.Length)
-        bmp
-
-    /// Same output as the Android renderer: about 3x the paper's size, parts tidied, centred and stacked.
-    let render (pdfPath: string) (crops: (Visual * string) list) (progress: int -> unit) (ct: CancellationToken) : Task =
-        task {
-            let pdftoppm = Tools.require "pdftoppm" "poppler-utils"
-            let temp = Path.Combine(Path.GetTempPath(), "paperreader-" + Guid.NewGuid().ToString("N"))
+    let renderPage (page: int) (dpi: int) =
+        match cache |> Seq.tryFind (fun (k, _) -> k = (page, dpi)) with
+        | Some (_, px) -> px
+        | None ->
             Directory.CreateDirectory temp |> ignore
+            let stem = Path.Combine(temp, "page")
+            (Tools.run pdftoppm
+                [ "-png"; "-r"; string dpi; "-f"; string (page + 1); "-l"; string (page + 1); "-singlefile"; path; stem ]
+                None CancellationToken.None).GetAwaiter().GetResult()
+            use bmp = SKBitmap.Decode(stem + ".png")
+            use bgra = bmp.Copy(SKColorType.Bgra8888)
+            let bytes = bgra.Bytes
+            let px =
+                Array.init (bgra.Width * bgra.Height) (fun i ->
+                    (int bytes.[4 * i + 3] <<< 24) ||| (int bytes.[4 * i + 2] <<< 16) ||| (int bytes.[4 * i + 1] <<< 8) ||| int bytes.[4 * i])
+            let result = px, bgra.Width, bgra.Height
+            cache.Add(((page, dpi), result))
+            if cache.Count > 2 then cache.RemoveAt 0
+            result
+
+    interface IPdfPages with
+        member _.Render(page, r, scale) =
+            let dpi = int (round (72.0 * scale))
+            let px, pw, ph = renderPage page dpi
+            let s = float dpi / 72.0
+            let x0, y0 = int (round (r.X * s)), int (round (r.Y * s))
+            let w, h = max 1 (int (round (r.W * s))), max 1 (int (round (r.H * s)))
+            let white = 0xFFFFFFFF |> int
+            let out = Array.create (w * h) white
+            for y in 0 .. h - 1 do
+                let sy = y0 + y
+                if sy >= 0 && sy < ph then
+                    for x in 0 .. w - 1 do
+                        let sx = x0 + x
+                        if sx >= 0 && sx < pw then out.[y * w + x] <- px.[sy * pw + sx]
+            out, w, h
+
+    interface IDisposable with
+        member _.Dispose() =
+            cache.Clear()
+            // the folder only ever holds page.png: remove that file, then the (now empty) folder
             try
-                let mutable doneCount = 0
-                for (v, output) in crops do
-                    ct.ThrowIfCancellationRequested()
-                    if not (File.Exists output) then
-                        let widest = v.Parts |> Array.map (fun r -> r.W) |> Array.max
-                        let scale = min 3.0 (2400.0 / max 1.0 widest)
-                        let dropNumber = v.Kind = VisualKind.Equation && v.EqNumber.IsSome
-                        let parts = ResizeArray<SKBitmap>()
-                        try
-                            for k in 0 .. v.Parts.Length - 1 do
-                                let r = v.Parts.[k]
-                                let stem = Path.Combine(temp, sprintf "%s_%d" v.Id k)
-                                do! Tools.run pdftoppm
-                                        [ "-png"; "-r"; string (int (72.0 * scale)); "-f"; string (r.Page + 1); "-l"; string (r.Page + 1)
-                                          "-x"; string (int (r.X * scale)); "-y"; string (int (r.Y * scale))
-                                          "-W"; string (max 1 (int (r.W * scale))); "-H"; string (max 1 (int (r.H * scale)))
-                                          "-singlefile"; pdfPath; stem ] None ct
-                                use raw = SKBitmap.Decode(stem + ".png")
-                                let px, w, h = CropTidy.tidy (toArgb raw) raw.Width raw.Height dropNumber
-                                parts.Add(fromArgb px w h)
-                            let w = parts |> Seq.map (fun b -> b.Width) |> Seq.max
-                            let h = (parts |> Seq.sumBy (fun b -> b.Height)) + gapPx * (parts.Count - 1)
-                            use bmp = new SKBitmap(w, h)
-                            use canvas = new SKCanvas(bmp)
-                            canvas.Clear SKColors.White
-                            use divider = new SKPaint(Color = SKColor(224uy, 226uy, 230uy), StrokeWidth = 3.0f)
-                            let mutable top = 0
-                            for k in 0 .. parts.Count - 1 do
-                                if k > 0 then
-                                    let y = float32 (top - gapPx / 2)
-                                    canvas.DrawLine(0.0f, y, float32 w, y, divider)
-                                canvas.DrawBitmap(parts.[k], float32 ((w - parts.[k].Width) / 2), float32 top)
-                                top <- top + parts.[k].Height + gapPx
-                            let tmp = output + ".tmp"
-                            do
-                                use image = SKImage.FromBitmap bmp
-                                use data = image.Encode(SKEncodedImageFormat.Png, 100)
-                                use fs = File.Create tmp
-                                data.SaveTo fs
-                            File.Move(tmp, output, true)
-                        finally
-                            for b in parts do b.Dispose()
-                    doneCount <- doneCount + 1
-                    progress doneCount
-            finally
-                try Directory.Delete(temp, true) with _ -> ()
-        }
+                File.Delete(Path.Combine(temp, "page.png"))
+                if Directory.Exists temp then Directory.Delete temp
+            with _ -> ()
 
 // ---------------------------------------------------------------------------------------------
 // Platform
@@ -256,7 +232,7 @@ type DesktopPlatform() =
 
     interface IPlatform with
         member _.DataDir = dataDir
-        member _.RenderCrops(pdf, crops, progress, ct) = Crops.render pdf crops progress ct
+        member _.OpenPdf(pdf) = new DesktopPdf(pdf) :> IPdfPages
         member _.SystemSpeech = speech
         member _.Player = player :> IAudioPlayer
         member _.KeepScreenOn(_) = ()

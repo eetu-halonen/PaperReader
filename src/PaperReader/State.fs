@@ -32,7 +32,14 @@ type ReaderState =
       Error: string option
       Finished: bool
       ShowOutline: bool
-      Zoomed: bool }
+      /// The equations list is open.
+      ShowEquations: bool
+      /// The visual shown full size, if any.
+      Zoom: string option
+      /// Where "stop at equations" pauses: segment index -> the equation it has just read and explained.
+      Stops: Map<int, string>
+      /// The equation kept on screen after such a stop, until the listener continues.
+      Held: string option }
 
 [<RequireQualifiedAccess>]
 type Screen =
@@ -76,7 +83,11 @@ type Msg =
     | ClipFailed of paperId: string * index: int * message: string
     | PlayerFailed of string
     | ToggleOutline
+    /// Shows the equation on screen full size, or closes the full-size view.
     | ToggleZoom
+    | ZoomVisual of string
+    | ToggleEquations
+    | SetStopAtEquations of bool
     | SetShowSettings of bool
     | SetApiKey of string
     | SetNarration of bool
@@ -185,7 +196,7 @@ let private errorText (e: exn) =
 /// Starts (or waits for) the clip at the reader's current position.
 let private play (r: ReaderState) (settings: Settings) : ReaderState * Cmd<Msg> =
     let gen = r.Generation + 1
-    let r = { r with Playing = true; Finished = false; Generation = gen }
+    let r = { r with Playing = true; Finished = false; Generation = gen; Held = None }
     let path = (paths ()).Audio(r.Paper.Id, r.VoiceKey, r.Current)
     // a clip cached on disk but not yet known here (the synthesizer only reports clips it makes)
     let r =
@@ -209,7 +220,7 @@ let private pause (r: ReaderState) : ReaderState * Cmd<Msg> =
 
 /// Moves to a position, keeping the play/pause state.
 let private seek (r: ReaderState) (settings: Settings) (pos: Timeline.Position) : ReaderState * Cmd<Msg> =
-    let r = { r with Current = pos.Segment; Offset = pos.OffsetMs; Finished = false; Error = None }
+    let r = { r with Current = pos.Segment; Offset = pos.OffsetMs; Finished = false; Error = None; Held = None }
     if r.Playing then play r settings
     else r, Cmd.batch [ moveSynth r.Current; saveProgress r ]
 
@@ -322,7 +333,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
     | ImportFinished (importId, result) ->
         match model.Screen, result with
         | Screen.Importing s, Ok (paper, _, warning) when s.Id = importId ->
-            let model = { model with Papers = loadLibrary (); Notice = warning |> Option.map (fun w -> "Some parts use the offline narration: " + w) }
+            let model = { model with Papers = loadLibrary (); Notice = warning }
             // a paper imported before may already have audio: load it like a library paper
             model, Cmd.ofMsg (OpenPaper paper)
         | Screen.Importing s, Error e when s.Id = importId -> { model with Screen = Screen.Library; Notice = Some e }, Cmd.none
@@ -333,6 +344,33 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         { model with Papers = loadLibrary (); ConfirmDelete = None }, Cmd.none
 
     // ----- reader
+    | OpenPaper paper when Import.needsRefresh (paths ()) paper.Id ->
+        // images from an older version: redraw them first (with an OCR check when a key is set)
+        let p = paths ()
+        let settings = model.Settings
+        let importId = Guid.NewGuid()
+        let work =
+            Cmd.ofEffect (fun dispatch ->
+                Task.Run(fun () ->
+                    task {
+                        try
+                            match Store.loadScript p paper.Id with
+                            | None -> dispatch (ImportFinished(importId, Error "This paper's cache is from an older version. Remove it and add the PDF again."))
+                            | Some script ->
+                                let! script =
+                                    Import.refreshCrops (platform ()) settings p paper.Id script (fun step progress ->
+                                        dispatch (ImportProgress(importId, step, progress)))
+                                dispatch (ImportFinished(importId, Ok(paper, script, None)))
+                        with e ->
+                            let e = match e with :? AggregateException as a when not (isNull a.InnerException) -> a.InnerException | e -> e
+                            dispatch (ImportFinished(importId, Error(errorText e)))
+                    }
+                    :> Task)
+                |> ignore)
+        { model with
+            ConfirmDelete = None
+            Screen = Screen.Importing { Id = importId; Name = paper.Title; Step = "Updating the equation images"; Progress = None; Cancel = new CancellationTokenSource() } },
+        work
     | OpenPaper paper ->
         let model = { model with ConfirmDelete = None }
         let p = paths ()
@@ -342,7 +380,6 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                 match Store.loadScript p paper.Id with
                 | None -> return failwith "This paper's cache is from an older version. Remove it and add the PDF again."
                 | Some script ->
-                    do! Import.refreshCrops (platform ()) p paper.Id script
                     let durations = Synth.cachedDurations (fun i -> p.Audio(paper.Id, key, i)) script.Segments.Length
                     return paper, script, durations
             }
@@ -362,7 +399,10 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
               Error = None
               Finished = false
               ShowOutline = false
-              Zoomed = false }
+              ShowEquations = false
+              Zoom = None
+              Stops = Narration.equationStops script
+              Held = None }
         let r, playCmd = play r model.Settings
         { model with Screen = Screen.Reader r }, Cmd.batch [ startSynth r model.Settings; playCmd ]
     | CloseReader ->
@@ -395,7 +435,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             seek r model.Settings (Timeline.forward (fun i -> r.Durations.TryFind i) r.Script.Segments.Length amount pos))
     | JumpToSegment i ->
         withReader model (fun r ->
-            let r = { r with ShowOutline = false }
+            let r = { r with ShowOutline = false; ShowEquations = false; Zoom = None }
             let r, cmd = seek r model.Settings { Segment = i; OffsetMs = 0 }
             if r.Playing then r, cmd else play r model.Settings)
     | CycleSpeed ->
@@ -409,6 +449,17 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
     | ClipEnded gen ->
         withReader model (fun r ->
             if gen <> r.Generation || not r.Playing then r, Cmd.none
+            elif model.Settings.StopAtEquations && r.Stops.ContainsKey r.Current && r.Current + 1 < r.Script.Segments.Length then
+                // the equation has been read and explained: keep it up and wait for the listener
+                let r =
+                    { r with
+                        Held = Some r.Stops.[r.Current]
+                        Current = r.Current + 1
+                        Offset = 0
+                        Playing = false
+                        Waiting = false
+                        Generation = r.Generation + 1 }
+                r, Cmd.batch [ stopAudio; playbackState r false; saveProgress r; moveSynth r.Current ]
             elif r.Current + 1 < r.Script.Segments.Length then
                 let r = { r with Current = r.Current + 1; Offset = 0 }
                 let r, cmd = play r model.Settings
@@ -428,8 +479,14 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             else r, Cmd.none)
     | PlayerFailed message ->
         withReader model (fun r -> { r with Playing = false; Waiting = false; Error = Some("Playback failed: " + message) }, playbackState r false)
-    | ToggleOutline -> withReader model (fun r -> { r with ShowOutline = not r.ShowOutline; Zoomed = false }, Cmd.none)
-    | ToggleZoom -> withReader model (fun r -> { r with Zoomed = not r.Zoomed }, Cmd.none)
+    | ToggleOutline -> withReader model (fun r -> { r with ShowOutline = not r.ShowOutline; ShowEquations = false; Zoom = None }, Cmd.none)
+    | ToggleEquations -> withReader model (fun r -> { r with ShowEquations = not r.ShowEquations; ShowOutline = false; Zoom = None }, Cmd.none)
+    | ToggleZoom ->
+        withReader model (fun r ->
+            match r.Zoom with
+            | Some _ -> { r with Zoom = None }, Cmd.none
+            | None -> { r with Zoom = (match r.Held with Some v -> Some v | None -> r.Script.Segments.[r.Current].Show) }, Cmd.none)
+    | ZoomVisual v -> withReader model (fun r -> { r with Zoom = Some v }, Cmd.none)
 
     // ----- settings
     | SetShowSettings show ->
@@ -459,6 +516,9 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
     | SetNarrationModel m ->
         let settings = { model.Settings with NarrationModel = (if String.IsNullOrWhiteSpace m then Settings.defaults.NarrationModel else m.Trim()) }
         { model with Settings = settings }, saveSettings settings
+    | SetStopAtEquations on ->
+        let settings = { model.Settings with StopAtEquations = on }
+        { model with Settings = settings }, saveSettings settings
     | SetMistralVoice on ->
         let settings = { model.Settings with UseMistralVoice = on }
         { model with Settings = settings }, saveSettings settings
@@ -483,8 +543,9 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         if model.ShowSettings then update (SetShowSettings false) model
         else
             match model.Screen with
-            | Screen.Reader r when r.Zoomed -> update ToggleZoom model
+            | Screen.Reader r when r.Zoom.IsSome -> update ToggleZoom model
             | Screen.Reader r when r.ShowOutline -> update ToggleOutline model
+            | Screen.Reader r when r.ShowEquations -> update ToggleEquations model
             | Screen.Reader _ -> update CloseReader model
             | Screen.Importing _ -> update CancelImport model
             | Screen.Library -> model, Cmd.none

@@ -104,7 +104,7 @@ let ``script survives a save and load`` () =
     let root = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString "N")
     let paths = Store.Paths root
     Directory.CreateDirectory(paths.Paper "abc") |> ignore
-    let visual = { Id = "E3"; Kind = VisualKind.Algorithm; Parts = [| { Page = 1; X = 1.5; Y = 2.0; W = 30.0; H = 4.0 }; { Page = 1; X = 5.0; Y = 9.0; W = 10.0; H = 3.0 } |]; EqNumber = Some "1"; RawText = "x_{i}" }
+    let visual = { Id = "E3"; Kind = VisualKind.Algorithm; Parts = [| { Page = 1; X = 1.5; Y = 2.0; W = 30.0; H = 4.0 }; { Page = 1; X = 5.0; Y = 9.0; W = 10.0; H = 3.0 } |]; EqNumber = Some "1"; RawText = "x_{i}"; Latex = Some @"x_{i}" }
     let script =
         { Version = Script.currentVersion; Title = "T"; PageCount = 2; Narrator = "offline"
           Sections = [| { Title = "T"; FirstSegment = 0 } |]
@@ -121,7 +121,7 @@ let ``script survives a save and load`` () =
 [<Fact>]
 let ``an equation stays on screen for the sentences that explain it`` () =
     let unit id kind vis = { Id = id; Kind = kind; Text = id; Spoken = "say " + id; Visual = vis; Page = 0; Section = 1; ParagraphEnd = false }
-    let v = { Id = "E1"; Kind = VisualKind.Equation; Parts = [| { Page = 0; X = 0.0; Y = 0.0; W = 1.0; H = 1.0 } |]; EqNumber = Some "4"; RawText = "" }
+    let v = { Id = "E1"; Kind = VisualKind.Equation; Parts = [| { Page = 0; X = 0.0; Y = 0.0; W = 1.0; H = 1.0 } |]; EqNumber = Some "4"; RawText = ""; Latex = None }
     let a =
         { Title = "T"; PageCount = 1; Sections = [| "T"; "S" |]; Visuals = [| v |]
           Units = [| unit "E1" UnitKind.Equation (Some "E1"); unit "S1" UnitKind.Sentence None; unit "S2" UnitKind.Sentence None
@@ -132,3 +132,82 @@ let ``an equation stays on screen for the sentences that explain it`` () =
     Assert.Equal((Some "E1", ShowReason.Recent), shown.[3])
     Assert.Equal((None, ShowReason.Own), shown.[4])
     Assert.Equal((Some "E1", ShowReason.Reference), shown.[5])
+
+// ---- stopping at equations
+
+let private seg i show reason =
+    { Index = i; Kind = UnitKind.Sentence; Say = "s"; Show = show; Reason = reason; Section = 1; Page = 0; PauseAfterMs = 0 }
+
+let private scriptWith (segments: Segment[]) (visuals: Visual[]) =
+    { Version = Script.currentVersion; Title = "T"; PageCount = 1; Narrator = "offline"
+      Sections = [| { Title = "T"; FirstSegment = 0 } |]; Segments = segments; Visuals = visuals }
+
+let private eq id = { Id = id; Kind = VisualKind.Equation; Parts = [| { Page = 0; X = 0.0; Y = 0.0; W = 10.0; H = 10.0 } |]; EqNumber = None; RawText = ""; Latex = None }
+
+[<Fact>]
+let ``the reader stops after the last sentence that explains an equation, not after the ones that only keep it up`` () =
+    let s =
+        scriptWith
+            [| seg 0 None ShowReason.Own
+               seg 1 (Some "E1") ShowReason.Own          // the equation is read
+               seg 2 (Some "E1") ShowReason.Reference    // "where x is ..."
+               seg 3 (Some "E1") ShowReason.Recent       // only kept on screen
+               seg 4 None ShowReason.Own
+               seg 5 (Some "E1") ShowReason.Reference    // referred to again later: no second stop
+               seg 6 (Some "E2") ShowReason.Own |]
+            [| eq "E1"; eq "E2" |]
+    Assert.Equal<Map<int, string>>(Map.ofList [ 2, "E1"; 6, "E2" ], Narration.equationStops s)
+    Assert.Equal<(string * int)[]>([| "E1", 1; "E2", 6 |], Narration.equationOrder s |> Array.map (fun (v, i) -> v.Id, i))
+
+[<Fact>]
+let ``inline math never stops the reader`` () =
+    let inlineVisual = { eq "S1" with Kind = VisualKind.Inline }
+    let s = scriptWith [| seg 0 (Some "S1") ShowReason.Own |] [| inlineVisual |]
+    Assert.True((Narration.equationStops s).IsEmpty)
+
+// ---- OCR
+
+[<Fact>]
+let ``math is taken out of OCR markdown without delimiters or tags`` () =
+    let md = "We have $x_i$ and\n$$\\frac{1}{\\sqrt{d_k}} \\tag{2}$$\nand \\[ a = b \\] also \\(c\\)."
+    Assert.Equal<string list>([ "x_i"; @"\frac{1}{\sqrt{d_k}}"; "a = b"; "c" ], Ocr.mathPieces md)
+
+[<Fact>]
+let ``the OCR piece that matches the extracted text is chosen`` () =
+    let pieces = [ @"\alpha = 0.1"; @"\mathrm{Attention}(Q, K, V) = \mathrm{softmax}(QK^T)V" ]
+    Assert.Equal<string list>([ pieces.[1] ], Ocr.bestPieces "Attention(Q,K,V) = softmax(QKT)V" pieces)
+
+[<Fact>]
+let ``OCR grows a display equation that was cut short and records its LaTeX`` () =
+    // page 600 x 800 pt, OCR image 1200 x 1600 px (2 px per point)
+    let v = { eq "E1" with Parts = [| { Page = 0; X = 100.0; Y = 200.0; W = 150.0; H = 20.0 } |] }
+    let block = { Mistral.X0 = 190.0; Mistral.Y0 = 396.0; Mistral.X1 = 560.0; Mistral.Y1 = 444.0; Mistral.Kind = "equation"; Mistral.Content = "$$y = f(x) + g(x)$$" }
+    let page = { Mistral.Index = 0; Mistral.Width = 1200.0; Mistral.Height = 1600.0; Mistral.Markdown = ""; Mistral.Blocks = [ block ] }
+    let refined = (Ocr.refine [ page ] [| 600.0, 800.0 |] [| v |]).[0]
+    let r = refined.Parts.[0]
+    Assert.Equal(95.0, r.X, 3)
+    Assert.Equal(198.0, r.Y, 3)
+    Assert.Equal(280.0, r.X + r.W, 3)
+    Assert.Equal(222.0, r.Y + r.H, 3)
+    Assert.Equal(Some "y = f(x) + g(x)", refined.Latex)
+
+[<Fact>]
+let ``an OCR block elsewhere on the page leaves the equation alone`` () =
+    let v = { eq "E1" with Parts = [| { Page = 0; X = 100.0; Y = 200.0; W = 150.0; H = 20.0 } |] }
+    let block = { Mistral.X0 = 100.0; Mistral.Y0 = 1000.0; Mistral.X1 = 400.0; Mistral.Y1 = 1040.0; Mistral.Kind = "equation"; Mistral.Content = "$$z$$" }
+    let page = { Mistral.Index = 0; Mistral.Width = 1200.0; Mistral.Height = 1600.0; Mistral.Markdown = ""; Mistral.Blocks = [ block ] }
+    let refined = (Ocr.refine [ page ] [| 600.0, 800.0 |] [| v |]).[0]
+    Assert.Equal<PageRect[]>(v.Parts, refined.Parts)
+    Assert.Equal(None, refined.Latex)
+
+// ---- crop cleanup
+
+[<Fact>]
+let ``a glyph running into the right edge counts as cut off`` () =
+    let white, black = 0xFFFFFFFF |> int, 0xFF000000 |> int
+    let w, h = 40, 20
+    let px = Array.create (w * h) white
+    for y in 5 .. 14 do
+        for x in 10 .. 39 do px.[y * w + x] <- black // a thick bar reaching the right edge
+    CropTidy.clean px w h false
+    Assert.Equal((false, false, true, false), CropTidy.clipped px w h)

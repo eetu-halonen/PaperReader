@@ -13,13 +13,25 @@ let private runs (flags: bool[]) =
               yield s, i - 1
           else i <- i + 1 ]
 
-/// Blanks slivers of the neighbouring lines cut by the top or bottom edge, drops a right-aligned
-/// equation number, and trims the white margins. Returns the new pixels and size; `px` is modified.
-let tidy (px: int[]) (w: int) (h: int) (dropNumber: bool) : int[] * int * int =
-    let ink (c: int) =
-        let r, g, b = (c >>> 16) &&& 0xff, (c >>> 8) &&& 0xff, c &&& 0xff
-        r * 3 + g * 6 + b < 2300 // luminance below ~230, so faint antialiased slivers count too
-    let rowInk y = Seq.exists (fun x -> ink px.[y * w + x]) (seq { 0 .. w - 1 })
+let private ink (c: int) =
+    let r, g, b = (c >>> 16) &&& 0xff, (c >>> 8) &&& 0xff, c &&& 0xff
+    r * 3 + g * 6 + b < 2300 // luminance below ~230, so faint antialiased slivers count too
+
+let private rowInk (px: int[]) w y = Seq.exists (fun x -> ink px.[y * w + x]) (seq { 0 .. w - 1 })
+let private colInk (px: int[]) w h x = Seq.exists (fun y -> ink px.[y * w + x]) (seq { 0 .. h - 1 })
+
+/// Column runs of ink, with the glyphs of one word or number (e.g. "(1)") merged into one run.
+let private columnRuns (px: int[]) w h =
+    runs (Array.init w (colInk px w h))
+    |> List.fold (fun acc (s, e) ->
+        match acc with
+        | (ps, pe) :: rest when s - pe <= 18 -> (ps, e) :: rest
+        | _ -> (s, e) :: acc) []
+    |> List.rev
+
+/// Blanks slivers of the neighbouring lines cut by the top or bottom edge, and a right-aligned
+/// equation number. Modifies `px`.
+let clean (px: int[]) (w: int) (h: int) (dropNumber: bool) =
     let blankRows a b = for y in a .. b do Array.fill px (y * w) w white
     // a band of rows cut by the edge belongs to the line above or below when it is thin, or when it
     // runs into the crop's sides (a centred numerator over a fraction bar does neither)
@@ -27,7 +39,7 @@ let tidy (px: int[]) (w: int) (h: int) (dropNumber: bool) : int[] * int * int =
         let touchesSide =
             seq { s .. e } |> Seq.exists (fun y -> ink px.[y * w] || ink px.[y * w + 1] || ink px.[y * w + w - 1] || ink px.[y * w + w - 2])
         float (e - s + 1) < 0.22 * float h || touchesSide
-    let rows = runs (Array.init h rowInk)
+    let rows = runs (Array.init h (rowInk px w))
     match rows with
     | first :: _ :: _ ->
         let s, e = first
@@ -35,22 +47,25 @@ let tidy (px: int[]) (w: int) (h: int) (dropNumber: bool) : int[] * int * int =
         let s, e = List.last rows
         if e >= h - 3 && foreign (s, e) then blankRows s e
     | _ -> ()
-    let colInk x = Seq.exists (fun y -> ink px.[y * w + x]) (seq { 0 .. h - 1 })
-    // glyphs of one word or number, e.g. "(1)", count as one run
-    let cols =
-        runs (Array.init w colInk)
-        |> List.fold (fun acc (s, e) ->
-            match acc with
-            | (ps, pe) :: rest when s - pe <= 18 -> (ps, e) :: rest
-            | _ -> (s, e) :: acc) []
-        |> List.rev
-    let cols =
-        match List.rev cols with
-        | (ns, ne) :: (_, pe) :: _ when dropNumber && ns - pe > w / 12 && ne - ns < w / 8 ->
+    if dropNumber then
+        match List.rev (columnRuns px w h) with
+        | (ns, ne) :: (_, pe) :: _ when ns - pe > w / 12 && ne - ns < w / 8 ->
             for y in 0 .. h - 1 do Array.fill px (y * w + ns) (ne - ns + 1) white
-            List.take (cols.Length - 1) cols
-        | _ -> cols
-    let rows = runs (Array.init h rowInk)
+        | _ -> ()
+
+/// Which edges ink still touches after `clean` (left, top, right, bottom): a glyph cut off there.
+let clipped (px: int[]) (w: int) (h: int) =
+    let col x = colInk px w h x
+    let row y = rowInk px w y
+    (col 0 || col 1), (row 0 || row 1), (col (w - 1) || col (w - 2)), (row (h - 1) || row (h - 2))
+
+/// True when there is no ink at all.
+let blank (px: int[]) = not (Array.exists ink px)
+
+/// Trims the white margins, keeping a small border.
+let trim (px: int[]) (w: int) (h: int) : int[] * int * int =
+    let cols = columnRuns px w h
+    let rows = runs (Array.init h (rowInk px w))
     match cols, rows with
     | [], _ | _, [] -> px, w, h
     | _ ->
@@ -63,3 +78,8 @@ let tidy (px: int[]) (w: int) (h: int) (dropNumber: bool) : int[] * int * int =
         let out = Array.zeroCreate<int> (cw * ch)
         for y in 0 .. ch - 1 do Array.blit px ((y + y0) * w + x0) out (y * cw) cw
         out, cw, ch
+
+/// `clean` then `trim`. Returns the new pixels and size; `px` is modified.
+let tidy (px: int[]) (w: int) (h: int) (dropNumber: bool) : int[] * int * int =
+    clean px w h dropNumber
+    trim px w h

@@ -150,72 +150,44 @@ type SystemSpeech(context: Context) =
             }
 
 // ---------------------------------------------------------------------------------------------
-// Cropping the math out of the PDF
+// Rendering PDF regions (the equation images are assembled in the shared Crops module)
 // ---------------------------------------------------------------------------------------------
 
-module Crops =
-    let private gapPx = 24
-    let private white = Color.White.ToArgb()
+/// Renders regions of one PDF with Android's PdfRenderer, keeping the last page open.
+type AndroidPdf(path: string) =
+    let fd = ParcelFileDescriptor.Open(new Java.IO.File(path), ParcelFileMode.ReadOnly)
+    let renderer = new PdfRenderer(fd)
+    let mutable page: PdfRenderer.Page = null
+    let mutable pageIndex = -1
 
-    /// Cleans one rendered region (see CropTidy).
-    let private tidy (bmp: Bitmap) (dropNumber: bool) : Bitmap =
-        let w, h = bmp.Width, bmp.Height
-        let px = Array.zeroCreate<int> (w * h)
-        bmp.GetPixels(px, 0, w, 0, 0, w, h)
-        let out, cw, ch = CropTidy.tidy px w h dropNumber
-        Bitmap.CreateBitmap(out, cw, ch, Bitmap.Config.Argb8888)
+    let closePage () =
+        if not (isNull page) then
+            page.Close()
+            page <- null
+            pageIndex <- -1
 
-    /// Renders a visual's regions at about 3x the paper's size (216 dpi), each tidied, stacked top to
-    /// bottom and centred with a thin divider between parts. Very wide regions are scaled down to stay
-    /// under 2400 px.
-    let render (pdfPath: string) (crops: (Visual * string) list) (progress: int -> unit) (ct: CancellationToken) =
-        use fd = ParcelFileDescriptor.Open(new Java.IO.File(pdfPath), ParcelFileMode.ReadOnly)
-        use renderer = new PdfRenderer(fd)
-        let mutable doneCount = 0
-        use divider = new Paint(Color = Color.Rgb(224, 226, 230), StrokeWidth = 3.0f)
-        for (page, items) in crops |> List.groupBy (fun (v, _) -> v.Page) do
-            if page < renderer.PageCount then
-                use p = renderer.OpenPage page
-                for (v, output) in items do
-                    ct.ThrowIfCancellationRequested()
-                    if not (File.Exists output) then
-                        let widest = v.Parts |> Array.map (fun r -> r.W) |> Array.max
-                        let scale = min 3.0 (2400.0 / max 1.0 widest)
-                        let dropNumber = v.Kind = VisualKind.Equation && v.EqNumber.IsSome
-                        let parts =
-                            v.Parts
-                            |> Array.map (fun r ->
-                                let pw, ph = max 1 (int (r.W * scale)), max 1 (int (r.H * scale))
-                                let bmp = Bitmap.CreateBitmap(pw, ph, Bitmap.Config.Argb8888)
-                                bmp.EraseColor white
-                                use m = new Matrix()
-                                m.PostTranslate(float32 -r.X, float32 -r.Y) |> ignore
-                                m.PostScale(float32 scale, float32 scale) |> ignore
-                                p.Render(bmp, null, m, PdfRenderMode.ForDisplay)
-                                let t = tidy bmp dropNumber
-                                if not (obj.ReferenceEquals(t, bmp)) then bmp.Recycle()
-                                t)
-                        let w = parts |> Array.map (fun b -> b.Width) |> Array.max
-                        let h = (parts |> Array.sumBy (fun b -> b.Height)) + gapPx * (parts.Length - 1)
-                        use bmp = Bitmap.CreateBitmap(w, h, Bitmap.Config.Argb8888)
-                        bmp.EraseColor white
-                        use canvas = new Canvas(bmp)
-                        let mutable top = 0
-                        for k in 0 .. parts.Length - 1 do
-                            let part = parts.[k]
-                            if k > 0 then
-                                let y = float32 (top - gapPx / 2)
-                                canvas.DrawLine(0.0f, y, float32 w, y, divider)
-                            canvas.DrawBitmap(part, float32 ((w - part.Width) / 2), float32 top, null)
-                            top <- top + part.Height + gapPx
-                            part.Recycle()
-                        let tmp = output + ".tmp"
-                        do
-                            use fs = File.Create tmp
-                            bmp.Compress(Bitmap.CompressFormat.Png, 100, fs) |> ignore
-                        File.Move(tmp, output, true)
-                    doneCount <- doneCount + 1
-                    progress doneCount
+    interface IPdfPages with
+        member _.Render(index, r, scale) =
+            if index <> pageIndex then
+                closePage ()
+                page <- renderer.OpenPage index
+                pageIndex <- index
+            let w, h = max 1 (int (r.W * scale)), max 1 (int (r.H * scale))
+            use bmp = Bitmap.CreateBitmap(w, h, Bitmap.Config.Argb8888)
+            bmp.EraseColor(Color.White.ToArgb())
+            use m = new Matrix()
+            m.PostTranslate(float32 -r.X, float32 -r.Y) |> ignore
+            m.PostScale(float32 scale, float32 scale) |> ignore
+            page.Render(bmp, null, m, PdfRenderMode.ForDisplay)
+            let px = Array.zeroCreate<int> (w * h)
+            bmp.GetPixels(px, 0, w, 0, 0, w, h)
+            px, w, h
+
+    interface IDisposable with
+        member _.Dispose() =
+            closePage ()
+            renderer.Close()
+            fd.Close()
 
 // ---------------------------------------------------------------------------------------------
 // Platform
@@ -253,8 +225,7 @@ type AndroidPlatform(context: Context) =
     interface IPlatform with
         member _.DataDir = context.FilesDir.AbsolutePath
 
-        member _.RenderCrops(pdf, crops, progress, ct) =
-            Task.Run((fun () -> Crops.render pdf crops progress ct), ct)
+        member _.OpenPdf(pdf) = new AndroidPdf(pdf) :> IPdfPages
 
         member _.SystemSpeech = Some speech.Value
         member _.Player = player :> IAudioPlayer

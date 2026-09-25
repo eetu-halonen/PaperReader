@@ -4,6 +4,7 @@
   </PropertyGroup>
   <ItemGroup>
     <Compile Include="Platform.fs" />
+    <Compile Include="Crops.fs" />
     <Compile Include="Import.fs" />
     <Compile Include="State.fs" />
     <Compile Include="Views.fs" />
@@ -15,6 +16,9 @@
     <PackageReference Include="Avalonia.Fonts.Inter" Version="$(AvaloniaVersion)" />
     <PackageReference Include="Avalonia.FuncUI" Version="$(FuncUIVersion)" />
     <PackageReference Include="Avalonia.FuncUI.Elmish" Version="$(FuncUIVersion)" />
+    <!-- the version Avalonia's renderer uses; CSharpMath draws OCR'd LaTeX when a crop can't be made whole -->
+    <PackageReference Include="SkiaSharp" Version="$(SkiaSharpVersion)" />
+    <PackageReference Include="CSharpMath.SkiaSharp" Version="$(CSharpMathVersion)" />
   </ItemGroup>
   <ItemGroup>
     <ProjectReference Include="..\PaperReader.Core\PaperReader.Core.fsproj" />

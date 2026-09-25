@@ -163,3 +163,51 @@ let chatJson (key: string) (model: string) (system: string) (user: Part list) (c
                 |> String.concat ""
             | _ -> ""
     }
+
+/// A region Mistral OCR recognised, in pixels of its page image.
+type OcrBlock = { X0: float; Y0: float; X1: float; Y1: float; Kind: string; Content: string }
+
+/// One page of Mistral OCR output. Width and Height are the page image's size in pixels.
+type OcrPage = { Index: int; Width: float; Height: float; Markdown: string; Blocks: OcrBlock list }
+
+let ocrModel = "mistral-ocr-latest"
+
+/// Mistral OCR on a PDF ("application/pdf") or an image ("image/png"); returns markdown with LaTeX math.
+let ocr (key: string) (mime: string) (bytes: byte[]) (ct: CancellationToken) : Task<OcrPage list> =
+    task {
+        let uri = sprintf "data:%s;base64,%s" mime (Convert.ToBase64String bytes)
+        let kind, field = if mime = "application/pdf" then "document_url", "document_url" else "image_url", "image_url"
+        let doc =
+            JsonObject([ Collections.Generic.KeyValuePair("type", JsonValue.Create kind :> JsonNode)
+                         Collections.Generic.KeyValuePair(field, JsonValue.Create uri :> JsonNode) ])
+        let payload =
+            JsonObject([ Collections.Generic.KeyValuePair("model", JsonValue.Create ocrModel :> JsonNode)
+                         Collections.Generic.KeyValuePair("document", doc :> JsonNode) ])
+        let! body =
+            send key (fun () -> new HttpRequestMessage(HttpMethod.Post, baseUrl + "/v1/ocr", Content = jsonContent payload)) ct
+        use d = JsonDocument.Parse body
+        let num (e: JsonElement) (name: string) =
+            match e.TryGetProperty name with
+            | true, v when v.ValueKind = JsonValueKind.Number -> v.GetDouble()
+            | _ -> 0.0
+        let str (e: JsonElement) (name: string) =
+            match e.TryGetProperty name with
+            | true, v when v.ValueKind = JsonValueKind.String -> v.GetString()
+            | _ -> ""
+        return
+            [ for p in d.RootElement.GetProperty("pages").EnumerateArray() do
+                  let dims = match p.TryGetProperty "dimensions" with | true, x when x.ValueKind = JsonValueKind.Object -> Some x | _ -> None
+                  let blocks =
+                      match p.TryGetProperty "blocks" with
+                      | true, bs when bs.ValueKind = JsonValueKind.Array ->
+                          [ for b in bs.EnumerateArray() ->
+                                { X0 = num b "top_left_x"; Y0 = num b "top_left_y"; X1 = num b "bottom_right_x"; Y1 = num b "bottom_right_y"
+                                  Kind = str b "type"; Content = str b "content" } ]
+                      | _ -> []
+                  yield
+                      { Index = int (num p "index")
+                        Width = dims |> Option.map (fun x -> num x "width") |> Option.defaultValue 0.0
+                        Height = dims |> Option.map (fun x -> num x "height") |> Option.defaultValue 0.0
+                        Markdown = str p "markdown"
+                        Blocks = blocks } ]
+    }

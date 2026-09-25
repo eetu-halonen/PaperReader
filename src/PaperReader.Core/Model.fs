@@ -26,7 +26,9 @@ type Visual =
       /// Equation (or algorithm) number as printed in the paper, e.g. "3" or "A.2".
       EqNumber: string option
       /// Text extracted from the region (garbled for math, but useful context for the narrator).
-      RawText: string }
+      RawText: string
+      /// The formula as LaTeX, read by Mistral OCR (when a key is set).
+      Latex: string option }
 
     member v.Page = v.Parts.[0].Page
 
@@ -115,7 +117,9 @@ type Settings =
       UseMistralVoice: bool
       VoiceId: string
       VoiceName: string
-      Speed: float }
+      Speed: float
+      /// Pause after an equation has been read and explained, until the listener continues.
+      StopAtEquations: bool }
 
 module Settings =
     let defaults =
@@ -125,7 +129,8 @@ module Settings =
           UseMistralVoice = true
           VoiceId = "en_paul_neutral"
           VoiceName = "Paul - Neutral"
-          Speed = 1.0 }
+          Speed = 1.0
+          StopAtEquations = false }
 
     let hasKey (s: Settings) = not (System.String.IsNullOrWhiteSpace s.MistralApiKey)
 

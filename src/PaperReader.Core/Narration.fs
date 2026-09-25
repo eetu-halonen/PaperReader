@@ -129,7 +129,7 @@ let systemPrompt = """You write the narration script for a phone app that reads 
 You receive the text of part of a paper, extracted from a PDF, as numbered source units in reading order:
 - [T#] the title, [H#] a section heading,
 - [S#] a sentence. Extraction garbles inline math: subscripts appear as x_{i}, superscripts as x^{2}, symbols may be missing or odd.
-- [E#] a display equation. Its image is attached right after it; the extracted text is only a rough hint.
+- [E#] a display equation. Its image is attached right after it; the extracted text is only a rough hint, the OCR LaTeX (when given) is usually exact.
 
 Write segments that narrate every unit, in order. Rules:
 1. Be faithful. Narrate every sentence; do not summarise, skip, reorder, or add claims. Rephrase only as much as needed for listening; keep the authors' wording otherwise.
@@ -180,7 +180,10 @@ let private label (u: SourceUnit) (visuals: Collections.Generic.IDictionary<stri
             match u.Visual |> Option.bind (fun v -> match visuals.TryGetValue v with | true, x -> x.EqNumber | _ -> None) with
             | Some n -> sprintf " numbered (%s)" n
             | None -> " unnumbered"
-        sprintf "[%s] EQUATION%s. Extracted text: %s\n(image of %s follows)" u.Id num (u.Text.Replace("\n", " ")) u.Id
+        match u.Visual |> Option.bind (fun v -> match visuals.TryGetValue v with | true, x -> x.Latex | _ -> None) with
+        | Some latex ->
+            sprintf "[%s] EQUATION%s. LaTeX (read by OCR): %s\n(image of %s follows)" u.Id num (latex.Replace("\n", @" \\ ")) u.Id
+        | None -> sprintf "[%s] EQUATION%s. Extracted text: %s\n(image of %s follows)" u.Id num (u.Text.Replace("\n", " ")) u.Id
 
 let private cleanSay (s: string) =
     let s = Regex.Replace(s, @"[*_#`$\\]", " ")
@@ -319,3 +322,33 @@ let buildWithMistral
         let warning = if fellBack > 0 then firstError else None
         return finalize a narrator drafts, warning
     }
+
+/// Display equations and algorithms in the order they are first narrated, with that segment's index.
+let equationOrder (s: Script) : (Visual * int)[] =
+    let seen = Collections.Generic.HashSet<string>()
+    [| for seg in s.Segments do
+           match seg.Show |> Option.bind s.Visual with
+           | Some v when v.Kind <> VisualKind.Inline && seg.Reason <> ShowReason.Recent && seen.Add v.Id -> yield v, seg.Index
+           | _ -> () |]
+
+/// Where "stop at equations" pauses: for each display equation or algorithm, after the last segment of its
+/// first appearance that reads it or explains it (sentences that merely keep it on screen don't count).
+/// Maps segment index -> visual id.
+let equationStops (s: Script) : Map<int, string> =
+    let segs = s.Segments
+    let big (id: string) = s.Visual id |> Option.exists (fun v -> v.Kind <> VisualKind.Inline)
+    let seen = Collections.Generic.HashSet<string>()
+    let mutable stops = Map.empty
+    let mutable i = 0
+    while i < segs.Length do
+        match segs.[i].Show with
+        | Some v when big v && segs.[i].Reason <> ShowReason.Recent && seen.Add v ->
+            let mutable j = i
+            let mutable last = i
+            while j + 1 < segs.Length && segs.[j + 1].Show = Some v do
+                j <- j + 1
+                if segs.[j].Reason <> ShowReason.Recent then last <- j
+            stops <- stops.Add(last, v)
+            i <- j + 1
+        | _ -> i <- i + 1
+    stops

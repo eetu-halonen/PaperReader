@@ -10,6 +10,14 @@ An Android app that reads research papers (PDF) aloud and shows the math on scre
   equation images) and Voxtral reads it aloud. Without one, an offline narration and the
   phone's own text-to-speech are used.
 - Audio is made a few sentences ahead of the listener and cached, so nothing is generated twice.
+- Equation images are checked to be whole: a crop grows (up to 8 pt per side) while a glyph touches its
+  edge, and with a Mistral key every display equation is read by Mistral OCR, which also corrects crops
+  that miss part of an equation. An equation that still can't be cut out whole is typeset from the OCR'd
+  LaTeX instead (CSharpMath).
+- *Stop at equations* (Settings): after an equation or algorithm has been read and explained, playback
+  pauses with it on screen until you tap Continue (or *Hear it again*).
+- The Σ button lists every equation: the ones heard so far (latest first) and the ones coming up, each
+  with *Listen from here*; tap one to see it full size.
 - Controls: play/pause, back and forward 15 s, speed, contents list. Playback continues in the
   background, with a media notification, lock-screen and headset controls; it pauses for calls
   and when headphones are unplugged.
@@ -83,5 +91,5 @@ MISTRAL_API_KEY=... dotnet run --project tools/ScriptDump -- paper.pdf --mistral
 
 - Scanned (image-only) PDFs are not supported.
 - Figure labels and math-heavy table cells sometimes reach the offline narration.
-- Some inline-math crops miss a glyph at the edge, where the layout analysis cuts a formula short.
+- Occasionally a line that isn't an equation (a table header, a sentence full of symbols) is treated as one.
 - Changing the narration model does not re-narrate papers already added (remove and add them again).

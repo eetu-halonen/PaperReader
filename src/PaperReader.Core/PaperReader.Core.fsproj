@@ -11,6 +11,7 @@
     <Compile Include="Wav.fs" />
     <Compile Include="Timeline.fs" />
     <Compile Include="Mistral.fs" />
+    <Compile Include="Ocr.fs" />
     <Compile Include="Narration.fs" />
     <Compile Include="Store.fs" />
     <Compile Include="Synth.fs" />

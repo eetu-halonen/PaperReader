@@ -47,7 +47,7 @@ let bitmap (path: string) : Bitmap option =
             bitmaps.[path] <- b
             recent.AddLast path |> ignore
             // keep memory bounded; evicted bitmaps are left to the GC in case a control still holds one
-            while recent.Count > 24 do
+            while recent.Count > 64 do
                 bitmaps.Remove recent.First.Value |> ignore
                 recent.RemoveFirst()
             Some b
@@ -70,6 +70,7 @@ module Icons =
     let trash = "M5 7 H19 M10 7 V4.5 H14 V7 M7 7 L8 19.5 H16 L17 7"
     let expand = "M4 9 V4 H9 M15 4 H20 V9 M20 15 V20 H15 M9 20 H4 V15"
     let plus = "M12 5 V19 M5 12 H19"
+    let sigma = "M17 5 H7 L13 12 L7 19 H17"
 
 let icon (data: string) (color: string) (size: float) (filled: bool) : IView =
     Viewbox.create [
@@ -352,15 +353,17 @@ let private importingView (s: ImportState) (dispatch: Msg -> unit) : IView =
 // Reader
 // ---------------------------------------------------------------------------------------------
 
+let private visualName (v: Visual) =
+    match v.Kind, v.EqNumber with
+    | VisualKind.Algorithm, Some n -> sprintf "Algorithm %s" n
+    | VisualKind.Algorithm, None -> "Algorithm"
+    | VisualKind.Equation, Some n when n.Contains "–" -> sprintf "Equations (%s)" n
+    | VisualKind.Equation, Some n -> sprintf "Equation (%s)" n
+    | VisualKind.Equation, None -> "Equation"
+    | VisualKind.Inline, _ -> "From the text"
+
 let private visualCaption (script: Script) (seg: Segment) (v: Visual) =
-    let name =
-        match v.Kind, v.EqNumber with
-        | VisualKind.Algorithm, Some n -> sprintf "Algorithm %s" n
-        | VisualKind.Algorithm, None -> "Algorithm"
-        | VisualKind.Equation, Some n when n.Contains "–" -> sprintf "Equations (%s)" n
-        | VisualKind.Equation, Some n -> sprintf "Equation (%s)" n
-        | VisualKind.Equation, None -> "Equation"
-        | VisualKind.Inline, _ -> "From the text"
+    let name = visualName v
     let where = sprintf "page %d" (v.Page + 1)
     match seg.Reason with
     | ShowReason.Own -> sprintf "%s · %s" name where
@@ -381,9 +384,13 @@ let private remainingMs (r: ReaderState) (speed: float) =
 /// Display size of a crop pixel, in dp.
 let private mathScale = 0.9
 
+/// The segment where an equation is first read, for "hear it again".
+let private firstReading (script: Script) (id: string) =
+    Narration.equationOrder script |> Array.tryFind (fun (v, _) -> v.Id = id) |> Option.map snd
+
 let private stage (r: ReaderState) (seg: Segment) (dispatch: Msg -> unit) : IView =
     let paths = Store.Paths((Services.get ()).DataDir)
-    let visual = seg.Show |> Option.bind r.Script.Visual
+    let visual = (match r.Held with Some v -> Some v | None -> seg.Show) |> Option.bind r.Script.Visual
     let image = visual |> Option.bind (fun v -> bitmap (paths.Image(r.Paper.Id, v.Id)) |> Option.map (fun b -> v, b))
     match image with
     | Some (v, bmp) ->
@@ -410,7 +417,9 @@ let private stage (r: ReaderState) (seg: Segment) (dispatch: Msg -> unit) : IVie
                                     Grid.children [
                                         TextBlock.create [
                                             Grid.column 0
-                                            TextBlock.text (visualCaption r.Script seg v)
+                                            TextBlock.text (
+                                                if r.Held.IsSome then sprintf "%s · page %d · stopped here" (visualName v) (v.Page + 1)
+                                                else visualCaption r.Script seg v)
                                             TextBlock.fontSize 12.0
                                             TextBlock.foreground Palette.ink
                                             TextBlock.textTrimming TextTrimming.CharacterEllipsis
@@ -433,6 +442,27 @@ let private stage (r: ReaderState) (seg: Segment) (dispatch: Msg -> unit) : IVie
                         ]
                     )
                 ]
+                if r.Held.IsSome then
+                    // stopped at an equation: take time with it, then carry on from the next sentence
+                    StackPanel.create [
+                        Grid.row 1
+                        StackPanel.margin (Thickness(22.0, 0.0, 22.0, 14.0))
+                        StackPanel.spacing 12.0
+                        StackPanel.children [
+                            label "Take your time with it. Continue when you're ready." 16.0 Palette.muted
+                            StackPanel.create [
+                                StackPanel.orientation Orientation.Horizontal
+                                StackPanel.spacing 10.0
+                                StackPanel.children [
+                                    pill "Continue" (fun () -> dispatch TogglePlay) true
+                                    match firstReading r.Script v.Id with
+                                    | Some i -> pill "Hear it again" (fun () -> dispatch (JumpToSegment i)) false
+                                    | None -> ()
+                                ]
+                            ]
+                        ]
+                    ]
+                else
                 Border.create [
                     Grid.row 1
                     Border.padding (Thickness(22.0, 0.0, 22.0, 14.0))
@@ -699,9 +729,109 @@ let private outlineOverlay (r: ReaderState) (dispatch: Msg -> unit) : IView =
         )
     ]
 
-let private zoomOverlay (r: ReaderState) (seg: Segment) (dispatch: Msg -> unit) : IView =
+let private sectionLabel (text: string) : IView =
+    TextBlock.create [
+        TextBlock.text text
+        TextBlock.fontSize 12.0
+        TextBlock.fontWeight FontWeight.Bold
+        TextBlock.foreground Palette.accent
+        TextBlock.margin (Thickness(4.0, 8.0, 0.0, 0.0))
+    ]
+
+let private equationCard (r: ReaderState) (v: Visual) (firstSegment: int) (ahead: bool) (dispatch: Msg -> unit) : IView =
     let paths = Store.Paths((Services.get ()).DataDir)
-    let bmp = seg.Show |> Option.bind (fun v -> bitmap (paths.Image(r.Paper.Id, v)))
+    StackPanel.create [
+        StackPanel.spacing 8.0
+        StackPanel.opacity (if ahead then 0.55 else 1.0)
+        StackPanel.children [
+            Border.create [
+                Border.background Palette.paper
+                Border.cornerRadius 14.0
+                Border.padding (Thickness(12.0, 8.0, 12.0, 12.0))
+                Border.onTapped ((fun _ -> dispatch (ZoomVisual v.Id)), SubPatchOptions.OnChangeOf v.Id)
+                Border.child (
+                    StackPanel.create [
+                        StackPanel.spacing 6.0
+                        StackPanel.children [
+                            TextBlock.create [
+                                TextBlock.text (sprintf "%s · page %d" (visualName v) (v.Page + 1))
+                                TextBlock.fontSize 12.0
+                                TextBlock.foreground Palette.ink
+                            ]
+                            match bitmap (paths.Image(r.Paper.Id, v.Id)) with
+                            | Some bmp ->
+                                Image.create [
+                                    Image.source bmp
+                                    Image.stretch Stretch.Uniform
+                                    Image.maxWidth (float bmp.PixelSize.Width * 0.7)
+                                    Image.maxHeight (min 260.0 (float bmp.PixelSize.Height * 0.7))
+                                    Image.horizontalAlignment HorizontalAlignment.Left
+                                ]
+                            | None -> label "(image missing)" 13.0 Palette.ink
+                        ]
+                    ]
+                )
+            ]
+            plainButton "Transparent" [
+                Button.horizontalAlignment HorizontalAlignment.Left
+                Button.padding (Thickness(4.0, 2.0))
+                Button.foreground Palette.accent
+                Button.fontSize 14.0
+                Button.content (if ahead then "Skip ahead to it" else "Listen from here")
+                Button.onClick ((fun _ -> dispatch (JumpToSegment firstSegment)), SubPatchOptions.OnChangeOf firstSegment)
+            ]
+        ]
+    ]
+
+/// Every display equation and algorithm: the ones heard so far (latest first), then the ones coming up.
+let private equationsOverlay (r: ReaderState) (dispatch: Msg -> unit) : IView =
+    let order = Narration.equationOrder r.Script
+    let heard = order |> Array.filter (fun (_, i) -> i <= r.Current) |> Array.rev
+    let ahead = order |> Array.filter (fun (_, i) -> i > r.Current)
+    Border.create [
+        Border.background Palette.bg
+        Border.child (
+            DockPanel.create [
+                DockPanel.children [
+                    Grid.create [
+                        DockPanel.dock Dock.Top
+                        Grid.columnDefinitions "*,Auto"
+                        Grid.margin (Thickness(20.0, 12.0, 8.0, 8.0))
+                        Grid.children [
+                            TextBlock.create [
+                                Grid.column 0
+                                TextBlock.text "Equations"
+                                TextBlock.fontSize 22.0
+                                TextBlock.fontWeight FontWeight.Bold
+                                TextBlock.foreground Palette.text
+                                TextBlock.verticalAlignment VerticalAlignment.Center
+                            ]
+                            Border.create [ Grid.column 1; Border.child (iconButton Icons.close 22.0 (fun () -> dispatch ToggleEquations) "close-equations") ]
+                        ]
+                    ]
+                    ScrollViewer.create [
+                        ScrollViewer.content (
+                            StackPanel.create [
+                                StackPanel.margin (Thickness(16.0, 0.0, 16.0, 24.0))
+                                StackPanel.spacing 14.0
+                                StackPanel.children [
+                                    if order.Length = 0 then label "This paper has no display equations." 15.0 Palette.muted
+                                    if heard.Length > 0 then sectionLabel "HEARD SO FAR, LATEST FIRST"
+                                    for (v, i) in heard do equationCard r v i false dispatch
+                                    if ahead.Length > 0 then sectionLabel "COMING UP"
+                                    for (v, i) in ahead do equationCard r v i true dispatch
+                                ]
+                            ]
+                        )
+                    ]
+                ]
+            ]
+        )
+    ]
+
+let private zoomOverlay (r: ReaderState) (visual: string) (dispatch: Msg -> unit) : IView =
+    let paths = Store.Paths((Services.get ()).DataDir)
+    let bmp = bitmap (paths.Image(r.Paper.Id, visual))
     Grid.create [
         Grid.background "#F2000000"
         Grid.children [
@@ -749,7 +879,7 @@ let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) :
                 DockPanel.children [
                     Grid.create [
                         DockPanel.dock Dock.Top
-                        Grid.columnDefinitions "Auto,*,Auto"
+                        Grid.columnDefinitions "Auto,*,Auto,Auto"
                         Grid.margin (Thickness(4.0, 6.0, 4.0, 2.0))
                         Grid.children [
                             Border.create [ Grid.column 0; Border.child (iconButton Icons.chevronLeft 24.0 (fun () -> dispatch CloseReader) "close-reader") ]
@@ -773,7 +903,8 @@ let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) :
                                     ]
                                 ]
                             ]
-                            Border.create [ Grid.column 2; Border.child (iconButton Icons.sliders 22.0 (fun () -> dispatch (SetShowSettings true)) "reader-settings") ]
+                            Border.create [ Grid.column 2; Border.child (iconButton Icons.sigma 22.0 (fun () -> dispatch ToggleEquations) "equations") ]
+                            Border.create [ Grid.column 3; Border.child (iconButton Icons.sliders 22.0 (fun () -> dispatch (SetShowSettings true)) "reader-settings") ]
                         ]
                     ]
                     Border.create [ DockPanel.dock Dock.Bottom; Border.child (controls model r dispatch) ]
@@ -781,7 +912,10 @@ let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) :
                 ]
             ]
             if r.ShowOutline then outlineOverlay r dispatch
-            if r.Zoomed && seg.Show.IsSome then zoomOverlay r seg dispatch
+            if r.ShowEquations then equationsOverlay r dispatch
+            match r.Zoom with
+            | Some v -> zoomOverlay r v dispatch
+            | None -> ()
         ]
     ]
 
@@ -853,6 +987,8 @@ let private settingsView (model: Model) (dispatch: Msg -> unit) : IView =
                                 StackPanel.margin (Thickness(20.0, 0.0, 20.0, 32.0))
                                 StackPanel.spacing 12.0
                                 StackPanel.children [
+                                    sectionTitle "LISTENING"
+                                    toggle "Stop at equations" "Pause once an equation or algorithm has been read and explained, with it on screen, until you tap Continue." s.StopAtEquations (SetStopAtEquations >> dispatch)
                                     sectionTitle "MISTRAL AI"
                                     label "API key" 16.0 Palette.text
                                     TextBox.create [
@@ -862,7 +998,7 @@ let private settingsView (model: Model) (dispatch: Msg -> unit) : IView =
                                         TextBox.fontSize 15.0
                                         TextBox.onTextChanged ((fun t -> if t <> model.Settings.MistralApiKey then dispatch (SetApiKey t)), SubPatchOptions.OnChangeOf s.MistralApiKey)
                                     ]
-                                    label "Stored only on this device and sent only to api.mistral.ai." 12.0 Palette.faint
+                                    label "Stored only on this device and sent only to api.mistral.ai. With a key, every equation is also checked with Mistral OCR, so none is shown cut off." 12.0 Palette.faint
                                     toggle "Explain with Mistral" "A Mistral model rewrites each paper for listening: it reads formulas the way a lecturer would, walks through every equation and algorithm, and removes citation clutter." s.UseMistralNarration (SetNarration >> dispatch)
                                     label "Model" 14.0 Palette.muted
                                     TextBox.create [
