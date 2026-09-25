@@ -41,7 +41,7 @@ let stripCitations (s: string) =
 
 /// Everything the offline narrator does to a sentence before speaking it.
 let forSpeech (s: string) =
-    let mutable t = s.Normalize(Text.NormalizationForm.FormKC)
+    let mutable t = MathText.compat s
     t <- stripCitations t
     t <- url.Replace(t, "a link")
     for (r, w) in abbreviations do

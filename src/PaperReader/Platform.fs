@@ -15,7 +15,7 @@ type IAudioPlayer =
 type IPdfPages =
     inherit System.IDisposable
     /// A page region at `scale` pixels per point, as ARGB pixels on white: (pixels, width, height).
-    abstract Render: page: int * region: PageRect * scale: float -> int[] * int * int
+    abstract Render: page: int * region: PageRect * scale: float -> Task<int[] * int * int>
 
 /// Records a spoken question from the microphone.
 type IRecorder =
@@ -46,6 +46,9 @@ type IPlatform =
     abstract SetRemoteHandler: (bool -> unit) -> unit
     /// PDFs shared to or opened with the app arrive here (a local copy of the file, and its display name).
     abstract SetIncomingPdfHandler: (string * string -> unit) -> unit
+    /// Makes a folder of the data directory available before it is read. Only the browser keeps some
+    /// files (a paper's audio) outside the file system until they are needed; elsewhere this does nothing.
+    abstract Restore: folder: string -> Task
 
 /// Platform services set once at startup by the Android head.
 module Services =

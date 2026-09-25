@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <meta name="theme-color" content="#0E1014">
+    <title>Paper Reader</title>
+    <link rel="icon" href="favicon.svg" type="image/svg+xml">
+    <link rel="modulepreload" href="./main.js">
+    <style>
+        html, body { margin: 0; height: 100%; overflow: hidden; background: #0E1014; }
+        #out { height: 100%; }
+        .splash { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%;
+                  color: #9AA1AF; font: 15px system-ui, sans-serif; gap: 14px; }
+        .splash b { color: #ECEEF3; font-size: 26px; }
+    </style>
+</head>
+<body>
+    <div id="out">
+        <div class="splash"><b>Paper Reader</b><span>Loading…</span></div>
+    </div>
+    <script type="module" src="./main.js"></script>
+</body>
+</html>

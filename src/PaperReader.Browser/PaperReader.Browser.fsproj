@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk.WebAssembly">
+  <!-- Paper Reader in the browser (WebAssembly). Needs the wasm-tools workload:
+       dotnet workload install wasm-tools -->
+  <PropertyGroup>
+    <TargetFramework>net10.0-browser</TargetFramework>
+    <OutputType>Exe</OutputType>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="BrowserPlatform.fs" />
+    <Compile Include="Program.fs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia.Browser" Version="$(AvaloniaVersion)" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\PaperReader\PaperReader.fsproj" />
+    <ProjectReference Include="..\PaperReader.Browser.Interop\PaperReader.Browser.Interop.csproj" />
+  </ItemGroup>
+</Project>

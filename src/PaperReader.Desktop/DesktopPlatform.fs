@@ -187,7 +187,7 @@ type DesktopPdf(path: string) =
                     for x in 0 .. w - 1 do
                         let sx = x0 + x
                         if sx >= 0 && sx < pw then out.[y * w + x] <- px.[sy * pw + sx]
-            out, w, h
+            Task.FromResult((out, w, h))
 
     interface IDisposable with
         member _.Dispose() =
@@ -305,3 +305,5 @@ type DesktopPlatform() =
         member _.SetIncomingPdfHandler(h) =
             handler <- Some h
             flush ()
+
+        member _.Restore(_) = Task.CompletedTask

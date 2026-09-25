@@ -28,29 +28,30 @@ let private renderPart (pdf: IPdfPages) (pageSize: float * float) (region: PageR
         let x0, y0 = max 0.0 (region.X - g 0), max 0.0 (region.Y - g 1)
         let x1, y1 = min pw (region.X + region.W + g 2), min ph (region.Y + region.H + g 3)
         { region with X = x0; Y = y0; W = x1 - x0; H = y1 - y0 }
-    let rec attempt () =
-        let r = rectOf ()
-        let px, w, h = pdf.Render(r.Page, r, scale)
-        CropTidy.clean px w h dropNumber
-        let l, t, rt, b = CropTidy.clipped px w h
-        // an edge on the page border can't be cut off
-        let cut = [| l && r.X > 0.0; t && r.Y > 0.0; rt && r.X + r.W < pw; b && r.Y + r.H < ph |]
-        let mutable moved = false
-        for k in 0 .. 3 do
-            match grown.[k] with
-            | Some g when cut.[k] ->
-                if g + stepPt > maxGrowthPt then grown.[k] <- None
-                else
-                    grown.[k] <- Some(g + stepPt)
-                    moved <- true
-            | _ -> ()
-        if moved || rectOf () <> r then
-            attempt ()
-        else
-            let px, w, h = CropTidy.trim px w h
-            let stillCut = cut |> Array.indexed |> Array.exists (fun (k, c) -> c && grown.[k].IsSome)
-            (px, w, h), stillCut, CropTidy.blank px
-    attempt ()
+    task {
+        let mutable result = None
+        while result.IsNone do
+            let r = rectOf ()
+            let! px, w, h = pdf.Render(r.Page, r, scale)
+            CropTidy.clean px w h dropNumber
+            let l, t, rt, b = CropTidy.clipped px w h
+            // an edge on the page border can't be cut off
+            let cut = [| l && r.X > 0.0; t && r.Y > 0.0; rt && r.X + r.W < pw; b && r.Y + r.H < ph |]
+            let mutable moved = false
+            for k in 0 .. 3 do
+                match grown.[k] with
+                | Some g when cut.[k] ->
+                    if g + stepPt > maxGrowthPt then grown.[k] <- None
+                    else
+                        grown.[k] <- Some(g + stepPt)
+                        moved <- true
+                | _ -> ()
+            if not moved && rectOf () = r then
+                let px, w, h = CropTidy.trim px w h
+                let stillCut = cut |> Array.indexed |> Array.exists (fun (k, c) -> c && grown.[k].IsSome)
+                result <- Some((px, w, h), stillCut, CropTidy.blank px)
+        return result.Value
+    }
 
 let private toBitmap (px: int[], w: int, h: int) =
     let bytes = Array.zeroCreate<byte> (w * h * 4)
@@ -140,15 +141,18 @@ let render (pdf: IPdfPages) (sizes: (float * float)[]) (crops: (Visual * string)
                 let widest = v.Parts |> Array.map (fun r -> r.W) |> Array.max
                 let scale = min 3.0 (2400.0 / max 1.0 widest)
                 let dropNumber = v.Kind = VisualKind.Equation && v.EqNumber.IsSome
-                let results =
+                let results = Collections.Generic.List<(int[] * int * int) * bool * bool>()
+                for r in v.Parts do
                     match v.Kind with
                     | VisualKind.Figure | VisualKind.Table ->
                         // the region comes from OCR and includes the caption: draw it as it is
-                        v.Parts |> Array.map (fun r ->
-                            let px, w, h = pdf.Render(r.Page, r, scale)
-                            let px, w, h = CropTidy.trim px w h
-                            (px, w, h), false, CropTidy.blank px)
-                    | _ -> v.Parts |> Array.map (fun r -> renderPart pdf sizes.[r.Page] r scale dropNumber)
+                        let! px, w, h = pdf.Render(r.Page, r, scale)
+                        let px, w, h = CropTidy.trim px w h
+                        results.Add(((px, w, h), false, CropTidy.blank px))
+                    | _ ->
+                        let! part = renderPart pdf sizes.[r.Page] r scale dropNumber
+                        results.Add part
+                let results = results.ToArray()
                 let parts = results |> Array.map (fun (p, _, _) -> toBitmap p) |> List.ofArray
                 let cropped = stack parts
                 for b in parts do b.Dispose()

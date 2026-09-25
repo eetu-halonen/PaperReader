@@ -181,7 +181,7 @@ type AndroidPdf(path: string) =
             page.Render(bmp, null, m, PdfRenderMode.ForDisplay)
             let px = Array.zeroCreate<int> (w * h)
             bmp.GetPixels(px, 0, w, 0, 0, w, h)
-            px, w, h
+            Task.FromResult((px, w, h))
 
     interface IDisposable with
         member _.Dispose() =
@@ -319,3 +319,5 @@ type AndroidPlatform(context: Context) =
             Android.App.Application.SynchronizationContext.Post((fun _ -> PlaybackService.End()), null)
 
         member _.SetRemoteHandler(h) = Playback.remote <- h
+
+        member _.Restore(_) = Task.CompletedTask

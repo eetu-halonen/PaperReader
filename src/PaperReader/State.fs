@@ -519,6 +519,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                 match Store.loadScript p paper.Id with
                 | None -> return failwith "This paper's cache is from an older version. Remove it and add the PDF again."
                 | Some script ->
+                    do! (platform ()).Restore(p.AudioDir(paper.Id, key))
                     let durations = Synth.cachedDurations (fun i -> p.Audio(paper.Id, key, i)) script.Segments.Length
                     return paper, script, durations
             }

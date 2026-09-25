@@ -214,7 +214,11 @@ let private keyHint (dispatch: Msg -> unit) : IView =
                 StackPanel.spacing 10.0
                 StackPanel.children [
                     label "Add your Mistral API key for the best experience" 15.0 Palette.text
-                    label "Mistral rewrites the paper for listening, explains every equation out loud, and reads it with a natural voice. Without a key, the device's own voice reads the text directly." 13.0 Palette.muted
+                    label (
+                        if (Services.get ()).SystemSpeech.IsSome then
+                            "Mistral rewrites the paper for listening, explains every equation out loud, and reads it with a natural voice. Without a key, the device's own voice reads the text directly."
+                        else
+                            "Mistral rewrites the paper for listening, explains every equation out loud, and reads it with a natural voice. This version has no voice of its own, so it needs a key to read aloud.") 13.0 Palette.muted
                     StackPanel.create [
                         StackPanel.orientation Orientation.Horizontal
                         StackPanel.children [ pill "Open settings" (fun () -> dispatch (SetShowSettings true)) false ]

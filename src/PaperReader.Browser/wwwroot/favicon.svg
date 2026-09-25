@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="18 18 72 72" width="256" height="256">
+  <!-- same artwork as the Android launcher icon -->
+  <rect x="18" y="18" width="72" height="72" rx="16" fill="#1B1F27"/>
+  <path fill="#ECEEF3" d="M36,30 L62,30 L70,38 L70,78 Q70,80 68,80 L36,80 Q34,80 34,78 L34,32 Q34,30 36,30 Z"/>
+  <path fill="#C9CED8" d="M62,30 L62,38 L70,38 Z"/>
+  <path fill="none" stroke="#5E6573" stroke-width="2.6" stroke-linecap="round" d="M40,44 L60,44 M40,51 L64,51 M40,72 L58,72"/>
+  <path fill="none" stroke="#2F6FE0" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round" d="M41,58 L47,58 M44,58 L44,65 M50,62 L53,62 M50,65 L53,65 M57,59 Q60,62 57,66 M61,59 Q58,62 61,66"/>
+  <path fill="none" stroke="#8AB4F8" stroke-width="3.4" stroke-linecap="round" d="M75,48 Q79,55 75,62 M80,43 Q87,55 80,67"/>
+</svg>

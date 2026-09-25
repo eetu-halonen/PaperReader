@@ -351,3 +351,8 @@ let ``an answer is read in clips, the first one short so it starts quickly`` () 
     Assert.True(chunks.Length >= 3)
     Assert.All(chunks, fun c -> Assert.True(c.Length <= 330))
     Assert.Equal(Help.spoken answer, String.Join(" ", chunks))
+
+[<Fact>]
+let ``the hand-made fold matches FormKC for the characters papers use`` () =
+    for sample in [ "𝑥ᵢ + 𝜃 ﬁnd ﬂow"; "𝐖₁𝐱 + 𝒃²"; "𝛼𝛽𝛾 ∇𝑓 𝜕𝑦"; "ℎ ℓ ℝⁿ … x₁₂"; "𝐖ᵀ𝑥⁻¹ Σₖ₌₁" ] do
+        Assert.Equal(sample.Normalize(Text.NormalizationForm.FormKC), MathText.fold sample)

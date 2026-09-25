@@ -80,11 +80,63 @@ let isMathSymbol (s: string) =
     && (s |> Seq.exists isMathBlock
         || s = "=" || s = "<" || s = ">" || s = "±" || s = "×" || s = "÷" || s = "√" || s = "‖" || s = "·")
 
+/// Compatibility normalization (FormKC) isn't available in the browser.
+let private kcSupported =
+    try
+        "ﬁ".Normalize(NormalizationForm.FormKC) |> ignore
+        true
+    with _ -> false
+
+let private upperGreek = "ΑΒΓΔΕΖΗΘΙΚΛΜΝΞΟΠΡϴΣΤΥΦΧΨΩ"
+let private lowerGreek = "αβγδεζηθικλμνξοπρςστυφχψω"
+
+let private folded =
+    dict [ "ﬀ", "ff"; "ﬁ", "fi"; "ﬂ", "fl"; "ﬃ", "ffi"; "ﬄ", "ffl"; "ﬅ", "st"; "ﬆ", "st"; "ℎ", "h"; "ℓ", "l"; "…", "..."
+           " ", " "; "⁰", "0"; "¹", "1"; "²", "2"; "³", "3"; "⁴", "4"; "⁵", "5"; "⁶", "6"; "⁷", "7"; "⁸", "8"; "⁹", "9"
+           "₀", "0"; "₁", "1"; "₂", "2"; "₃", "3"; "₄", "4"; "₅", "5"; "₆", "6"; "₇", "7"; "₈", "8"; "₉", "9"
+           "ℝ", "R"; "ℕ", "N"; "ℤ", "Z"; "ℚ", "Q"; "ℂ", "C"; "ℒ", "L"; "ℱ", "F"; "ℋ", "H"; "ℐ", "I"; "ℛ", "R"; "ℬ", "B"
+           "ℰ", "E"; "ℳ", "M"; "ℊ", "g"; "ℯ", "e"; "ℴ", "o"
+           "ⁱ", "i"; "ⁿ", "n"; "ᵀ", "T"; "ᵢ", "i"; "ⱼ", "j"; "ₖ", "k"; "ₘ", "m"; "ₙ", "n"; "ₜ", "t"; "ₓ", "x"
+           "⁺", "+"; "⁻", "−"; "₊", "+"; "₋", "−"; "⁼", "="; "₌", "="; "⁽", "("; "⁾", ")"; "₍", "("; "₎", ")" ]
+
+/// Folds presentation variants away by hand: ligatures, math italic and bold letters (𝑥 → x, 𝜃 → θ),
+/// super- and subscript digits. What FormKC does for the characters papers use.
+let fold (s: string) =
+        let sb = StringBuilder(s.Length)
+        let mutable i = 0
+        while i < s.Length do
+            let cp = Char.ConvertToUtf32(s, i)
+            let width = if Char.IsSurrogatePair(s, i) then 2 else 1
+            if cp >= 0x1D400 && cp <= 0x1D6A3 then
+                // Mathematical Alphanumeric Symbols: 13 styles of A–Z a–z
+                let k = (cp - 0x1D400) % 52
+                sb.Append(if k < 26 then char (int 'A' + k) else char (int 'a' + k - 26)) |> ignore
+            elif cp >= 0x1D6A8 && cp <= 0x1D7C9 then
+                // 5 styles of Greek: 25 capitals, nabla, 25 small letters, partial, 6 variants
+                let k = (cp - 0x1D6A8) % 58
+                if k < 25 then sb.Append(upperGreek.[k]) |> ignore
+                elif k = 25 then sb.Append('∇') |> ignore
+                elif k < 51 then sb.Append(lowerGreek.[k - 26]) |> ignore
+                elif k = 51 then sb.Append('∂') |> ignore
+                else sb.Append("εθκφρπ".[k - 52]) |> ignore
+            elif cp >= 0x1D7CE && cp <= 0x1D7FF then
+                sb.Append(char (int '0' + (cp - 0x1D7CE) % 10)) |> ignore
+            else
+                let c = s.Substring(i, width)
+                match folded.TryGetValue c with
+                | true, f -> sb.Append(f) |> ignore
+                | _ -> sb.Append(c) |> ignore
+            i <- i + width
+        sb.ToString()
+
+/// Compatibility normalization: FormKC where the runtime has it, otherwise `fold`.
+let compat (s: string) = if kcSupported then s.Normalize(NormalizationForm.FormKC) else fold s
+
 /// Spoken form of a single math glyph.
 let speakGlyph (s: string) =
     if String.IsNullOrEmpty s then ""
     else
-        let n = s.Normalize(NormalizationForm.FormKC)
+        let n = compat s
         match symbols.TryGetValue n with
         | true, w -> " " + w + " "
         | _ ->
