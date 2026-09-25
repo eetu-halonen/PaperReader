@@ -6,14 +6,20 @@ open System.Diagnostics
 open PaperReader.Core
 
 let renderCrop (pdf: string) (dir: string) (v: Visual) =
-    // pdftoppm renders at 3x (216 dpi); crop box coordinates are in points
+    // pdftoppm renders at 3x (216 dpi); crop box coordinates are in points. Parts are stacked with ImageMagick.
     let s = 3.0
-    let r = v.Rect
-    let args =
-        sprintf "-png -r 216 -f %d -l %d -x %d -y %d -W %d -H %d -singlefile \"%s\" \"%s\""
-            (r.Page + 1) (r.Page + 1) (int (r.X * s)) (int (r.Y * s)) (int (r.W * s)) (int (r.H * s)) pdf (Path.Combine(dir, v.Id))
-    use p = Process.Start(ProcessStartInfo("pdftoppm", args, UseShellExecute = false))
-    p.WaitForExit()
+    let run (exe: string) (args: string) =
+        use p = Process.Start(ProcessStartInfo(exe, args, UseShellExecute = false, RedirectStandardError = true))
+        p.StandardError.ReadToEnd() |> ignore
+        p.WaitForExit()
+    let parts =
+        v.Parts |> Array.mapi (fun k r ->
+            let stem = Path.Combine(dir, sprintf "%s_part%d" v.Id k)
+            run "pdftoppm" (sprintf "-png -r 216 -f %d -l %d -x %d -y %d -W %d -H %d -singlefile \"%s\" \"%s\""
+                                (r.Page + 1) (r.Page + 1) (int (r.X * s)) (int (r.Y * s)) (int (r.W * s)) (int (r.H * s)) pdf stem)
+            stem + ".png")
+    run "convert" (sprintf "%s -bordercolor white -border 0x12 -append \"%s\"" (parts |> Array.map (sprintf "\"%s\"") |> String.concat " ") (Path.Combine(dir, v.Id + ".png")))
+    for f in parts do File.Delete f
 
 [<EntryPoint>]
 let main argv =
@@ -28,6 +34,8 @@ let main argv =
     for u in a.Units do
         let v = u.Visual |> Option.map (fun v -> " {" + v + "}") |> Option.defaultValue ""
         printfn "[%s p%d s%d%s] %s\n      >> %s" u.Id (u.Page + 1) u.Section v (u.Text.Replace("\n", " / ")) u.Spoken
+    for v in a.Visuals do
+        printfn "VISUAL %s %A %s" v.Id v.Kind (v.Parts |> Array.map (fun r -> sprintf "p%d x=%.1f y=%.1f w=%.1f h=%.1f" (r.Page + 1) r.X r.Y r.W r.H) |> String.concat " | ")
     match opt "--crops" with
     | Some dir ->
         Directory.CreateDirectory dir |> ignore

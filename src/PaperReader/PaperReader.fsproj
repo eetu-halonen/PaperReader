@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="Platform.fs" />
+    <Compile Include="Import.fs" />
+    <Compile Include="State.fs" />
+    <Compile Include="Views.fs" />
+    <Compile Include="App.fs" />
+  </ItemGroup>
+  <ItemGroup>
+    <PackageReference Include="Avalonia" Version="$(AvaloniaVersion)" />
+    <PackageReference Include="Avalonia.Themes.Fluent" Version="$(AvaloniaVersion)" />
+    <PackageReference Include="Avalonia.Fonts.Inter" Version="$(AvaloniaVersion)" />
+    <PackageReference Include="Avalonia.FuncUI" Version="$(FuncUIVersion)" />
+    <PackageReference Include="Avalonia.FuncUI.Elmish" Version="$(FuncUIVersion)" />
+  </ItemGroup>
+  <ItemGroup>
+    <ProjectReference Include="..\PaperReader.Core\PaperReader.Core.fsproj" />
+  </ItemGroup>
+</Project>

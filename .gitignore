@@ -7,3 +7,4 @@ obj/
 *.aab
 .DS_Store
 /samples/
+TestResults/

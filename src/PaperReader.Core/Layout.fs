@@ -602,16 +602,16 @@ let analyze (path: string) (progress: int -> int -> unit) : Analysis =
         counter <- counter + 1
         sprintf "%s%d" prefix counter
 
-    let pad = body * 0.45
-    let toPageRect page (l: float, r: float, b: float, t: float) =
+    let toPageRectPadded (padX: float) (padY: float) page (l: float, r: float, b: float, t: float) =
         let (crop: UglyToad.PdfPig.Core.PdfRectangle), rot = cropOf.[page]
         if rot <> 0 then None
         else
-            let x0 = max crop.Left (l - pad)
-            let x1 = min crop.Right (r + pad)
-            let y0 = min crop.Top (t + pad)
-            let y1 = max crop.Bottom (b - pad)
+            let x0 = max crop.Left (l - padX)
+            let x1 = min crop.Right (r + padX)
+            let y0 = min crop.Top (t + padY)
+            let y1 = max crop.Bottom (b - padY)
             Some { Page = page; X = x0 - crop.Left; Y = crop.Top - y0; W = x1 - x0; H = y0 - y1 }
+    let toPageRect = toPageRectPadded (body * 0.45) (body * 0.45)
 
     units.Add
         { Id = "T0"; Kind = UnitKind.Title; Text = title; Spoken = SpeechText.forSpeech title
@@ -626,31 +626,61 @@ let analyze (path: string) (progress: int -> int -> unit) : Analysis =
             let text = rendered |> List.map fst |> String.concat " " |> MathText.tidy
             let spoken = rendered |> List.map snd |> String.concat " " |> SpeechText.forSpeech
             let id = nextId "S"
-            // inline math: show the lines of this sentence that carry math
-            let mathGlyphs =
-                words |> List.sumBy (fun p ->
-                    p.Word.Glyphs |> Array.filter (fun g -> g.IsMath && not (".,;:()".Contains g.Value)) |> Array.length)
+            // Inline math: cut out just the formula fragments of the sentence (tightly, so they show large),
+            // up to three of them, stacked into one image.
+            let isMathWord (w: Word) = w.Glyphs |> Array.exists (fun g -> g.IsMath && not (".,;:()".Contains g.Value))
+            let clusters =
+                words
+                |> List.groupBy (fun p -> p.Line)
+                |> List.collect (fun (line, ps) ->
+                    let ws = ps |> List.map (fun p -> p.Word) |> List.sortBy (fun w -> w.Left) |> Array.ofList
+                    let runs = ResizeArray<Word list>()
+                    let mutable current: Word list = []
+                    let mutable gap = 0
+                    for w in ws do
+                        if isMathWord w then
+                            current <- current @ [ w ]
+                            gap <- 0
+                        elif not current.IsEmpty && gap = 0 && w.Text.Length <= 3 then
+                            // a short connector ("and", "=", ",") may sit between two math words
+                            current <- current @ [ w ]
+                            gap <- 1
+                        else
+                            if not current.IsEmpty then runs.Add current
+                            current <- []
+                            gap <- 0
+                    if not current.IsEmpty then runs.Add current
+                    [ for run in runs do
+                          // drop a trailing connector word ("and"), but keep closing brackets and numbers
+                          let last = List.last run
+                          let run = if isMathWord last || not (last.Text |> Seq.exists Char.IsLetter) then run else run |> List.take (run.Length - 1)
+                          let glyphs = run |> List.collect (fun w -> List.ofArray w.Glyphs)
+                          let math = glyphs |> List.filter (fun g -> g.IsMath) |> List.length
+                          let scripted = glyphs |> List.exists (fun g -> g.Size < line.Size * 0.85)
+                          if math >= 2 || scripted then
+                              let l = glyphs |> List.map (fun g -> min g.Left g.StartX) |> List.min
+                              let r = glyphs |> List.map (fun g -> max g.Right g.EndX) |> List.max
+                              // glyph boxes can be too small for tight crops: use ascender/descender from the font size
+                              let b = min (line.Baseline - 0.3 * line.Size) (glyphs |> List.map (fun g -> min g.Bottom (g.Baseline - 0.25 * g.Size)) |> List.min)
+                              let t = max (line.Baseline + 0.8 * line.Size) (glyphs |> List.map (fun g -> max g.Top (g.Baseline + 0.8 * g.Size)) |> List.max)
+                              yield line, math, (l, r, b, t) ])
             let visual =
-                if mathGlyphs < 2 then None
+                if clusters.IsEmpty then None
                 else
-                    let lines = words |> List.map (fun p -> p.Line) |> List.distinct
-                    let mathLines = lines |> List.filter (fun l -> words |> List.exists (fun p -> p.Line = l && p.Word.Glyphs |> Array.exists (fun g -> g.IsMath)))
-                    let grp = mathLines |> List.groupBy (fun l -> l.Page, l.Region) |> List.maxBy (fun (_, ls) -> ls.Length)
-                    let (page, region), _ = grp
-                    let sameCol = lines |> List.filter (fun l -> l.Page = page && l.Region = region)
-                    let idx = sameCol |> List.map (fun l -> List.contains l mathLines)
-                    let first = idx |> List.findIndex (fun b -> b)
-                    let last = idx |> List.findIndexBack (fun b -> b)
-                    let chosen = sameCol.[first .. min last (first + 3)]
-                    let l = chosen |> List.map (fun x -> x.Left) |> List.min
-                    let r = chosen |> List.map (fun x -> x.Right) |> List.max
-                    let b = chosen |> List.map (fun x -> x.Bottom) |> List.min
-                    let t = chosen |> List.map (fun x -> x.Top) |> List.max
-                    toPageRect page (l, r, b, t)
-                    |> Option.map (fun rect ->
-                        let v = { Id = id; Kind = VisualKind.Inline; Rect = rect; EqNumber = None; RawText = text }
+                    let (bestLine, _, _) = clusters |> List.maxBy (fun (_, m, _) -> m)
+                    let chosen =
+                        clusters
+                        |> List.filter (fun (l, _, _) -> l.Page = bestLine.Page)
+                        |> List.indexed
+                        |> List.sortByDescending (fun (_, (_, m, _)) -> m)
+                        |> List.truncate 3
+                        |> List.sortBy fst
+                        |> List.choose (fun (_, (l, _, box)) -> toPageRectPadded (body * 0.22) (body * 0.08) l.Page box)
+                    if chosen.IsEmpty then None
+                    else
+                        let v = { Id = id; Kind = VisualKind.Inline; Parts = Array.ofList chosen; EqNumber = None; RawText = text }
                         visuals.Add v
-                        v.Id)
+                        Some v.Id
             if spoken.Length > 0 && (spoken |> Seq.exists Char.IsLetterOrDigit) then
                 units.Add
                     { Id = id; Kind = UnitKind.Sentence; Text = text; Spoken = spoken; Visual = visual
@@ -759,7 +789,7 @@ let analyze (path: string) (progress: int -> int -> unit) : Analysis =
                 let id = nextId "E"
                 match toPageRect l.Page (bounds glyphs) with
                 | Some rect ->
-                    visuals.Add { Id = id; Kind = VisualKind.Algorithm; Rect = rect; EqNumber = algo; RawText = raw }
+                    visuals.Add { Id = id; Kind = VisualKind.Algorithm; Parts = [| rect |]; EqNumber = algo; RawText = raw }
                     units.Add
                         { Id = id; Kind = UnitKind.Equation; Text = raw
                           Spoken = SpeechText.forSpeech (MathText.tidy caption + " The algorithm is shown on screen.")
@@ -827,7 +857,7 @@ let analyze (path: string) (progress: int -> int -> unit) : Analysis =
                     let id = nextId "E"
                     match toPageRect l.Page (bl, br, bb, bt) with
                     | Some rect ->
-                        visuals.Add { Id = id; Kind = VisualKind.Equation; Rect = rect; EqNumber = eqNumber; RawText = raw }
+                        visuals.Add { Id = id; Kind = VisualKind.Equation; Parts = [| rect |]; EqNumber = eqNumber; RawText = raw }
                         let name = match eqNumber with Some e when e.Contains "–" -> sprintf "Equations %s" e | Some e -> sprintf "Equation %s" e | None -> "An equation"
                         let spoken =
                             let s = MathText.tidy spokenEq

@@ -21,11 +21,14 @@ type VisualKind =
 type Visual =
     { Id: string
       Kind: VisualKind
-      Rect: PageRect
+      /// Regions of one page, shown stacked top to bottom (inline math is cut into its fragments).
+      Parts: PageRect[]
       /// Equation (or algorithm) number as printed in the paper, e.g. "3" or "A.2".
       EqNumber: string option
       /// Text extracted from the region (garbled for math, but useful context for the narrator).
       RawText: string }
+
+    member v.Page = v.Parts.[0].Page
 
 [<RequireQualifiedAccess>]
 type UnitKind =

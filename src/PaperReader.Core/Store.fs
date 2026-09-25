@@ -173,11 +173,16 @@ let saveScript (p: Paths) (id: string) (s: Script) =
             w.WriteStartObject()
             w.WriteString("id", v.Id)
             w.WriteString("kind", (match v.Kind with VisualKind.Equation -> "equation" | VisualKind.Algorithm -> "algorithm" | VisualKind.Inline -> "inline"))
-            w.WriteNumber("page", v.Rect.Page)
-            w.WriteNumber("x", v.Rect.X)
-            w.WriteNumber("y", v.Rect.Y)
-            w.WriteNumber("w", v.Rect.W)
-            w.WriteNumber("h", v.Rect.H)
+            w.WriteStartArray "parts"
+            for r in v.Parts do
+                w.WriteStartObject()
+                w.WriteNumber("page", r.Page)
+                w.WriteNumber("x", r.X)
+                w.WriteNumber("y", r.Y)
+                w.WriteNumber("w", r.W)
+                w.WriteNumber("h", r.H)
+                w.WriteEndObject()
+            w.WriteEndArray()
             match v.EqNumber with
             | Some n -> w.WriteString("number", n)
             | None -> ()
@@ -219,7 +224,9 @@ let loadScript (p: Paths) (id: string) : Script option =
                     [| for v in e.GetProperty("visuals").EnumerateArray() ->
                            { Id = str v "id" ""
                              Kind = (match str v "kind" "" with "equation" -> VisualKind.Equation | "algorithm" -> VisualKind.Algorithm | _ -> VisualKind.Inline)
-                             Rect = { Page = int (num v "page" 0.0); X = num v "x" 0.0; Y = num v "y" 0.0; W = num v "w" 0.0; H = num v "h" 0.0 }
+                             Parts =
+                               [| for r in v.GetProperty("parts").EnumerateArray() ->
+                                      { Page = int (num r "page" 0.0); X = num r "x" 0.0; Y = num r "y" 0.0; W = num r "w" 0.0; H = num r "h" 0.0 } |]
                              EqNumber = optStr v "number"
                              RawText = str v "raw" "" } |]
                   Segments =

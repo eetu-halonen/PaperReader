@@ -263,7 +263,7 @@ let buildWithMistral
         let knownBefore (c: Chunk) =
             let firstPage = c.Units.Head.Page
             a.Visuals
-            |> Array.filter (fun v -> v.Kind = VisualKind.Equation && v.EqNumber.IsSome && v.Rect.Page <= firstPage)
+            |> Array.filter (fun v -> v.Kind = VisualKind.Equation && v.EqNumber.IsSome && v.Page <= firstPage)
             |> Array.filter (fun v -> not (c.Units |> List.exists (fun u -> u.Id = v.Id)))
             |> Array.map (fun v -> sprintf "%s = Equation (%s)" v.Id v.EqNumber.Value)
         let run (i: int) =

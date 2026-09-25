@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- A page of a paper with a formula line, and sound waves: "papers you can listen to". -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp" android:height="108dp"
+    android:viewportWidth="108" android:viewportHeight="108">
+    <path android:fillColor="#ECEEF3"
+        android:pathData="M36,30 L62,30 L70,38 L70,78 Q70,80 68,80 L36,80 Q34,80 34,78 L34,32 Q34,30 36,30 Z" />
+    <path android:fillColor="#C9CED8" android:pathData="M62,30 L62,38 L70,38 Z" />
+    <path android:strokeColor="#5E6573" android:strokeWidth="2.6" android:strokeLineCap="round"
+        android:pathData="M40,44 L60,44 M40,51 L64,51 M40,72 L58,72" />
+    <path android:strokeColor="#2F6FE0" android:strokeWidth="2.6" android:strokeLineCap="round" android:strokeLineJoin="round"
+        android:pathData="M41,58 L47,58 M44,58 L44,65 M50,62 L53,62 M50,65 L53,65 M57,59 Q60,62 57,66 M61,59 Q58,62 61,66" />
+    <path android:strokeColor="#8AB4F8" android:strokeWidth="3.4" android:strokeLineCap="round"
+        android:pathData="M75,48 Q79,55 75,62 M80,43 Q87,55 80,67" />
+</vector>
