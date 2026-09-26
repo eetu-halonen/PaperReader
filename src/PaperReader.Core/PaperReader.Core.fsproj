@@ -23,6 +23,8 @@
     <Compile Include="Synth.fs" />
     <Compile Include="Help.fs" />
     <Compile Include="Cards.fs" />
+    <Compile Include="Knowledge.fs" />
+    <Compile Include="Study.fs" />
     <Compile Include="CropTidy.fs" />
   </ItemGroup>
   <ItemGroup>

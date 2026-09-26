@@ -77,7 +77,7 @@ let private existingBlock (existing: Card list) =
             sb.Append("- ").Append(Regex.Replace(c.Front, @"\s+", " ")).Append('\n') |> ignore
         sb.ToString()
 
-let private sectionsBlock (script: Script) =
+let sectionsBlock (script: Script) =
     let sb = StringBuilder("SECTIONS\n")
     for i in 1 .. script.Sections.Length - 1 do
         sb.AppendFormat("{0}: {1}\n", i, script.Sections.[i].Title) |> ignore

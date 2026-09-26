@@ -38,8 +38,9 @@ type MainView() as this =
                 if Views.canGoBack then
                     args.Handled <- true
                     dispatch |> Option.iter (fun d -> d State.BackPressed))
-            // keyboard: space play/pause, arrows 15 s, W walking mode, Escape back (not while typing in a text box);
-            // in a review, space or Enter shows the answer (then answers Good) and 1 to 4 answer
+            // keyboard: space play/pause, arrows 15 s, W walking mode, S study, Escape back (not while typing in a text
+            // box); in a review, space or Enter shows the answer (then answers Good) and 1 to 4 answer or pick an option;
+            // in a study session, 1 to 4 pick an option and Enter goes on
             top.AddHandler(
                 Input.InputElement.KeyDownEvent,
                 (fun _ (e: Input.KeyEventArgs) ->
@@ -47,16 +48,23 @@ type MainView() as this =
                     let msg =
                         match e.Key with
                         | Input.Key.Space | Input.Key.Enter when Views.reviewing && not typing -> Some State.ReviewNext
-                        | Input.Key.D1 | Input.Key.NumPad1 when Views.reviewing -> Some(State.RateCard PaperReader.Core.Fsrs.Rating.Again)
-                        | Input.Key.D2 | Input.Key.NumPad2 when Views.reviewing -> Some(State.RateCard PaperReader.Core.Fsrs.Rating.Hard)
-                        | Input.Key.D3 | Input.Key.NumPad3 when Views.reviewing -> Some(State.RateCard PaperReader.Core.Fsrs.Rating.Good)
-                        | Input.Key.D4 | Input.Key.NumPad4 when Views.reviewing -> Some(State.RateCard PaperReader.Core.Fsrs.Rating.Easy)
+                        | Input.Key.D1 | Input.Key.NumPad1 when Views.reviewing -> Some(State.ReviewKey 1)
+                        | Input.Key.D2 | Input.Key.NumPad2 when Views.reviewing -> Some(State.ReviewKey 2)
+                        | Input.Key.D3 | Input.Key.NumPad3 when Views.reviewing -> Some(State.ReviewKey 3)
+                        | Input.Key.D4 | Input.Key.NumPad4 when Views.reviewing -> Some(State.ReviewKey 4)
                         | _ when Views.reviewing && e.Key <> Input.Key.Escape -> None
+                        | Input.Key.D1 | Input.Key.NumPad1 when Views.studying && not typing -> Some(State.StudyKey 1)
+                        | Input.Key.D2 | Input.Key.NumPad2 when Views.studying && not typing -> Some(State.StudyKey 2)
+                        | Input.Key.D3 | Input.Key.NumPad3 when Views.studying && not typing -> Some(State.StudyKey 3)
+                        | Input.Key.D4 | Input.Key.NumPad4 when Views.studying && not typing -> Some(State.StudyKey 4)
+                        | Input.Key.Enter when Views.studying && not typing -> Some(State.StudyKey 0)
+                        | _ when Views.studying && e.Key <> Input.Key.Escape -> None
                         | Input.Key.Space when not typing -> Some State.TogglePlay
                         | Input.Key.Left when not typing -> Some State.Back15
                         | Input.Key.Right when not typing -> Some State.Forward15
                         | Input.Key.A when not typing && e.KeyModifiers = Input.KeyModifiers.None -> Some(State.OpenHelp None)
                         | Input.Key.W when not typing && e.KeyModifiers = Input.KeyModifiers.None && Views.inReader -> Some(State.SetWalking(not Views.walking))
+                        | Input.Key.S when not typing && e.KeyModifiers = Input.KeyModifiers.None && Views.inReader -> Some State.OpenStudy
                         | Input.Key.Escape when Views.canGoBack -> Some State.BackPressed
                         | _ -> None
                     match msg, dispatch with

@@ -65,6 +65,13 @@ type Paths(root: string) =
     member this.AnswerAudio(id, part: int) = Path.Combine(this.HelpDir id, sprintf "answer-%d.wav" part)
     /// The paper's flashcards and their review state.
     member this.Cards(id) = Path.Combine(this.Paper id, "cards.json")
+    /// Studying the paper: the plan, each idea's lesson as the model wrote it, and how far the learner is.
+    member this.StudyDir(id) = Path.Combine(this.Paper id, "study")
+    member this.StudyPlan(id) = Path.Combine(this.StudyDir id, "plan.txt")
+    member this.StudyLesson(id, idea: string) = Path.Combine(this.StudyDir id, "lesson-" + idea + ".txt")
+    member this.StudyProgress(id) = Path.Combine(this.StudyDir id, "progress.json")
+    /// What the learner knows across papers: the ideas studied, their memory and their questions.
+    member _.Knowledge = Path.Combine(root, "knowledge.json")
 
 let paperId (pdfPath: string) =
     use fs = File.OpenRead pdfPath
@@ -408,4 +415,106 @@ let loadCards (p: Paths) (id: string) : Card list =
                     Reps = int (num e "reps" 0.0)
                     Lapses = int (num e "lapses" 0.0)
                     LastReview = time e "last" } } ]
+    with _ -> []
+
+// ---- what the learner knows (Study)
+
+let private writeMemory (w: Utf8JsonWriter) (m: Memory) =
+    w.WriteString("stage", stageName m.Stage)
+    w.WriteString("due", m.Due.ToString("o"))
+    w.WriteNumber("stability", m.Stability)
+    w.WriteNumber("difficulty", m.Difficulty)
+    w.WriteNumber("reps", m.Reps)
+    w.WriteNumber("lapses", m.Lapses)
+    m.LastReview |> Option.iter (fun t -> w.WriteString("last", t.ToString("o")))
+
+let private readMemory (e: JsonElement) (created: DateTime) : Memory =
+    { Stage = stageOf (str e "stage" "")
+      Due = time e "due" |> Option.defaultValue created
+      Stability = num e "stability" 0.0
+      Difficulty = num e "difficulty" 0.0
+      Reps = int (num e "reps" 0.0)
+      Lapses = int (num e "lapses" 0.0)
+      LastReview = time e "last" }
+
+let private strings (e: JsonElement) (name: string) =
+    match e.TryGetProperty name with
+    | true, a when a.ValueKind = JsonValueKind.Array -> [ for x in a.EnumerateArray() -> if x.ValueKind = JsonValueKind.String then x.GetString() else "" ]
+    | _ -> []
+
+let writeQuestion (w: Utf8JsonWriter) (q: Question) =
+    w.WriteStartObject()
+    w.WriteString("id", q.Id)
+    w.WriteString("prompt", q.Prompt)
+    if not q.Options.IsEmpty then
+        w.WriteStartArray "options"
+        for o in q.Options do w.WriteStringValue o
+        w.WriteEndArray()
+        w.WriteNumber("correct", q.Correct)
+        w.WriteStartArray "why"
+        for o in q.Why do w.WriteStringValue o
+        w.WriteEndArray()
+    if q.Answer <> "" then w.WriteString("answer", q.Answer)
+    w.WriteString("paper", q.PaperId)
+    q.Visual |> Option.iter (fun v -> w.WriteString("visual", v))
+    q.LastAsked |> Option.iter (fun t -> w.WriteString("asked", t.ToString("o")))
+    w.WriteEndObject()
+
+let readQuestion (e: JsonElement) : Question =
+    { Id = str e "id" (Guid.NewGuid().ToString("N"))
+      Prompt = str e "prompt" ""
+      Options = strings e "options"
+      Correct = int (num e "correct" -1.0)
+      Why = strings e "why"
+      Answer = str e "answer" ""
+      PaperId = str e "paper" ""
+      Visual = optStr e "visual"
+      LastAsked = time e "asked" }
+
+let saveConcepts (p: Paths) (concepts: Concept list) =
+    Directory.CreateDirectory p.Root |> ignore
+    writeAtomic p.Knowledge (fun w ->
+        w.WriteStartArray()
+        for c in concepts do
+            w.WriteStartObject()
+            w.WriteString("id", c.Id)
+            w.WriteString("name", c.Name)
+            w.WriteString("definition", c.Definition)
+            w.WriteBoolean("background", c.Background)
+            w.WriteString("created", c.CreatedUtc.ToString("o"))
+            writeMemory w c.Memory
+            w.WriteStartArray "sources"
+            for s in c.Sources do
+                w.WriteStartObject()
+                w.WriteString("paper", s.PaperId)
+                w.WriteString("title", s.Title)
+                w.WriteNumber("segment", s.Segment)
+                w.WriteEndObject()
+            w.WriteEndArray()
+            w.WriteStartArray "questions"
+            for q in c.Questions do writeQuestion w q
+            w.WriteEndArray()
+            w.WriteEndObject()
+        w.WriteEndArray())
+
+let loadConcepts (p: Paths) : Concept list =
+    try
+        use d = JsonDocument.Parse(File.ReadAllText p.Knowledge)
+        [ for e in d.RootElement.EnumerateArray() ->
+              let created = time e "created" |> Option.defaultValue DateTime.UtcNow
+              { Id = str e "id" (Guid.NewGuid().ToString("N"))
+                Name = str e "name" ""
+                Definition = str e "definition" ""
+                Background = boolean e "background" false
+                Sources =
+                  match e.TryGetProperty "sources" with
+                  | true, a when a.ValueKind = JsonValueKind.Array ->
+                      [ for s in a.EnumerateArray() -> { PaperId = str s "paper" ""; Title = str s "title" ""; Segment = int (num s "segment" 0.0) } ]
+                  | _ -> []
+                Questions =
+                  match e.TryGetProperty "questions" with
+                  | true, a when a.ValueKind = JsonValueKind.Array -> [ for q in a.EnumerateArray() -> readQuestion q ]
+                  | _ -> []
+                Memory = readMemory e created
+                CreatedUtc = created } ]
     with _ -> []

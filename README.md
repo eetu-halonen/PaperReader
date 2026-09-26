@@ -30,14 +30,23 @@ It runs on Android, on the Linux desktop and in the browser (WebAssembly).
   offers three follow-ups, so typing is rarely needed; you can also type, or tap the microphone and ask
   out loud. Answers can be read to you, show the equation or figure they talk about, and are kept per paper.
   *Ask about it* on any item in the Σ list asks about that one. See [How Ask answers](#how-ask-answers).
-- **Learn** (flashcards with spaced repetition): the cards button in the reader opens *Remember*, where one tap makes
+- **Study** (with a Mistral key): a tutor teaches the paper idea by idea, prerequisites first. Each idea gets a short
+  lesson that builds on what you already know, with the paper's equation or figure next to it and a worked example,
+  then a multiple-choice question whose every option explains why it is right or wrong. Wrong answers can be talked
+  through with the tutor, and the idea comes back a few minutes later with a different question. At the end of each part
+  you explain its ideas in your own words (typed or spoken) and get feedback. What you learn is remembered across
+  papers: the next paper skips the ideas you still know and checks the fading ones with one question. *Study* in the
+  reader (or S) or on the Learn screen. See [How studying works](#how-studying-works).
+- **Learn** (flashcards with spaced repetition): the cards button in the reader opens *Learn*, where one tap makes
   cards about the equation or figure on screen, what you just heard, or the section's main points, or you type what you
   want to remember ("why divide by √d_k"). *Make a deck* writes about one card per page covering the whole paper
   (problem, key idea, method and its equations, results, limitations); *Make more cards* adds ones the deck doesn't
   cover yet. Every Ask answer has *Make a card*, and every item in the Σ list has *Remember*. New cards are listed so
-  bad ones can be removed. Reviews (*Learn* in the library, or the banner when cards are due) show the question, then
-  the answer with Again / Hard / Good / Easy and when each would bring the card back; *Listen to it in the paper* jumps
-  to where it is narrated. See [How cards are made and scheduled](#how-cards-are-made-and-scheduled).
+  bad ones can be removed. Reviews (*Learn* in the library, or the banner when something is due) mix the cards with
+  the ideas you studied: a card shows the question, then the answer with Again / Hard / Good / Easy and when each
+  would bring the card back; an idea asks one of its questions. *Listen to it in the paper* jumps to where it is
+  narrated. The Learn screen also lists *What you know*: every idea studied, how well it is remembered, when it comes
+  back, and the papers it was met in. See [How cards are made and scheduled](#how-cards-are-made-and-scheduled).
 - **Find papers**: search about 270 million works on [OpenAlex](https://openalex.org) (only those with a free
   PDF are listed), or paste an arXiv id or address, a DOI, or a PDF address. *Recommended for you* lists new and
   related papers from [Semantic Scholar](https://www.semanticscholar.org)'s recommender, based on the papers in
@@ -77,13 +86,13 @@ returns blocks (`Markup.fs` for text formats, `Packages.fs` for zip-based ones) 
 
 | Path | What it is |
 | --- | --- |
-| `src/PaperReader.Core` | Everything without UI: PDF layout analysis (PdfPig), the other formats (`Formats.fs`, `Markup.fs`, `Packages.fs`, `Blocks.fs`), math verbalisation (including LaTeX), narration, Mistral client, WAV cache, paper search and recommendations (`Discover.fs`), flashcards (`Cards.fs`) and their FSRS scheduler (`Fsrs.fs`) |
+| `src/PaperReader.Core` | Everything without UI: PDF layout analysis (PdfPig), the other formats (`Formats.fs`, `Markup.fs`, `Packages.fs`, `Blocks.fs`), math verbalisation (including LaTeX), narration, Mistral client, WAV cache, paper search and recommendations (`Discover.fs`), flashcards (`Cards.fs`) and their FSRS scheduler (`Fsrs.fs`), study sessions (`Study.fs`) and what the learner knows across papers (`Knowledge.fs`) |
 | `src/PaperReader` | The shared Elmish UI |
 | `src/PaperReader.Android` | Android head: audio player, phone TTS, PDF crops, playback service, microphone |
 | `src/PaperReader.Desktop` | Linux desktop head: ffplay audio, pdftoppm crops, optional espeak-ng, ffmpeg microphone |
 | `src/PaperReader.Browser` | WebAssembly head: HTML audio, pdf.js crops, IndexedDB storage, MediaRecorder |
 | `src/PaperReader.Browser.Interop` | The browser head's JavaScript imports (C#, because `[JSImport]` needs its source generator) |
-| `tools/ScriptDump` | Desktop tool that analyses a document (a file or a web address) and prints the narration, for tuning the reading rules (`--blocks` prints what a reader found) |
+| `tools/ScriptDump` | Desktop tool that analyses a document (a file or a web address) and prints the narration, for tuning the reading rules (`--blocks` prints what a reader found); it also runs Ask, cards and Study prompts against a data folder |
 | `tests/PaperReader.Core.Tests` | Unit tests |
 
 ## Build
@@ -118,8 +127,9 @@ This publishes a self-contained build to `dist/linux-x64/paper-reader` and adds 
 to the application menu and to *Open with* for the documents it reads. It can also be started directly:
 `dist/linux-x64/paper-reader paper.pdf` (or a web address). Data lives in `~/.local/share/PaperReader`.
 
-Keys: Space play/pause, ← / → 15 seconds, A ask, Esc back. In a review: Space or Enter shows the answer (then
-answers Good), 1–4 answer Again / Hard / Good / Easy.
+Keys: Space play/pause, ← / → 15 seconds, A ask, S study, Esc back. In a review: Space or Enter shows the answer (then
+answers Good), 1–4 answer Again / Hard / Good / Easy, or pick an option of an idea's question. While studying: 1–4
+pick an option, Enter is the main button (*Check my understanding*, *Continue*).
 
 ## Browser (WebAssembly)
 
@@ -146,8 +156,8 @@ The key is stored only on the device and sent only to `api.mistral.ai`.
   Applies to papers added after the change.
 - **Mistral voice**: Voxtral text-to-speech; pick a voice with *Load voices*.
   Each voice has its own audio cache.
-- **Ask**: answered by GLM 5.3 (`zai-glm-5-3`, hosted by Mistral); questions asked aloud are transcribed by
-  Voxtral. *About you* (e.g. "biology PhD student, rusty on linear algebra") sets the level of the answers.
+- **Ask**, **cards** and **Study**: written by GLM 5.3 (`zai-glm-5-3`, hosted by Mistral); questions asked aloud are
+  transcribed by Voxtral. *About you* (e.g. "biology PhD student, rusty on linear algebra") sets the level of the answers.
 
 ## How Ask answers
 
@@ -188,12 +198,63 @@ forgotten, then at most 20 new cards. Intervals of 3 days or more are spread by 
 keep coming back on the same day. `ScriptDump --cards <paper id> <segment> <moment|section|visual|paper|text>`
 makes cards from the command line against the desktop app's cache (printed, not saved).
 
+## How studying works
+
+Study is built on what learning research finds lasts, rather than what feels productive in the moment:
+
+| Finding | What Study does |
+| --- | --- |
+| New material is learned best in small segments, prerequisites first ([segmenting and pre-training](https://doi.org/10.1017/CBO9781139547369.016)) | The paper is split into ideas in the order to learn them, grouped into parts. Background the paper assumes without explaining comes first, as its own ideas, when you may not know it. |
+| Words and a picture together beat words alone ([dual coding, multimedia principle](https://doi.org/10.1017/CBO9781139547369.010)) | A lesson shows the paper's equation, figure or table it explains, when there is one. |
+| Worked examples help novices more than solving from scratch ([worked-example effect](https://doi.org/10.3102/00346543070002181)) | Each lesson has a concrete example: a small worked example with numbers, a case from the paper, or an analogy (said to be one). |
+| Retrieving from memory strengthens it more than rereading ([testing effect](https://doi.org/10.1111/j.1467-9280.2006.01693.x)) | Every idea is checked with a question after its lesson, and later reviews ask, never show. |
+| Feedback helps most when it explains ([elaborated feedback](https://doi.org/10.3102/0034654307313795)) | Every option of a multiple-choice question says why it is right or wrong. The wrong options are plausible misconceptions, not throwaways, and the right one isn't given away by being the longest. |
+| A lucky guess looks like knowing, and hides the gap | *I don't know* is always an option, and counts as not knowing. |
+| Spaced practice beats massed practice, and mixing topics beats blocking them ([spacing](https://doi.org/10.1037/0033-2909.132.3.354), [interleaving](https://doi.org/10.1007/s11251-007-9015-8)) | An idea answered wrong comes back minutes later, between other ideas. After that it is reviewed on the FSRS schedule, mixed with other papers' ideas and cards. An immediate retry after the explanation is practice only, and doesn't count as having learned it. |
+| The same question asked again and again can be answered from memory of the answer, without the idea | Each idea keeps a pool of questions (multiple choice and recall, from every paper it was met in). A review asks a different one each time, alternating between the two kinds. |
+| Explaining in your own words deepens understanding ([generation, self-explanation](https://doi.org/10.1016/0364-0213%2889%2990002-5)) | At the end of each part you explain its ideas from memory, typed or spoken. The tutor says what you got right, what is missing, and what a good answer covers. |
+| People judge poorly what they know ([illusions of competence](https://doi.org/10.1146/annurev-psych-113011-143823)) | Nothing is skipped on your word: *I know this: test me* asks the question before the lesson, and ideas known from other papers are skipped only while FSRS says they are still well remembered. |
+
+A session:
+
+1. **Plan** (once per paper, about 20–30 s). GLM 5.3 reads the whole paper (the same prefix as Ask, so the API's cache
+   serves both) and lists the ideas to learn, each with the goal, a one-sentence definition, where in the paper it is,
+   which equations and figures go with it, and which ideas it builds on. It is also given the ideas you already know
+   from other papers. An idea that *is* one of them is marked `same as known`, and one that only builds on one is
+   marked `uses known`. Each `same as known` claim is checked by a second, quick call, and dropped when in doubt. A
+   wrong match would skip something you never learned.
+2. **Teach**. The lesson connects to what you know ("You already know that…"), explains the idea from the paper,
+   shows its visual, and gives an example. Lessons are written two ahead while you read, so the next one is usually
+   ready. *Listen to it in the paper* plays the part of the narration it comes from, and *Back to studying* returns.
+   The tutor answers questions about the lesson, with one-tap questions for the usual ones.
+3. **Check**. One multiple-choice question. Wrong answers get *Another question* and the tutor, which knows what you
+   picked. The idea comes back in a few minutes either way, with a question you haven't seen.
+4. **Recap** at the end of each part: explain it back, and get *Got it* / *Partly there* / *Not yet* with feedback.
+5. **Known ideas**. If you studied an idea in another paper and FSRS says you still know it, it is skipped. If it is
+   fading, one quick question checks it, and that counts as its review. If you've forgotten it, it is taught here.
+
+Every answer is an FSRS review of the idea (right is Good; wrong or *I don't know* is Again), with the same scheduler
+and retention setting as the cards (see above), so what you learn comes back for review just before you'd forget it.
+Ideas are kept across papers in `knowledge.json` in the data folder, with up to 12 questions each. A paper's plan, its
+lessons and how far you got are in the paper's `study/` folder. *Forget* on the Learn screen removes an idea, so it is
+taught again. *This question is wrong* takes an answer back and never asks that question again.
+
+The tutor is told to use only what the paper says, and to say so when it adds outside background. Every question
+and answer is written from the paper, so if the paper is wrong, so is the lesson.
+
 ## Desktop analysis tool
 
 ```bash
 dotnet run --project tools/ScriptDump -- paper.pdf --lines            # line classes
 dotnet run --project tools/ScriptDump -- paper.pdf --crops /tmp/crops # equation images (needs pdftoppm, ImageMagick)
 MISTRAL_API_KEY=... dotnet run --project tools/ScriptDump -- paper.pdf --ocr --crops /tmp/crops --mistral mistral-medium-latest
+
+# Study prompts against a data folder (a copy of ~/.local/share/PaperReader), with the key from the app's settings
+dotnet run --project tools/ScriptDump -- --study <data dir> <paper id> plan                # the plan, saved to study/plan.txt
+dotnet run --project tools/ScriptDump -- --study <data dir> <paper id> lesson <idea>       # e.g. lesson c3
+dotnet run --project tools/ScriptDump -- --study <data dir> <paper id> tutor <idea> "<question>"
+dotnet run --project tools/ScriptDump -- --study <data dir> <paper id> recap <part> "<answer>"
+dotnet run --project tools/ScriptDump -- --study <data dir> <paper id> match              # re-match with what you know
 ```
 
 ## Limitations
@@ -205,4 +266,4 @@ MISTRAL_API_KEY=... dotnet run --project tools/ScriptDump -- paper.pdf --ocr --c
   their captions are only read aloud after removing and adding the paper again.
 - Occasionally a line that isn't an equation (a table header, a sentence full of symbols) is treated as one.
 - Changing the narration model does not re-narrate papers already added (remove and add them again).
-- Ask needs a Mistral key and a connection.
+- Ask and Study need a Mistral key and a connection. Reviews work offline.

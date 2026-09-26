@@ -73,10 +73,72 @@ REQUEST: %s" position script.Segments.[position].Say (Cards.describe script requ
     printfn "\n%d cards in %d ms" cards.Length sw.ElapsedMilliseconds
     0
 
+/// --study <data dir> <paper id> plan | lesson <idea> | tutor <idea> <question> | recap <part> <answer> | match:
+/// the study session's requests, against a copy of a paper in <data dir> (the key comes from the desktop app's
+/// settings). The plan and lessons are saved in the paper's study folder there, as the app does.
+let private studyMode (argv: string[]) =
+    let real = Store.Paths(Path.Combine(Environment.GetFolderPath Environment.SpecialFolder.LocalApplicationData, "PaperReader"))
+    let settings = Store.loadSettings real
+    let paths = Store.Paths argv.[1]
+    let id = argv.[2]
+    let script = (Store.loadScript paths id).Value
+    let k = (Help.prepare settings paths id script (eprintfn "%s") Threading.CancellationToken.None).Result
+    let concepts = Store.loadConcepts paths
+    let progress = Study.loadProgress paths id |> Option.defaultValue (Study.Progress.empty DateTime.UtcNow)
+    let sw = Stopwatch.StartNew()
+    let mutable first = 0L
+    let started (t: string) = if first = 0L && t <> "" then first <- sw.ElapsedMilliseconds
+    let ct = Threading.CancellationToken.None
+    match argv.[3] with
+    | "plan" ->
+        let text = (Study.makePlan settings script k concepts started ct).Result
+        Study.savePlan paths id text
+        printfn "%s\n" text
+        let plan = Study.parsePlan script text
+        printfn "===== PARSED: %d parts, %d ideas" plan.Parts.Length plan.Ideas.Length
+        for p in plan.Parts do
+            printfn "PART %s\n  recap: %s\n  points: %s" p.Title p.Recap p.Points
+            for i in p.Ideas do
+                printfn "  %s %s%s%s | sec %d | show %A | requires %A | uses %A | same %A" i.Id i.Name (if i.Background then " [bg]" else "") (if i.Core then " [core]" else "") i.Section i.Visuals i.Requires i.Uses i.Same
+    | "lesson" ->
+        let plan = (Study.loadPlan paths id script).Value
+        let idea = (plan.Idea argv.[4]).Value
+        let text = (Study.makeLesson settings script k plan progress (concepts |> List.map (fun c -> c.Id, c) |> Map.ofList) idea started ct).Result
+        Study.saveLesson paths id idea.Id text
+        printfn "%s\n" text
+        let l = Study.parseLesson script id idea.Id text
+        printfn "===== PARSED: show %A, explanation %d words, example %d words, %d checks, recall %b" l.Show
+            (l.Explanation.Split(' ').Length) (l.Example.Split(' ').Length) l.Checks.Length l.Recall.IsSome
+        for q in l.Questions do
+            printfn "Q %s [%s] with %A: %s" q.Id (if q.Options.IsEmpty then "recall" else sprintf "%d options, right %d, %d whys" q.Options.Length q.Correct (q.Why |> List.filter ((<>) "") |> List.length)) q.Visual q.Prompt
+            for i, o in List.indexed q.Options do printfn "   %c) %s (%d chars)" "ABCDEF".[i] o o.Length
+    | "tutor" ->
+        let plan = (Study.loadPlan paths id script).Value
+        let idea = (plan.Idea argv.[4]).Value
+        let lesson = Study.loadLesson paths id script idea.Id
+        let answered = lesson |> Option.bind (fun l -> l.Checks |> List.tryHead) |> Option.map (fun q -> q, Some((q.Correct + 1) % q.Options.Length))
+        let m: Study.Moment = { Name = idea.Name; Goal = idea.Goal; Background = idea.Background; Section = idea.Section; Lesson = lesson; Answered = answered }
+        let reply = (Study.askTutor settings script k m [] argv.[5] false started ct).Result
+        printfn "Q: %s\n\n%s\n\nSHOW %A\nNEXT %A" argv.[5] reply.Answer reply.Show reply.Followups
+    | "recap" ->
+        let plan = (Study.loadPlan paths id script).Value
+        let part = int argv.[4]
+        printfn "RECAP: %s\nPOINTS: %s\nANSWER: %s\n" plan.Parts.[part].Recap plan.Parts.[part].Points argv.[5]
+        let f = (Study.feedback settings script k plan part argv.[5] (fun f -> started f.Text) ct).Result
+        printfn "%A\n%s" f.Verdict f.Text
+    | "match" ->
+        let plan = (Study.loadPlan paths id script).Value
+        let matches = (Study.matchLearned settings script.Title plan progress concepts ct).Result
+        printfn "%A" matches
+    | other -> failwithf "unknown study request %s" other
+    eprintfn "(first text %d ms, done %d ms)" first sw.ElapsedMilliseconds
+    0
+
 [<EntryPoint>]
 let main argv =
     if argv.[0] = "--ask" then askMode argv
-    elif argv.[0] = "--cards" then cardsMode argv else
+    elif argv.[0] = "--cards" then cardsMode argv
+    elif argv.[0] = "--study" then studyMode argv else
     let pdf = argv.[0]
     let opt name = argv |> Array.tryFindIndex ((=) name) |> Option.map (fun i -> argv.[i + 1])
     if argv |> Array.contains "--lines" then Layout.trace <- Some(fun s -> printfn "%s" s)

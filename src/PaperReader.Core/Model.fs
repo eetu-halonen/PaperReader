@@ -172,6 +172,42 @@ type Card =
       CreatedUtc: System.DateTime
       Memory: Memory }
 
+/// A question about an idea (Study): multiple choice, checked at once, or recall, answered from memory and then
+/// compared with its answer. Its text may have inline $LaTeX$ and **bold**.
+type Question =
+    { /// Stable: the paper, the idea in its study plan, and the question's place in the lesson.
+      Id: string
+      Prompt: string
+      /// Multiple choice: the options, the right one, and for each option why it is right or wrong.
+      /// Empty for a recall question.
+      Options: string list
+      Correct: int
+      Why: string list
+      /// A recall question's answer.
+      Answer: string
+      /// The paper the question was written for, and an equation, figure or table of it shown with the question.
+      PaperId: string
+      Visual: string option
+      LastAsked: System.DateTime option }
+
+/// Where an idea was met: a paper, its title (kept for when the paper is removed), and where the narration covers it.
+type ConceptSource = { PaperId: string; Title: string; Segment: int }
+
+/// An idea the learner has studied, across papers: what it is, how well it is remembered (the same memory as a
+/// flashcard's), and the questions that review it, from every paper it was met in.
+type Concept =
+    { Id: string
+      Name: string
+      /// One sentence that makes sense without the paper.
+      Definition: string
+      /// Background knowledge a paper relied on, rather than an idea of the paper itself.
+      Background: bool
+      /// Most recent first.
+      Sources: ConceptSource list
+      Questions: Question list
+      Memory: Memory
+      CreatedUtc: System.DateTime }
+
 type Settings =
     { MistralApiKey: string
       /// Narrate with a Mistral chat model (explains equations, fixes extraction errors).
