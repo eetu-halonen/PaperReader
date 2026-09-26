@@ -235,7 +235,12 @@ type Settings =
       OpenAlexKey: string
       /// Share of cards to still remember when they come up for review (FSRS's desired retention).
       /// Higher means more reviews.
-      Retention: float }
+      Retention: float
+      /// Papers open in Study: the narration with a tutor who teaches and asks between sections (with a key).
+      /// Otherwise they are only read aloud.
+      Study: bool
+      /// In Study, the microphone opens after each question, for answering aloud.
+      AnswerAloud: bool }
 
 module Settings =
     let defaults =
@@ -253,7 +258,9 @@ module Settings =
           HelpModel = "zai-glm-5-3"
           AboutMe = ""
           OpenAlexKey = ""
-          Retention = 0.9 }
+          Retention = 0.9
+          Study = true
+          AnswerAloud = true }
 
     let hasKey (s: Settings) = not (System.String.IsNullOrWhiteSpace s.MistralApiKey)
 

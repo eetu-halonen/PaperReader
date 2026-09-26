@@ -189,54 +189,136 @@ let private withQuestion (c: Concept) =
     { c with Questions = [ { Id = c.Id + "q"; Prompt = "?"; Options = [ "a"; "b" ]; Correct = 0; Why = [ ""; "" ]; Answer = ""; PaperId = "p"; Visual = None; LastAsked = None } ] }
 
 [<Fact>]
-let ``a session teaches in order, skips what is known, checks what is fading, and recaps each part`` () =
+let ``the paper is heard a section at a time: background before the section that needs it, each idea after its own`` () =
+    let summary (stops: Study.Stop list) =
+        stops |> List.map (fun st -> st.First, st.Last, st.Before |> List.map (fun i -> i.Id), st.After |> List.map (fun i -> i.Id))
+    Assert.Equal<(int * int * string list * string list) list>([ 0, 1, [ "c1" ], [ "c2" ]; 2, 4, [], [ "c3" ] ], summary (Study.stops (script ()) (plan ())))
+    // the rest of the paper after the last idea is heard too
+    let firstPart = { plan () with Parts = [ (plan ()).Parts.[0] ] }
+    Assert.Equal<(int * int * string list * string list) list>([ 0, 1, [ "c1" ], [ "c2" ]; 2, 4, [], [] ], summary (Study.stops (script ()) firstPart))
+
+[<Fact>]
+let ``a session goes through the paper, skips what is known, checks what is fading, and recaps each part`` () =
     let plan = plan ()
+    let script = script ()
     let now = t0.AddDays 1.0
     let empty = Study.Progress.empty t0
-    Assert.Equal(Study.Step.Teach "c1", fst (Study.next now plan empty Map.empty None))
-    // c1 known and fresh: skipped (and marked), so c2 is next
+    // the background the first section needs, then the section, then its idea
+    Assert.Equal(Study.Step.Teach "c1", fst (Study.next now script plan empty Map.empty None))
+    let background = { empty with Done = Map [ "c1", Study.Outcome.Learned ] }
+    Assert.Equal(Study.Step.Listen(0, 1), fst (Study.next now script plan background Map.empty None))
+    Assert.Equal(Study.Step.Listen(1, 1), fst (Study.next now script plan { background with Heard = 1 } Map.empty None))
+    Assert.Equal(Study.Step.Teach "c2", fst (Study.next now script plan { background with Heard = 2 } Map.empty None))
+    // c1 known and fresh: skipped (and marked), so the section is next
     let fresh = concept "k1" "RNN" (graduated now)
-    let step, progress = Study.next now plan { empty with Links = Map [ "c1", "k1" ] } (Map [ "k1", fresh ]) None
-    Assert.Equal(Study.Step.Teach "c2", step)
+    let step, progress = Study.next now script plan { empty with Links = Map [ "c1", "k1" ] } (Map [ "k1", fresh ]) None
+    Assert.Equal(Study.Step.Listen(0, 1), step)
     Assert.Equal(Some Study.Outcome.Known, progress.Done.TryFind "c1")
     // c1 known but due: one quick question
     let fading = concept "k1" "RNN" { graduated t0 with Due = now.AddDays -1.0 }
-    Assert.Equal(Study.Step.Check("c1", "k1"), fst (Study.next now plan { empty with Links = Map [ "c1", "k1" ] } (Map [ "k1", fading ]) None))
+    Assert.Equal(Study.Step.Check("c1", "k1"), fst (Study.next now script plan { empty with Links = Map [ "c1", "k1" ] } (Map [ "k1", fading ]) None))
     // a known idea the learner wants taught anyway
-    Assert.Equal(Study.Step.Teach "c1", fst (Study.next now plan { empty with Links = Map [ "c1", "k1" ]; Teach = set [ "c1" ] } (Map [ "k1", fresh ]) None))
+    Assert.Equal(Study.Step.Teach "c1", fst (Study.next now script plan { empty with Links = Map [ "c1", "k1" ]; Teach = set [ "c1" ] } (Map [ "k1", fresh ]) None))
     // after the first part: its recap, unless every idea in it was known already
-    let doneFirst = { empty with Done = Map [ "c1", Study.Outcome.Learned; "c2", Study.Outcome.Learned ] }
-    Assert.Equal(Study.Step.Recap 0, fst (Study.next now plan doneFirst Map.empty None))
-    let knewFirst = { empty with Done = Map [ "c1", Study.Outcome.Known; "c2", Study.Outcome.Known ] }
-    Assert.Equal(Study.Step.Teach "c3", fst (Study.next now plan knewFirst Map.empty None))
-    let all = { doneFirst with Done = doneFirst.Done.Add("c3", Study.Outcome.Learned); Recaps = set [ 0; 1 ] }
-    Assert.Equal(Study.Step.Finished, fst (Study.next now plan all Map.empty None))
+    let doneFirst = { empty with Heard = 2; Done = Map [ "c1", Study.Outcome.Learned; "c2", Study.Outcome.Learned ] }
+    Assert.Equal(Study.Step.Recap 0, fst (Study.next now script plan doneFirst Map.empty None))
+    let knewFirst = { empty with Heard = 2; Done = Map [ "c1", Study.Outcome.Known; "c2", Study.Outcome.Known ] }
+    Assert.Equal(Study.Step.Listen(2, 4), fst (Study.next now script plan knewFirst Map.empty None))
+    let all = { doneFirst with Heard = 5; Done = doneFirst.Done.Add("c3", Study.Outcome.Learned); Recaps = set [ 0; 1 ] }
+    Assert.Equal(Study.Step.Finished, fst (Study.next now script plan all Map.empty None))
 
 [<Fact>]
 let ``an idea learned minutes ago comes back between the others, but not straight after itself`` () =
     let plan = plan ()
+    let script = script ()
     let justLearned = withQuestion (concept "k1" "RNN" (learned t0))
-    let progress = { Study.Progress.empty t0 with Links = Map [ "c1", "k1" ]; Done = Map [ "c1", Study.Outcome.Learned ] }
+    let progress = { Study.Progress.empty t0 with Links = Map [ "c1", "k1" ]; Done = Map [ "c1", Study.Outcome.Learned ]; Heard = 2 }
     let concepts = Map [ "k1", justLearned ]
     // its 10 minute step
-    Assert.Equal(Study.Step.Teach "c2", fst (Study.next (t0.AddMinutes 5.0) plan progress concepts None))
-    Assert.Equal(Study.Step.Review "k1", fst (Study.next (t0.AddMinutes 11.0) plan progress concepts None))
-    Assert.Equal(Study.Step.Teach "c2", fst (Study.next (t0.AddMinutes 11.0) plan progress concepts (Some "k1")))
+    Assert.Equal(Study.Step.Teach "c2", fst (Study.next (t0.AddMinutes 5.0) script plan progress concepts None))
+    Assert.Equal(Study.Step.Review "k1", fst (Study.next (t0.AddMinutes 11.0) script plan progress concepts None))
+    Assert.Equal(Study.Step.Teach "c2", fst (Study.next (t0.AddMinutes 11.0) script plan progress concepts (Some "k1")))
     // with no question left to ask it, it waits for the reviews
-    Assert.Equal(Study.Step.Teach "c2", fst (Study.next (t0.AddMinutes 11.0) plan { progress with Reported = set [ "k1q" ] } concepts None))
+    Assert.Equal(Study.Step.Teach "c2", fst (Study.next (t0.AddMinutes 11.0) script plan { progress with Reported = set [ "k1q" ] } concepts None))
 
 [<Fact>]
 let ``the lessons written ahead are the ideas to be taught, not the known ones`` () =
     let plan = plan ()
     let progress = { Study.Progress.empty t0 with Links = Map [ "c2", "k2" ] }
-    Assert.Equal<string list>([ "c1"; "c3" ], Study.upcoming plan progress (Map [ "k2", concept "k2" "A" (graduated t0) ]) 3)
-    Assert.Equal<string list>([ "c1" ], Study.upcoming plan progress (Map [ "k2", concept "k2" "A" (graduated t0) ]) 1)
+    Assert.Equal<string list>([ "c1"; "c3" ], Study.upcoming (script ()) plan progress (Map [ "k2", concept "k2" "A" (graduated t0) ]) 3)
+    Assert.Equal<string list>([ "c1" ], Study.upcoming (script ()) plan progress (Map [ "k2", concept "k2" "A" (graduated t0) ]) 1)
 
 [<Fact>]
-let ``the time left counts ideas to learn, quick checks and recaps`` () =
+let ``the time left counts the paper still to hear, ideas to learn, quick checks and recaps`` () =
     let plan = plan ()
-    // 3 ideas to learn, 2 recaps
-    Assert.Equal(13, Study.minutesLeft t0 plan (Study.Progress.empty t0) Map.empty)
+    // 3 ideas to learn, 2 recaps (and a few words of narration)
+    Assert.Equal(10, Study.minutesLeft t0 (script ()) plan (Study.Progress.empty t0) Map.empty)
+
+// ---- what the tutor says, and what is heard
+
+[<Fact>]
+let ``the tutor says a lesson in short clips, math in words, and the example after it`` () =
+    let plan = plan ()
+    let lesson = Study.parseLesson (script ()) "p" "c3" lessonText
+    let said = Study.lessonSaid plan.Ideas.[2] lesson
+    Assert.Equal("Now: Scaled dot-product attention.", said.Head.Say)
+    Assert.Contains(said, fun x -> x.Show = "Here's an example.")
+    // what is shown keeps its LaTeX; what is said doesn't
+    let math = said |> List.find (fun x -> x.Show.Contains "softmax")
+    Assert.Contains("\\sqrt", math.Show)
+    Assert.DoesNotContain("\\", math.Say)
+    Assert.DoesNotContain("$", math.Say)
+    // the first clip is short, so speech starts quickly
+    let long = String.replicate 12 "This is a sentence of the lesson. "
+    let clips = Study.said long
+    Assert.True(clips.Head.Show.Length <= 140)
+    Assert.True(clips.Length > 1)
+
+[<Fact>]
+let ``a question is read with its options in the order shown, and feedback says why`` () =
+    let q = (Study.parseLesson (script ()) "p" "c3" lessonText).Checks.[0]
+    // shown as: 1 = option 2, 2 = option 1 (right), 3 = option 0, 4 = option 3
+    let order = [ 2; 1; 0; 3 ]
+    let said = Study.questionSaid q order
+    Assert.StartsWith("Option 1: To speed it up. Option 2: To keep large dot products", (List.last said).Say)
+    let right = Study.feedbackSaid q order (Some 1) |> List.map (fun x -> x.Say) |> String.concat " "
+    // "Right: large scores..." loses its own "Right:"
+    Assert.StartsWith("Right. Large scores give tiny gradients", right)
+    let wrong = Study.feedbackSaid q order (Some 0) |> List.map (fun x -> x.Say) |> String.concat " "
+    Assert.StartsWith("Not quite. The softmax always sums to one. The answer is option 2: To keep large dot products", wrong)
+    let unknown = Study.feedbackSaid q order None |> List.map (fun x -> x.Say) |> String.concat " "
+    Assert.StartsWith("The answer is option 2", unknown)
+
+[<Fact>]
+let ``a spoken answer is a number, the words of an option, or I don't know`` () =
+    let options = [ "A matrix of dot products between queries and keys"; "The gradients of the loss"; "The positional encodings" ]
+    let heard = Study.heardAnswer options
+    Assert.Equal(Study.Heard.Option 1, heard "Two.")
+    Assert.Equal(Study.Heard.Option 1, heard "Option two.")
+    Assert.Equal(Study.Heard.Option 1, heard "Option 2")
+    Assert.Equal(Study.Heard.Option 1, heard "To.")
+    Assert.Equal(Study.Heard.Option 1, heard "I'd go for two.")
+    Assert.Equal(Study.Heard.Option 1, heard "I'll go with the second one")
+    Assert.Equal(Study.Heard.Option 2, heard "Number three")
+    Assert.Equal(Study.Heard.Option 1, heard "kakkonen")
+    Assert.Equal(Study.Heard.Option 0, heard "One")
+    // letters still work when they come through
+    Assert.Equal(Study.Heard.Option 1, heard "B.")
+    Assert.Equal(Study.Heard.Option 1, heard "Bee")
+    Assert.Equal(Study.Heard.Option 0, heard "I think it's A")
+    Assert.Equal(Study.Heard.Option 2, heard "Option C, please")
+    Assert.Equal(Study.Heard.Option 1, heard "The second one.")
+    Assert.Equal(Study.Heard.Option 0, heard "Dot products between the queries and the keys")
+    Assert.Equal(Study.Heard.Option 2, heard "kolme")
+    Assert.Equal(Study.Heard.DontKnow, heard "I don't know.")
+    Assert.Equal(Study.Heard.DontKnow, heard "En tiedä")
+    Assert.Equal(Study.Heard.Unclear, heard "D")
+    Assert.Equal(Study.Heard.Unclear, heard "Four")
+    Assert.Equal(Study.Heard.Unclear, heard "Either one or three")
+    // "one" in a longer sentence is not an answer
+    Assert.Equal(Study.Heard.Unclear, heard "Recurrent networks have to compute one position after another, so training can't be parallelized")
+    Assert.Equal(Study.Heard.Unclear, heard "Hmm, maybe something else entirely")
+    Assert.Equal(Study.Heard.Unclear, heard "")
 
 // ---- what the learner knows
 
@@ -321,7 +403,8 @@ let ``what the learner knows and how far a paper's study is are saved and read b
           Recaps = set [ 0 ]
           Teach = set [ "c3" ]
           Reported = set [ "abc:c2:1" ]
-          Matched = t0 }
+          Matched = t0
+          Heard = 42 }
     Study.saveProgress p "abc" progress
     Assert.Equal(Some progress, Study.loadProgress p "abc")
     Study.savePlan p "abc" planText

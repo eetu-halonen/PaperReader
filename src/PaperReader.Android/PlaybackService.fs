@@ -33,16 +33,25 @@ type private SessionCallback() =
 
 /// Keeps the app alive while it reads in the background, and shows the media notification.
 /// Runs in the foreground while audio plays; when paused the notification stays, with a play button.
-[<Service(Name = "app.paperreader.PlaybackService", Exported = false, ForegroundServiceType = ForegroundService.TypeMediaPlayback)>]
+/// With the microphone allowed it is a microphone service too, so the tutor hears answers with the screen locked.
+[<Service(Name = "app.paperreader.PlaybackService", Exported = false,
+          ForegroundServiceType = (ForegroundService.TypeMediaPlayback ||| ForegroundService.TypeMicrophone))>]
 type PlaybackService() =
     inherit Service()
 
     static let channelId = "playback"
     static let notificationId = 1
+    /// How long a pause waits before leaving the foreground: the paper hands over to the tutor with a pause of a moment,
+    /// and going back to the foreground from the background may not be allowed.
+    static let settleMs = 4000L
 
     let mutable session: MediaSession = null
     let mutable focus: (AudioFocusRequestClass * NoisyReceiver) option = None
     let mutable resumeOnGain = false
+    let mutable foreground = false
+    let mutable withMic = false
+    let handler = new Handler(Looper.MainLooper)
+    let mutable settle: Java.Lang.Runnable = null
 
     static member val Current: PlaybackService option = None with get, set
 
@@ -111,6 +120,38 @@ type PlaybackService() =
                 focus <- None
             | None -> ()
 
+    member private this.Notify(n: Notification) =
+        (this.GetSystemService(Context.NotificationService) :?> NotificationManager).Notify(notificationId, n)
+
+    /// In the foreground, as a microphone service too when the microphone is allowed.
+    member private this.GoForeground(n: Notification) =
+        let mic = Build.VERSION.SdkInt >= BuildVersionCodes.R && this.CheckSelfPermission Android.Manifest.Permission.RecordAudio = Permission.Granted
+        if mic then
+            // not allowed from the background on newer Android: then as a media service only
+            try
+                this.StartForeground(notificationId, n, ForegroundService.TypeMediaPlayback ||| ForegroundService.TypeMicrophone)
+                withMic <- true
+            with e ->
+                Android.Util.Log.Warn("PaperReader", "foreground without the microphone: " + e.Message) |> ignore
+                this.StartForeground(notificationId, n, ForegroundService.TypeMediaPlayback)
+                withMic <- false
+        elif Build.VERSION.SdkInt >= BuildVersionCodes.Q then this.StartForeground(notificationId, n, ForegroundService.TypeMediaPlayback)
+        else this.StartForeground(notificationId, n)
+        foreground <- true
+
+    /// After the microphone is allowed (the app is in front then): becomes a microphone service too.
+    member this.MicAllowed() =
+        if foreground && not withMic then this.GoForeground(this.Notification())
+
+    /// Leaves the foreground and gives up audio focus, if still paused.
+    member private this.Settle() =
+        if not Playback.playing then
+            this.HoldFocus false
+            if foreground then
+                this.StopForeground(StopForegroundFlags.Detach)
+                foreground <- false
+            this.Notify(this.Notification())
+
     /// Brings the notification, session and foreground state in line with `Playback`.
     member this.Refresh() =
         let state =
@@ -124,14 +165,20 @@ type PlaybackService() =
                 .PutString(MediaMetadata.MetadataKeyTitle, Playback.title)
                 .PutString(MediaMetadata.MetadataKeyArtist, Playback.subtitle)
                 .Build())
-        this.HoldFocus Playback.playing
+        handler.RemoveCallbacks settle
         let n = this.Notification()
         if Playback.playing then
-            if Build.VERSION.SdkInt >= BuildVersionCodes.Q then this.StartForeground(notificationId, n, ForegroundService.TypeMediaPlayback)
-            else this.StartForeground(notificationId, n)
+            this.HoldFocus true
+            if foreground then this.Notify n else this.GoForeground n
         else
-            this.StopForeground(StopForegroundFlags.Detach)
-            (this.GetSystemService(Context.NotificationService) :?> NotificationManager).Notify(notificationId, n)
+            this.Notify n
+            handler.PostDelayed(settle, settleMs) |> ignore
+
+    /// Out of the foreground and the notification gone, when the reader closes.
+    member this.Stopped() =
+        handler.RemoveCallbacks settle
+        this.StopForeground(StopForegroundFlags.Remove)
+        foreground <- false
 
     override _.OnBind(_) = null
 
@@ -142,6 +189,7 @@ type PlaybackService() =
         channel.Description <- "Shows the paper being read, with a pause button"
         channel.SetShowBadge false
         nm.CreateNotificationChannel channel
+        settle <- new Java.Lang.Runnable(fun () -> this.Settle())
         session <- new MediaSession(this, "PaperReader")
         session.SetCallback(new SessionCallback())
         session.Active <- true
@@ -153,13 +201,12 @@ type PlaybackService() =
         | "pause" -> Playback.remote false
         | _ -> ()
         // started with startForegroundService: it must go foreground now, even if the app paused meanwhile
-        let n = this.Notification()
-        if Build.VERSION.SdkInt >= BuildVersionCodes.Q then this.StartForeground(notificationId, n, ForegroundService.TypeMediaPlayback)
-        else this.StartForeground(notificationId, n)
+        if not foreground then this.GoForeground(this.Notification())
         this.Refresh()
         StartCommandResult.NotSticky
 
     override this.OnDestroy() =
+        handler.RemoveCallbacks settle
         resumeOnGain <- false
         this.HoldFocus false
         session.Release()
@@ -185,5 +232,5 @@ type PlaybackService() =
         match PlaybackService.Current with
         | None -> ()
         | Some s ->
-            s.StopForeground(StopForegroundFlags.Remove)
+            s.Stopped()
             s.StopSelf()

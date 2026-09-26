@@ -168,6 +168,10 @@ export function pdfClose(handle) {
 let recorder = null;
 let recorded = [];
 let recStream = null;
+// measures loudness while recording, to tell when the speaker has finished
+let recAudio = null;
+let recAnalyser = null;
+let recSamples = null;
 
 function recordingType() {
     const types = ["audio/webm;codecs=opus", "audio/ogg;codecs=opus", "audio/mp4", "audio/webm"];
@@ -184,6 +188,17 @@ export function recExtension() {
 function stopStream() {
     if (recStream) recStream.getTracks().forEach(t => t.stop());
     recStream = null;
+    if (recAudio) recAudio.close().catch(() => { });
+    recAudio = null;
+    recAnalyser = null;
+}
+
+export function recLevel() {
+    if (!recAnalyser) return recorder ? -1 : 0;
+    recAnalyser.getFloatTimeDomainData(recSamples);
+    let peak = 0;
+    for (const v of recSamples) peak = Math.max(peak, Math.abs(v));
+    return Math.min(1, peak);
 }
 
 export async function recStart() {
@@ -194,6 +209,16 @@ export async function recStart() {
     recorded = [];
     recorder.ondataavailable = e => { if (e.data && e.data.size > 0) recorded.push(e.data); };
     recorder.start();
+    try {
+        recAudio = new AudioContext();
+        recAnalyser = recAudio.createAnalyser();
+        recAnalyser.fftSize = 2048;
+        recSamples = new Float32Array(recAnalyser.fftSize);
+        recAudio.createMediaStreamSource(recStream).connect(recAnalyser);
+    } catch (e) {
+        recAudio = null;
+        recAnalyser = null;
+    }
 }
 
 export function recStop() {

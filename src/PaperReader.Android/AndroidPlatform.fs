@@ -258,6 +258,8 @@ type AndroidRecorder(context: Context, activity: unit -> Android.App.Activity) =
             task {
                 let! allowed = Permissions.ensure (activity ()) Android.Manifest.Permission.RecordAudio
                 if not allowed then failwith "the app isn't allowed to use it. Allow the microphone in the app's settings."
+                // so answers are heard with the screen locked from now on
+                Android.App.Application.SynchronizationContext.Post((fun _ -> PlaybackService.Current |> Option.iter (fun s -> s.MicAllowed())), null)
                 release ()
                 let r = if Build.VERSION.SdkInt >= BuildVersionCodes.S then new MediaRecorder(context) else new MediaRecorder()
                 r.SetAudioSource AudioSource.Mic
@@ -284,6 +286,12 @@ type AndroidRecorder(context: Context, activity: unit -> Android.App.Activity) =
             }
 
         member _.Cancel() = release ()
+
+        // the loudest moment since it was last asked
+        member _.Level =
+            match current with
+            | null -> 0.0
+            | r -> try float r.MaxAmplitude / 32767.0 with _ -> -1.0
 
 type AndroidPlatform(context: Context) =
     let player = AndroidPlayer()

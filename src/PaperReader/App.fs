@@ -42,7 +42,7 @@ type MainView() as this =
                     dispatch |> Option.iter (fun d -> d State.BackPressed))
             // keyboard: space play/pause, arrows 15 s, W walking mode, S study, Escape back (not while typing in a text
             // box); in a review, space or Enter shows the answer (then answers Good) and 1 to 4 answer or pick an option;
-            // in a study session, 1 to 4 pick an option and Enter goes on
+            // in the tutor's turn, 1 to 4 pick an option and Enter pauses or goes on
             top.AddHandler(
                 Input.InputElement.KeyDownEvent,
                 (fun _ (e: Input.KeyEventArgs) ->
@@ -59,8 +59,7 @@ type MainView() as this =
                         | Input.Key.D2 | Input.Key.NumPad2 when Views.studying && not typing -> Some(State.StudyKey 2)
                         | Input.Key.D3 | Input.Key.NumPad3 when Views.studying && not typing -> Some(State.StudyKey 3)
                         | Input.Key.D4 | Input.Key.NumPad4 when Views.studying && not typing -> Some(State.StudyKey 4)
-                        | Input.Key.Enter when Views.studying && not typing -> Some(State.StudyKey 0)
-                        | _ when Views.studying && e.Key <> Input.Key.Escape -> None
+                        | Input.Key.Enter when Views.studying && not typing -> Some State.TogglePlay
                         | Input.Key.Space when not typing -> Some State.TogglePlay
                         | Input.Key.Left when not typing -> Some State.Back15
                         | Input.Key.Right when not typing -> Some State.Forward15

@@ -1,8 +1,9 @@
 # Paper Reader
 
-An app that reads research papers aloud and shows the math on screen while it talks. It reads other
-documents just as well: books, web articles, Word files, slides, notes, and photos of pages.
-It runs on Android, on the Linux desktop and in the browser (WebAssembly).
+An app that teaches you research papers by ear. It reads the paper aloud and shows the math on screen while it talks,
+and between sections a tutor explains each idea and asks you about it, so you can study a paper on a walk. It reads
+other documents just as well: books, web articles, Word files, slides, notes, and photos of pages. It runs on Android,
+on the Linux desktop and in the browser (WebAssembly).
 
 - Open a document from the app, or use *Open with* / *Share* from any other app. Sharing a link from the browser
   opens that page (or the PDF behind it). See [Documents it reads](#documents-it-reads).
@@ -34,13 +35,16 @@ It runs on Android, on the Linux desktop and in the browser (WebAssembly).
   offers three follow-ups, so typing is rarely needed; you can also type, or tap the microphone and ask
   out loud. Answers can be read to you, show the equation or figure they talk about, and are kept per paper.
   *Ask about it* on any item in the Σ list asks about that one. See [How Ask answers](#how-ask-answers).
-- **Study** (with a Mistral key): a tutor teaches the paper idea by idea, prerequisites first. Each idea gets a short
-  lesson that builds on what you already know, with the paper's equation or figure next to it and a worked example,
-  then a multiple-choice question whose every option explains why it is right or wrong. Wrong answers can be talked
-  through with the tutor, and the idea comes back a few minutes later with a different question. At the end of each part
-  you explain its ideas in your own words (typed or spoken) and get feedback. What you learn is remembered across
-  papers: the next paper skips the ideas you still know and checks the fading ones with one question. *Study* in the
-  reader (or S) or on the Learn screen. See [How studying works](#how-studying-works).
+- **Study** (with a Mistral key; how papers open): the paper is read aloud section by section, and between sections a
+  tutor speaks. It gives a short lesson on each idea the section covered, which builds on what you already know, with
+  the paper's equation or figure on screen and a worked example. Then it asks a question. A chime, and you answer out
+  loud ("option 2", or the answer in your words) or tap it; the tutor says what it heard, why it is right or wrong,
+  and goes on by itself.
+  Background the next section needs comes before it. An idea you got wrong comes back a few minutes later with a
+  different question. At the end of each part you explain it in your own words and hear feedback. What you learn is
+  remembered across papers: the next paper skips the ideas you still know and checks the fading ones with one
+  question. It works in the full player and in walking mode. The cap button in the reader shows the plan, and turns
+  the tutor off to just listen (Settings: *Study with a tutor*). See [How studying works](#how-studying-works).
 - **Learn** (flashcards with spaced repetition): the cards button in the reader opens *Learn*, where one tap makes
   cards about the equation or figure on screen, what you just heard, or the section's main points, or you type what you
   want to remember ("why divide by √d_k"). *Make a deck* writes about one card per page covering the whole paper
@@ -134,9 +138,9 @@ This publishes a self-contained build to `dist/linux-x64/paper-reader` and adds 
 to the application menu and to *Open with* for the documents it reads. It can also be started directly:
 `dist/linux-x64/paper-reader paper.pdf` (or a web address). Data lives in `~/.local/share/PaperReader`.
 
-Keys: Space play/pause, ← / → 15 seconds, A ask, S study, Esc back. In a review: Space or Enter shows the answer (then
-answers Good), 1–4 answer Again / Hard / Good / Easy, or pick an option of an idea's question. While studying: 1–4
-pick an option, Enter is the main button (*Check my understanding*, *Continue*).
+Keys: Space play/pause, ← / → 15 seconds, A ask, S turns the tutor on, Esc back. In a review: Space or Enter shows the
+answer (then answers Good), 1–4 answer Again / Hard / Good / Easy, or pick an option of an idea's question. When the
+tutor speaks: Space or Enter pause and go on, ← says it again, → skips, 1–4 pick an option.
 
 ## Browser (WebAssembly)
 
@@ -211,34 +215,51 @@ Study is built on what learning research finds lasts, rather than what feels pro
 
 | Finding | What Study does |
 | --- | --- |
-| New material is learned best in small segments, prerequisites first ([segmenting and pre-training](https://doi.org/10.1017/CBO9781139547369.016)) | The paper is split into ideas in the order to learn them, grouped into parts. Background the paper assumes without explaining comes first, as its own ideas, when you may not know it. |
+| New material is learned best in small segments, prerequisites first ([segmenting and pre-training](https://doi.org/10.1017/CBO9781139547369.016)) | The paper is heard a section at a time (usually one to three minutes), and its ideas are taught right after. Background the paper assumes without explaining is taught before the section that needs it, when you may not know it. |
 | Words and a picture together beat words alone ([dual coding, multimedia principle](https://doi.org/10.1017/CBO9781139547369.010)) | A lesson shows the paper's equation, figure or table it explains, when there is one. |
 | Worked examples help novices more than solving from scratch ([worked-example effect](https://doi.org/10.3102/00346543070002181)) | Each lesson has a concrete example: a small worked example with numbers, a case from the paper, or an analogy (said to be one). |
 | Retrieving from memory strengthens it more than rereading ([testing effect](https://doi.org/10.1111/j.1467-9280.2006.01693.x)) | Every idea is checked with a question after its lesson, and later reviews ask, never show. |
+| Three options work as well as four or five ([Rodriguez 2005](https://doi.org/10.1111/j.1745-3992.2005.00006.x)) | Questions have three short options, which you can keep in mind when they are read to you. |
 | Feedback helps most when it explains ([elaborated feedback](https://doi.org/10.3102/0034654307313795)) | Every option of a multiple-choice question says why it is right or wrong. The wrong options are plausible misconceptions, not throwaways, and the right one isn't given away by being the longest. |
 | A lucky guess looks like knowing, and hides the gap | *I don't know* is always an option, and counts as not knowing. |
-| Spaced practice beats massed practice, and mixing topics beats blocking them ([spacing](https://doi.org/10.1037/0033-2909.132.3.354), [interleaving](https://doi.org/10.1007/s11251-007-9015-8)) | An idea answered wrong comes back minutes later, between other ideas. After that it is reviewed on the FSRS schedule, mixed with other papers' ideas and cards. An immediate retry after the explanation is practice only, and doesn't count as having learned it. |
+| Spaced practice beats massed practice, and mixing topics beats blocking them ([spacing](https://doi.org/10.1037/0033-2909.132.3.354), [interleaving](https://doi.org/10.1007/s11251-007-9015-8)) | An idea answered wrong comes back minutes later, between other ideas. After that it is reviewed on the FSRS schedule, mixed with other papers' ideas and cards. |
 | The same question asked again and again can be answered from memory of the answer, without the idea | Each idea keeps a pool of questions (multiple choice and recall, from every paper it was met in). A review asks a different one each time, alternating between the two kinds. |
-| Explaining in your own words deepens understanding ([generation, self-explanation](https://doi.org/10.1016/0364-0213%2889%2990002-5)) | At the end of each part you explain its ideas from memory, typed or spoken. The tutor says what you got right, what is missing, and what a good answer covers. |
-| People judge poorly what they know ([illusions of competence](https://doi.org/10.1146/annurev-psych-113011-143823)) | Nothing is skipped on your word: *I know this: test me* asks the question before the lesson, and ideas known from other papers are skipped only while FSRS says they are still well remembered. |
+| Explaining in your own words deepens understanding ([generation, self-explanation](https://doi.org/10.1016/0364-0213%2889%2990002-5)) | At the end of each part you explain its ideas from memory, out loud or typed. The tutor says what you got right, what is missing, and what a good answer covers. |
+| People judge poorly what they know ([illusions of competence](https://doi.org/10.1146/annurev-psych-113011-143823)) | Nothing is skipped on your word: skipping a lesson asks its question first, and ideas known from other papers are skipped only while FSRS says they are still well remembered. |
 
 A session:
 
-1. **Plan** (once per paper, about 20–30 s). GLM 5.3 reads the whole paper (the same prefix as Ask, so the API's cache
-   serves both) and lists the ideas to learn, each with the goal, a one-sentence definition, where in the paper it is,
-   which equations and figures go with it, and which ideas it builds on. It is also given the ideas you already know
-   from other papers. An idea that *is* one of them is marked `same as known`, and one that only builds on one is
-   marked `uses known`. Each `same as known` claim is checked by a second, quick call, and dropped when in doubt. A
-   wrong match would skip something you never learned.
-2. **Teach**. The lesson connects to what you know ("You already know that…"), explains the idea from the paper,
-   shows its visual, and gives an example. Lessons are written two ahead while you read, so the next one is usually
-   ready. *Listen to it in the paper* plays the part of the narration it comes from, and *Back to studying* returns.
-   The tutor answers questions about the lesson, with one-tap questions for the usual ones.
-3. **Check**. One multiple-choice question. Wrong answers get *Another question* and the tutor, which knows what you
-   picked. The idea comes back in a few minutes either way, with a question you haven't seen.
-4. **Recap** at the end of each part: explain it back, and get *Got it* / *Partly there* / *Not yet* with feedback.
-5. **Known ideas**. If you studied an idea in another paper and FSRS says you still know it, it is skipped. If it is
+1. **Plan** (once per paper, about 20–40 s, while the paper's beginning is read to you). GLM 5.3 reads the whole paper
+   (the same prefix as Ask, so the API's cache serves both) and lists the ideas to learn in the paper's order, each
+   with the section that covers it, a goal, a one-sentence definition, its equations and figures, and the ideas it
+   builds on. It is also given the ideas you already know from other papers. An idea that *is* one of them is marked
+   `same as known`, and one that only builds on one is marked `uses known`. Each `same as known` claim is checked by a
+   second, quick call, and dropped when in doubt. A wrong match would skip something you never learned.
+2. **Listen**. The paper's narration plays as usual, up to the end of the section that covers the next ideas. A strip
+   over the player says what the tutor will go over after it. Jumping elsewhere in the paper is fine: the tutor comes
+   in at the end of the stretch you're hearing, and still covers what you skipped.
+3. **Teach**. The tutor's lesson is spoken (Voxtral, the voice you picked), with its equation or figure on screen and
+   the sentence being said under it. It connects to what you know ("You already know that…"), explains what the section
+   meant rather than retelling it, and ends with an example. Lessons are written two ahead while you listen, and their
+   first words are spoken ahead, so the tutor starts at once. *Skip* asks the lesson's question first and teaches it
+   only if you get it wrong.
+4. **Check**. One multiple-choice question, read with its three numbered options. After a chime the microphone
+   listens. Say "option 2", "two", "the second one", the answer in your own words, or "I don't know"; it stops
+   listening when you stop talking. Or tap an option. Options are numbered, not lettered, because transcription mixes
+   up lone letters ("B" came back empty, "Bee" as "a"). The tutor says what it heard ("You said option 2"), whether it
+   is right and why, and goes on; *Misheard? Answer again* under the question takes a misheard answer back. Unheard or
+   unclear answers get one reminder, then it waits for a tap. *Ask* opens the tutor, where you can ask out loud or type; its answer is spoken,
+   and *Continue* returns to where the lesson was.
+5. **Recap** at the end of each part: explain it back out loud (or type it), and hear *Got it* / *Partly there* /
+   *Not yet* with feedback. Saying nothing skips it.
+6. **Known ideas**. If you studied an idea in another paper and FSRS says you still know it, it is skipped. If it is
    fading, one quick question checks it, and that counts as its review. If you've forgotten it, it is taught here.
+
+Pause stops the tutor, the microphone and the narration; Continue goes on where it was. The headset's play/pause
+button does the same. On Android the phone can be locked in a pocket: once the microphone is allowed, the playback
+service also runs as a microphone service, so the tutor hears answers with the screen off. The screen stays on while
+the tutor talks, for the equation; lock it if you don't need it. Answering aloud can be turned off (Settings: *Answer out loud*): the tutor then waits for a tap.
+What the tutor says is cached per voice in the paper's `study/audio/` folder, so nothing is spoken twice by the API.
 
 Every answer is an FSRS review of the idea (right is Good; wrong or *I don't know* is Again), with the same scheduler
 and retention setting as the cards (see above), so what you learn comes back for review just before you'd forget it.
@@ -274,3 +295,8 @@ dotnet run --project tools/ScriptDump -- --study <data dir> <paper id> match    
 - Occasionally a line that isn't an equation (a table header, a sentence full of symbols) is treated as one.
 - Changing the narration model does not re-narrate papers already added (remove and add them again).
 - Ask and Study need a Mistral key and a connection. Reviews work offline.
+- Answering aloud needs a microphone and some quiet: in wind or traffic it may not hear the end of an answer (it stops
+  after 12 seconds) or may hear noise as speech (then it asks again). Tapping always works.
+- On Android 11 and later, the microphone works with the screen locked only if the session was started or
+  resumed with the app on screen: resuming from the headset or the lock screen after a long pause plays the tutor, but
+  its questions then wait for a tap.

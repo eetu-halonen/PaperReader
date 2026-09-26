@@ -99,16 +99,14 @@ type ReviewState =
 type QuizPurpose =
     /// Right after the lesson.
     | Check
-    /// Another question after a wrong answer: practice, which doesn't change the idea's memory.
-    | Retry
-    /// "I know this": the question before the lesson.
+    /// The lesson was skipped: the question first, the lesson only if the answer is wrong.
     | TestOut
     /// An idea known from another paper that may be fading.
     | QuickCheck
     /// An idea learned minutes ago, asked again between the others.
     | Again
 
-/// A multiple-choice question on screen in a study session.
+/// A multiple-choice question in a study session.
 type Quiz =
     { /// The idea of the plan it is about, if any.
       Idea: string option
@@ -116,25 +114,77 @@ type Quiz =
       Concept: string option
       Purpose: QuizPurpose
       Question: Question
-      /// The options in the order shown (indices into the question's), so the right one moves around.
+      /// The options in the order shown and said (indices into the question's), so the right one moves around.
       Order: int list
       /// The option picked; Some None is "I don't know".
       Choice: int option option
+      /// The answer was said aloud (and may have been misheard).
+      Spoken: bool
       /// Before the answer: the learner's idea (None if the answer made it) and the progress, so a question reported
       /// as wrong can be taken back.
       Before: (Concept option * Study.Progress) option }
 
+/// What a study session is doing.
 [<RequireQualifiedAccess>]
-type StudyScreen =
-    /// The plan: where the learner is, what is known, what is left.
-    | Overview
+type StudyNow =
+    /// The tutor is getting ready (planning); the paper is read aloud meanwhile.
+    | Starting
+    /// The paper is read aloud up to this segment (inclusive); then the tutor speaks.
+    | Listening of last: int
+    /// The tutor explains an idea.
     | Teach of idea: string
     | Quiz of Quiz
     /// Explaining a part's ideas in one's own words.
     | Recap of part: int
     | Finished
 
-/// Studying the open paper with a tutor (see Study).
+/// What comes when the tutor has said everything.
+[<RequireQualifiedAccess>]
+type Then =
+    /// The lesson's question.
+    | Question
+    /// Listening for the answer to the question.
+    | Answer
+    /// Listening for the learner's explanation.
+    | Explain
+    /// The next step of the session.
+    | Next
+    /// Nothing: waiting for the learner.
+    | Wait
+
+/// The tutor speaking: what it says now, one clip after another.
+type Voice =
+    { Id: Guid
+      Said: Study.Said list
+      /// The clip being said, or to be said next.
+      At: int
+      /// Clips made so far: index -> audio file.
+      Ready: Map<int, string>
+      /// Saying it, or waiting for the clip to be made.
+      Playing: bool
+      Then: Then }
+
+/// What the learner is heard saying.
+[<RequireQualifiedAccess>]
+type Hearing =
+    /// The answer to the question on screen.
+    | Answer
+    /// A part explained in their own words.
+    | Explanation
+    /// A question to the tutor.
+    | Question
+
+/// The microphone in a study session.
+[<RequireQualifiedAccess>]
+type Ear =
+    | Off
+    /// The chime, then the microphone opening.
+    | Opening of Hearing
+    /// Listening: how loud it is now, and whether speech was heard yet.
+    | Open of Hearing * level: float * spoke: bool
+    | Transcribing of Hearing
+
+/// Studying the open paper with a tutor (see Study): the paper read aloud, and the tutor between its sections.
 type StudyState =
     { Plan: Study.Plan option
       /// Writing the plan: what is happening, and the ideas written so far.
@@ -145,7 +195,17 @@ type StudyState =
       Writing: Map<string, string>
       /// Lessons that couldn't be written: idea -> why.
       Failed: Map<string, string>
-      Screen: StudyScreen
+      Now: StudyNow
+      /// The session goes on by itself; false when the learner paused it.
+      Running: bool
+      Voice: Voice option
+      /// What the tutor was saying before answering a question in the tutor panel, to go back to.
+      Aside: Voice option
+      Ear: Ear
+      /// Answers to the question on screen that weren't heard or understood.
+      Tries: int
+      /// What the learner said last.
+      Heard: string
       /// What the conversation with the tutor is about (an idea of the plan, or the learner's idea), and the conversation.
       ChatAbout: string
       Chat: Study.TutorTurn list
@@ -153,13 +213,15 @@ type StudyState =
       /// A question to the tutor on its way: its id, the question, and the answer so far.
       Pending: (Guid * string * string) option
       Input: string
+      /// Asking the tutor: the panel with the conversation is open.
+      ShowTutor: bool
+      /// The plan: every idea, what is known and what is left.
+      ShowPlan: bool
+      /// A recap's answer: heard or typed, and the tutor's feedback on it.
       RecapInput: string
       Feedback: Study.Feedback option
       Grading: bool
-      Mic: Mic
       Error: string option
-      /// Listening to the paper from the session, which waits behind the player.
-      Hidden: bool
       /// The learner's idea just asked about, so it isn't asked again straight away.
       Last: string option
       /// Stops the plan, the tutor and feedback when the session closes (lessons are finished and kept).
@@ -400,35 +462,49 @@ type Msg =
     /// Removes an idea from what the learner knows.
     | ForgetConcept of string
     // ----- Study
-    /// Opens the study session for the open paper.
+    /// Turns the tutor on for the open paper: the study session starts, or goes on where it was.
     | OpenStudy
-    /// Opens a paper to study it (from the Learn screen).
+    /// Opens a paper to study it.
     | StudyPaper of PaperInfo
+    /// Turns the tutor off: the paper is only read aloud.
     | CloseStudy
-    /// Plans the paper if needed, then goes to the next step.
-    | StudyStart
     | StudyStep of paperId: string * step: string
     | StudyPlanText of paperId: string * text: string
     | StudyPlanned of paperId: string * Result<string, string>
+    | RetryPlan
     | StudyLessonText of paperId: string * idea: string * text: string
     | StudyLessonDone of paperId: string * idea: string * Result<string, string>
+    | StudyRetryLesson of idea: string
     | StudyMatched of paperId: string * Map<string, string>
-    | StudyShowOverview
-    /// Teaches an idea picked on the overview (again, or although it is known).
+    | ToggleStudyPlan
+    /// Teaches an idea picked in the plan (again, or although it is known).
     | StudyTeach of idea: string
-    /// "Check my understanding" after the lesson.
-    | StudyCheck
-    /// "I know this": the question first.
+    /// Skips the rest of the lesson: its question first, the lesson only if the answer is wrong.
     | StudyTestOut
     | StudyChoose of int option
-    | StudyRetry
+    /// The answer as heard (by the microphone).
+    | StudySaid of int option
+    /// The answer was misheard: take it back and listen again.
+    | StudyMisheard
     /// The question on screen is wrong: take the answer back and never ask it again.
     | StudyReport
-    | StudyContinue
-    /// Reads the lesson after answering its question without it.
-    | StudyRead
-    /// Keys in a study session: 1 to 4 pick an option, 0 is Enter (the main button).
+    /// Says it again: the question, or back a sentence.
+    | StudyAgain
+    /// Skips ahead: the lesson to its question, a question as not known, the feedback, or the recap.
+    | StudySkip
+    /// Keys in a study session: 1 to 4 pick an option.
     | StudyKey of int
+    | StudyClipReady of voice: Guid * index: int * path: string
+    | StudyClipFailed of voice: Guid * index: int * message: string
+    | StudyClipEnded of voice: Guid * index: int
+    /// The chime, then the microphone opens.
+    | StudyListen of Hearing
+    | StudyEarOpened of Hearing
+    | StudyEarLevel of float
+    | StudyEarTranscribing of Hearing
+    | StudyHeard of Hearing * Result<string, string>
+    /// Opens or closes the conversation with the tutor.
+    | ToggleTutor
     | StudyAsk of question: string * quick: bool
     | StudyAskText of askId: Guid * text: string
     | StudyAnswered of askId: Guid * Result<Help.Reply, string>
@@ -438,14 +514,8 @@ type Msg =
     | SubmitRecap
     | RecapText of Study.Feedback
     | RecapDone of Result<Study.Feedback, string>
-    | SkipRecap
-    /// Listens to the paper from a point, with the session waiting behind the player.
-    | StudyListen of segment: int
-    | StudyBack
-    | StudyMic
-    | StudyMicStarted of Result<unit, string>
-    | StudyTranscribed of Result<string, string>
-    | StudyRetryLesson of idea: string
+    | SetStudy of bool
+    | SetAnswerAloud of bool
 
 let speeds = [| 0.8; 1.0; 1.15; 1.3; 1.5; 1.75; 2.0 |]
 let jumpMs = 15000
@@ -895,13 +965,13 @@ let private rematch (settings: Settings) (r: ReaderState) (plan: Study.Plan) (pr
                 with _ -> () // tried again next time
             })
 
-/// Starts writing the lessons of the idea on screen and the next ones, two at a time.
+/// Starts writing the lessons of the idea being taught and the next ones, two at a time.
 let private prefetch (settings: Settings) (r: ReaderState) (s: StudyState) (concepts: Map<string, Concept>) : StudyState * Cmd<Msg> =
     match s.Plan with
     | Some plan when Settings.hasKey settings ->
-        let current = match s.Screen with StudyScreen.Teach i -> [ i ] | _ -> []
+        let current = match s.Now with StudyNow.Teach i -> [ i ] | _ -> []
         let start =
-            current @ Study.upcoming plan s.Progress concepts 3
+            current @ Study.upcoming r.Script plan s.Progress concepts 3
             |> List.distinct
             |> List.filter (fun i -> not (s.Lessons.ContainsKey i || s.Writing.ContainsKey i || s.Failed.ContainsKey i))
             |> List.truncate (max 0 (2 - s.Writing.Count))
@@ -910,24 +980,141 @@ let private prefetch (settings: Settings) (r: ReaderState) (s: StudyState) (conc
         Cmd.batch [ for i in start -> writeLesson settings r plan s.Progress concepts i ]
     | _ -> s, Cmd.none
 
-/// What the tutor conversation is about on this screen.
-let private chatKey (screen: StudyScreen) =
-    match screen with
-    | StudyScreen.Teach i -> i
-    | StudyScreen.Quiz q -> q.Idea |> Option.orElse q.Concept |> Option.defaultValue ""
-    | _ -> ""
+// ----- the tutor's voice
 
-/// A new screen keeps the conversation if it is about the same idea.
-let private show (screen: StudyScreen) (s: StudyState) =
-    let key = chatKey screen
-    let s = { s with Screen = screen; Error = None }
-    if key = s.ChatAbout then s
-    else { s with ChatAbout = key; Chat = []; Followups = []; Pending = None; Input = "" }
+/// Making the clips of what the tutor is saying; cancelled when it says something else.
+let mutable private voiceCancel = new CancellationTokenSource()
 
+let private clipPath (settings: Settings) (paperId: string) (say: string) =
+    (paths ()).StudyAudio(paperId, Settings.voiceKey settings, say)
+
+/// Makes the clips not made yet, two at a time in order, and tells `voice` (if any) as each is ready.
+let private makeClips (settings: Settings) (paperId: string) (voice: Guid option) (said: Study.Said list) (ct: CancellationToken) : Cmd<Msg> =
+    match engineFor settings with
+    | None -> Cmd.none
+    | Some engine ->
+        background (fun dispatch ->
+            task {
+                use gate = new SemaphoreSlim(2)
+                let one (i: int) (x: Study.Said) : Task =
+                    task {
+                        let path = clipPath settings paperId x.Say
+                        if not (File.Exists path) then
+                            do! gate.WaitAsync(ct)
+                            try
+                                try
+                                    let! wav = engine.Synthesize(x.Say, ct)
+                                    Directory.CreateDirectory(Path.GetDirectoryName path) |> ignore
+                                    Wav.normalizeTo wav 250 path |> ignore
+                                    voice |> Option.iter (fun v -> dispatch (StudyClipReady(v, i, path)))
+                                with
+                                | :? OperationCanceledException -> ()
+                                | e -> voice |> Option.iter (fun v -> dispatch (StudyClipFailed(v, i, errorText (inner e))))
+                            finally
+                                gate.Release() |> ignore
+                    }
+                try do! Task.WhenAll(said |> List.mapi one)
+                with _ -> ()
+            })
+
+/// The screen stays on and the media notification shows the session while the tutor speaks.
+let private tutorPlayback (r: ReaderState) (s: StudyState) (on: bool) : Cmd<Msg> =
+    Cmd.ofEffect (fun _ ->
+        let p = platform ()
+        p.KeepScreenOn on
+        let detail =
+            match s.Now, s.Plan with
+            | StudyNow.Teach i, Some plan -> plan.Idea i |> Option.map (fun i -> "Tutor · " + i.Name) |> Option.defaultValue "Tutor"
+            | StudyNow.Quiz _, _ -> "Tutor · a question"
+            | StudyNow.Recap _, _ -> "Tutor · explain it back"
+            | _ -> "Tutor"
+        p.SetPlayback(r.Script.Title, detail, on))
+
+let private playClip (settings: Settings) (v: Voice) : Cmd<Msg> =
+    match v.Ready.TryFind v.At with
+    | Some path ->
+        let id, at = v.Id, v.At
+        Cmd.ofEffect (fun dispatch ->
+            (platform ()).Player.Play(path, 0, settings.Speed, (fun () -> dispatch (StudyClipEnded(id, at))), (fun _ -> dispatch (StudyClipEnded(id, at)))))
+    // waiting for it to be made
+    | None -> stopAudio
+
+// ----- listening to the learner
+
+/// The microphone's listening; cancelled when the session pauses or moves on.
+let mutable private earCancel = new CancellationTokenSource()
+
+let private stopEar () = earCancel.Cancel()
+
+/// The learner can answer aloud: the setting is on, and there is a microphone and a key (for transcribing).
+let private canHear (settings: Settings) =
+    settings.AnswerAloud && Settings.hasKey settings && (platform ()).Recorder.IsSome
+
+/// Listens: waits for speech, then for the pause that ends it, and sends what was said ("" if nothing was).
+let private hearing (settings: Settings) (purpose: Hearing) (ct: CancellationToken) (dispatch: Msg -> unit) : Task =
+    task {
+        match (platform ()).Recorder with
+        | None -> dispatch (StudyHeard(purpose, Error "Recording isn't available on this device."))
+        | Some recorder ->
+            // how long to wait for speech to start, the pause that ends it, and the longest it may take
+            let wait, pause, longest =
+                match purpose with
+                | Hearing.Answer -> 7.0, 1.0, 12.0
+                | Hearing.Explanation -> 15.0, 2.5, 150.0
+                | Hearing.Question -> 8.0, 1.6, 45.0
+            try
+                do! recorder.Start()
+                dispatch (StudyEarOpened purpose)
+                let clock = Diagnostics.Stopwatch.StartNew()
+                let mutable floor = 0.0
+                let mutable spoke = false
+                let mutable lastLoud = 0.0
+                let mutable finished = false
+                let mutable shown = 0.0
+                while not finished do
+                    do! Task.Delay(80, ct)
+                    let t = clock.Elapsed.TotalSeconds
+                    let level = recorder.Level
+                    if level < 0.0 then
+                        // loudness can't be measured: a fixed time
+                        if t > (match purpose with Hearing.Answer -> 5.0 | Hearing.Question -> 8.0 | Hearing.Explanation -> 60.0) then
+                            spoke <- true
+                            finished <- true
+                    else
+                        // the first moment tells how loud the surroundings are
+                        if t < 0.35 then floor <- max floor level
+                        elif level > Math.Clamp(floor * 3.0, 0.06, 0.3) then
+                            spoke <- true
+                            lastLoud <- t
+                        if spoke && t - lastLoud > pause then finished <- true
+                        elif not spoke && t > wait then finished <- true
+                        elif t > longest then finished <- true
+                        if t - shown > 0.15 then
+                            shown <- t
+                            dispatch (StudyEarLevel level)
+                if not spoke then
+                    recorder.Cancel()
+                    dispatch (StudyHeard(purpose, Ok ""))
+                else
+                    dispatch (StudyEarTranscribing purpose)
+                    let! audio, name = recorder.Stop()
+                    let! text = Mistral.transcribe settings.MistralApiKey audio name ct
+                    dispatch (StudyHeard(purpose, Ok(text.Trim())))
+            with
+            | :? OperationCanceledException -> recorder.Cancel()
+            | e ->
+                recorder.Cancel()
+                dispatch (StudyHeard(purpose, Error(errorText (inner e))))
+    }
+
+let private chimePath () = Path.Combine((platform ()).DataDir, "chime-v1.wav")
+
+// ----- the session
+
+/// A question with its options in a fresh order, so where the right one sits gives nothing away.
 let private newQuiz (idea: string option) (concept: string option) (purpose: QuizPurpose) (q: Question) =
-    // a fresh order each time, so where the right option sits gives nothing away
     let order = [ 0 .. q.Options.Length - 1 ] |> List.sortBy (fun _ -> Random.Shared.Next())
-    StudyScreen.Quiz { Idea = idea; Concept = concept; Purpose = purpose; Question = q; Order = order; Choice = None; Before = None }
+    { Idea = idea; Concept = concept; Purpose = purpose; Question = q; Order = order; Choice = None; Spoken = false; Before = None }
 
 /// A question on an idea: the lesson's first one not asked yet, else the learner's idea's one asked longest ago.
 let private questionFor (s: StudyState) (concepts: Map<string, Concept>) (idea: string option) (concept: string option) (exclude: Set<string>) =
@@ -943,40 +1130,174 @@ let private questionFor (s: StudyState) (concepts: Map<string, Concept>) (idea: 
 let private ideaOf (s: StudyState) (concept: string) =
     s.Progress.Links |> Map.tryFindKey (fun _ c -> c = concept)
 
-/// Goes to the next step: an idea learned minutes ago, the next idea (or a quick check of a known one), a recap, or
-/// the end; and starts writing the lessons coming up.
-let private advance (settings: Settings) (r: ReaderState) (s: StudyState) (concepts: Map<string, Concept>) : StudyState * Cmd<Msg> =
+/// What the conversation with the tutor is about now.
+let private chatKey (now: StudyNow) =
+    match now with
+    | StudyNow.Teach i -> i
+    | StudyNow.Quiz q -> q.Idea |> Option.orElse q.Concept |> Option.defaultValue ""
+    | _ -> ""
+
+/// Moves the session on; the conversation with the tutor stays while it is about the same idea.
+let private goTo (now: StudyNow) (s: StudyState) =
+    let key = chatKey now
+    let s = { s with Now = now; Error = None; Tries = 0; Heard = ""; Aside = None }
+    if key = "" || key = s.ChatAbout then s
+    else { s with ChatAbout = key; Chat = []; Followups = []; Pending = None; Input = "" }
+
+/// The tutor says something, then `next`. What it was saying, and the microphone, stop.
+let private say (settings: Settings) (r: ReaderState) (s: StudyState) (said: Study.Said list) (next: Then) : StudyState * Cmd<Msg> =
+    voiceCancel.Cancel()
+    voiceCancel <- CancellationTokenSource.CreateLinkedTokenSource s.Cancel.Token
+    stopEar ()
+    let id = Guid.NewGuid()
+    let ready =
+        said
+        |> List.indexed
+        |> List.choose (fun (i, x) -> let path = clipPath settings r.Paper.Id x.Say in if File.Exists path then Some(i, path) else None)
+        |> Map.ofList
+    let v = { Id = id; Said = said; At = 0; Ready = ready; Playing = s.Running; Then = next }
+    let s = { s with Voice = Some v; Ear = Ear.Off }
+    if said.IsEmpty then s, Cmd.ofMsg (StudyClipEnded(id, 0))
+    else
+        let make = if ready.Count = said.Length then Cmd.none else makeClips settings r.Paper.Id (Some id) said voiceCancel.Token
+        s, Cmd.batch [ make; (if s.Running then Cmd.batch [ playClip settings v; tutorPlayback r s true ] else stopAudio) ]
+
+/// Says a question (after `intro`), then listens for the answer.
+let private askQuiz (settings: Settings) (r: ReaderState) (s: StudyState) (intro: string) (q: Quiz) =
+    let s = goTo (StudyNow.Quiz q) s
+    say settings r s (Study.said intro @ Study.questionSaid q.Question q.Order) Then.Answer
+
+/// Teaches an idea: says its lesson, or waits for it to be written.
+let private teach (settings: Settings) (r: ReaderState) (s: StudyState) (idea: string) =
+    let s = goTo (StudyNow.Teach idea) s
+    match s.Plan |> Option.bind (fun p -> p.Idea idea), s.Lessons.TryFind idea with
+    | Some i, Some lesson -> say settings r s (Study.lessonSaid i lesson) Then.Question
+    | _ ->
+        voiceCancel.Cancel()
+        { s with Voice = None }, stopAudio
+
+/// The paper read aloud from `first` to `last`; then the tutor.
+let private listen (settings: Settings) (r: ReaderState) (s: StudyState) (first: int) (last: int) =
+    voiceCancel.Cancel()
+    stopEar ()
+    let s = goTo (StudyNow.Listening last) { s with Voice = None; Ear = Ear.Off }
+    let r = if r.Current < first || r.Current > last then { r with Current = first; Offset = 0; Finished = false; Held = None } else r
+    if s.Running then
+        let r, cmd = play r settings
+        r, s, cmd
+    else r, s, Cmd.batch [ stopAudio; moveSynth r.Current ]
+
+let private ideaName (s: StudyState) (concepts: Map<string, Concept>) (idea: string option) (concept: string option) =
+    idea
+    |> Option.bind (fun i -> s.Plan |> Option.bind (fun p -> p.Idea i))
+    |> Option.map (fun i -> i.Name)
+    |> Option.orElse (concept |> Option.bind concepts.TryFind |> Option.map (fun c -> c.Name))
+    |> Option.defaultValue "an idea"
+
+/// Goes to the next step: an idea learned minutes ago, the paper's next section, an idea to learn (or a quick check
+/// of a known one), a recap, or the end; and starts writing the lessons coming up.
+let rec private advance (settings: Settings) (r: ReaderState) (s: StudyState) (concepts: Map<string, Concept>) : ReaderState * StudyState * Cmd<Msg> =
     match s.Plan with
-    | None -> show StudyScreen.Overview s, Cmd.none
+    | None -> r, s, Cmd.none
     | Some plan ->
-        let step, progress = Study.next DateTime.UtcNow plan s.Progress concepts s.Last
+        let step, progress = Study.next DateTime.UtcNow r.Script plan s.Progress concepts s.Last
         let s = { s with Progress = progress; Feedback = None; RecapInput = ""; Grading = false }
-        let teach idea = show (StudyScreen.Teach idea) { s with Progress = { s.Progress with Teach = s.Progress.Teach.Add idea } }
-        let s =
+        let r, s, cmd =
             match step with
-            | Study.Step.Teach idea -> show (StudyScreen.Teach idea) s
+            | Study.Step.Listen (first, last) -> listen settings r s first last
+            | Study.Step.Teach idea ->
+                let s, cmd = teach settings r s idea
+                r, s, cmd
             | Study.Step.Check (idea, c) ->
                 match questionFor s concepts None (Some c) Set.empty with
-                | Some q -> show (newQuiz (Some idea) (Some c) QuizPurpose.QuickCheck q) s
-                | None -> teach idea
+                | Some q ->
+                    let intro = sprintf "You learned %s before. A quick question to see if you still know it." (ideaName s concepts (Some idea) (Some c))
+                    let s, cmd = askQuiz settings r s intro (newQuiz (Some idea) (Some c) QuizPurpose.QuickCheck q)
+                    r, s, cmd
+                | None ->
+                    let s, cmd = teach settings r { s with Progress = { s.Progress with Teach = s.Progress.Teach.Add idea } } idea
+                    r, s, cmd
             | Study.Step.Review c ->
                 let idea = ideaOf s c
                 match questionFor s concepts idea (Some c) Set.empty with
-                | Some q -> show (newQuiz idea (Some c) QuizPurpose.Again q) s
-                | None -> show StudyScreen.Overview s
-            | Study.Step.Recap part -> show (StudyScreen.Recap part) s
-            | Study.Step.Finished -> show StudyScreen.Finished s
+                | Some q ->
+                    let intro = sprintf "Back to %s, from a few minutes ago." (ideaName s concepts idea (Some c))
+                    let s, cmd = askQuiz settings r s intro (newQuiz idea (Some c) QuizPurpose.Again q)
+                    r, s, cmd
+                | None -> advance settings r { s with Last = Some c } concepts
+            | Study.Step.Recap part ->
+                let s = goTo (StudyNow.Recap part) s
+                let text = sprintf "Time to put part %d together, in your own words. %s" (part + 1) plan.Parts.[part].Recap
+                let text = if canHear settings then text + " Take your time; I'm listening." else text
+                let s, cmd = say settings r s (Study.said text) Then.Explain
+                r, s, cmd
+            | Study.Step.Finished ->
+                let s = goTo StudyNow.Finished s
+                let s, cmd = say settings r s (Study.said "That's the whole paper. What you learned comes back for review just before you'd forget it.") Then.Wait
+                r, s, cmd
         let s, write = prefetch settings r s concepts
-        s, Cmd.batch [ saveStudy r.Paper.Id s.Progress; write ]
+        r, s, Cmd.batch [ cmd; write; saveStudy r.Paper.Id s.Progress ]
 
-/// What the tutor has in front of it on this screen.
+/// Asks an idea's question after its lesson (or before it, when the lesson is skipped).
+and private checkIdea (settings: Settings) (r: ReaderState) (s: StudyState) (concepts: Map<string, Concept>) (idea: string) (purpose: QuizPurpose) =
+    let concept = s.Progress.Links.TryFind idea |> Option.filter concepts.ContainsKey
+    match questionFor s concepts (Some idea) concept Set.empty with
+    | Some q ->
+        let intro = if purpose = QuizPurpose.TestOut then "Let's see if you know it already." else ""
+        let s, cmd = askQuiz settings r s intro (newQuiz (Some idea) concept purpose q)
+        r, s, cmd
+    | None when purpose = QuizPurpose.TestOut -> r, { s with Error = Some "The lesson is still being written; its question comes with it." }, Cmd.none
+    | None ->
+        // a lesson without a question to check it: on to the next idea
+        advance settings r { s with Progress = { s.Progress with Done = s.Progress.Done.Add(idea, Study.Outcome.Learned) } } concepts
+
+/// What comes after the tutor has said everything.
+and private voiceDone (settings: Settings) (r: ReaderState) (s: StudyState) (concepts: Map<string, Concept>) (next: Then) =
+    let s = { s with Voice = s.Voice |> Option.map (fun v -> { v with Playing = false; At = v.Said.Length }) }
+    match next, s.Now with
+    | Then.Question, StudyNow.Teach idea -> checkIdea settings r s concepts idea QuizPurpose.Check
+    | Then.Answer, StudyNow.Quiz { Choice = None } when canHear settings -> r, s, Cmd.ofMsg (StudyListen Hearing.Answer)
+    | Then.Explain, StudyNow.Recap _ when canHear settings -> r, s, Cmd.ofMsg (StudyListen Hearing.Explanation)
+    | Then.Next, _ -> advance settings r s concepts
+    | _ -> r, s, tutorPlayback r s false
+
+/// Pauses the session: the tutor, the microphone and the paper.
+let private hold (r: ReaderState) (s: StudyState) : ReaderState * StudyState * Cmd<Msg> =
+    voiceCancel.Cancel()
+    stopEar ()
+    let r, cmd = if r.Playing then pause r else r, Cmd.none
+    let s = { s with Running = false; Ear = Ear.Off; Voice = s.Voice |> Option.map (fun v -> { v with Playing = false }) }
+    r, s, Cmd.batch [ cmd; stopAudio; tutorPlayback r s false ]
+
+/// Goes on from where the session was paused.
+let private resume (settings: Settings) (r: ReaderState) (s: StudyState) (concepts: Map<string, Concept>) : ReaderState * StudyState * Cmd<Msg> =
+    let s = { s with Running = true; Error = None }
+    match s.Now, s.Voice with
+    | (StudyNow.Listening _ | StudyNow.Starting), _ ->
+        let r, cmd = play { r with Zoom = None } settings
+        r, s, cmd
+    | _, Some v when v.At < v.Said.Length ->
+        // the rest of what it was saying, made again if it was stopped half made
+        let v = { v with Playing = true }
+        voiceCancel.Cancel()
+        voiceCancel <- CancellationTokenSource.CreateLinkedTokenSource s.Cancel.Token
+        let make = if v.Ready.Count = v.Said.Length then Cmd.none else makeClips settings r.Paper.Id (Some v.Id) v.Said voiceCancel.Token
+        r, { s with Voice = Some v }, Cmd.batch [ make; playClip settings v; tutorPlayback r s true ]
+    | _, Some v -> voiceDone settings r s concepts v.Then
+    | StudyNow.Quiz ({ Choice = None } as q), None ->
+        let s, cmd = askQuiz settings r s "" q
+        r, s, cmd
+    | (StudyNow.Teach _ | StudyNow.Finished), None -> r, s, Cmd.none
+    | _ -> advance settings r s concepts
+
+/// What the tutor has in front of it now.
 let private momentOf (s: StudyState) (concepts: Map<string, Concept>) : Study.Moment option =
     let ofIdea (idea: Study.Idea) answered : Study.Moment =
         { Name = idea.Name; Goal = idea.Goal; Background = idea.Background; Section = idea.Section; Lesson = s.Lessons.TryFind idea.Id; Answered = answered }
-    match s.Screen, s.Plan with
-    | StudyScreen.Teach id, Some plan -> plan.Idea id |> Option.map (fun i -> ofIdea i None)
-    | StudyScreen.Quiz q, Some plan ->
-        // the options as they were on screen (shuffled), so the tutor's letters are the learner's
+    match s.Now, s.Plan with
+    | StudyNow.Teach id, Some plan -> plan.Idea id |> Option.map (fun i -> ofIdea i None)
+    | StudyNow.Quiz q, Some plan ->
+        // the options as they were shown and said (shuffled), so the tutor's letters are the learner's
         let answered =
             q.Choice
             |> Option.map (fun c ->
@@ -1200,7 +1521,8 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
               Help = None
               Cards = None
               Study = None }
-        let studying = model.StudyOnOpen = Some paper.Id
+        // papers open in Study (with a key), unless the learner turned it off
+        let studying = Settings.hasKey model.Settings && (model.StudyOnOpen = Some paper.Id || model.Settings.Study)
         let r, playCmd = if studying then r, Cmd.none else play r model.Settings
         { model with Screen = Screen.Reader r; StudyOnOpen = None },
         Cmd.batch [ startSynth r model.Settings; playCmd; (if studying then Cmd.ofMsg OpenStudy else Cmd.none) ]
@@ -1208,12 +1530,27 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         match model.Screen with
         | Screen.Reader r ->
             r.Study |> Option.iter (fun s -> s.Cancel.Cancel())
+            voiceCancel.Cancel()
+            stopEar ()
             let _, cmd = pause r
             { model with Screen = Screen.Library; Papers = loadLibrary () |> List.map (fun p -> if p.Id = r.Paper.Id then { p with LastSegment = r.Current } else p) },
             Cmd.batch [ cmd; Cmd.ofEffect (fun _ -> stopSynth (); (platform ()).EndPlayback()) ]
         | _ -> model, Cmd.none
     | TogglePlay when (match model.Screen with Screen.Reader r -> r.Help.IsSome | _ -> false) -> update (CloseHelp true) model
     | TogglePlay when (match model.Screen with Screen.Reader r -> r.Cards.IsSome | _ -> false) -> update (CloseCards true) model
+    | TogglePlay when (match model with Studying _ -> true | _ -> false) ->
+        match model with
+        | Studying (r, s) ->
+            match s.Now with
+            | StudyNow.Listening _
+            | StudyNow.Starting ->
+                // the paper being read: its play and pause, which the session follows
+                let r, cmd = if r.Playing then pause r else play { r with Zoom = None } model.Settings
+                setStudy model r { s with Running = r.Playing }, cmd
+            | _ ->
+                let r, s, cmd = if s.Running && (s.Voice |> Option.exists (fun v -> v.Playing) || s.Ear <> Ear.Off) then hold r s else resume model.Settings r s model.Concepts
+                setStudy model r s, cmd
+        | _ -> model, Cmd.none
     | TogglePlay ->
         withReader model (fun r ->
             if r.Playing then pause r
@@ -1221,12 +1558,22 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                 // carrying on from the full-screen view goes back to the player
                 let r = { r with Zoom = None }
                 if r.Finished then play { r with Current = 0; Offset = 0 } model.Settings else play r model.Settings)
+    | Remote wanted when (match model with Studying _ -> true | _ -> false) ->
+        match model with
+        | Studying (r, s) ->
+            let busy = r.Playing || s.Voice |> Option.exists (fun v -> v.Playing) || s.Ear <> Ear.Off
+            if wanted <> busy then update TogglePlay model else model, Cmd.none
+        | _ -> model, Cmd.none
     | Remote wanted ->
         withReader model (fun r ->
             if wanted && not r.Playing then
                 if r.Finished then play { r with Current = 0; Offset = 0 } model.Settings else play r model.Settings
             elif not wanted && r.Playing then pause r
             else r, Cmd.none)
+    | Back15 when (match model with Studying (_, s) -> (match s.Now with StudyNow.Listening _ | StudyNow.Starting -> false | _ -> true) | _ -> false) ->
+        update StudyAgain model
+    | Forward15 when (match model with Studying (_, s) -> (match s.Now with StudyNow.Listening _ | StudyNow.Starting -> false | _ -> true) | _ -> false) ->
+        update StudySkip model
     | Back15 ->
         withReader model (fun r ->
             let pos = currentPosition r
@@ -1242,9 +1589,25 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             r.Help |> Option.iter (fun h -> h.Cancel.Cancel())
             // hearing an equation again from its full-screen view keeps it full screen
             let zoom = if r.Zoom.IsSome && i >= 0 && i < r.Script.Segments.Length && r.Zoom = r.Script.Segments.[i].Show then r.Zoom else None
-            let r = { r with ShowOutline = false; ShowEquations = false; Zoom = zoom; Help = None; Cards = None; Study = r.Study |> Option.map (fun s -> { s with Hidden = true }) }
+            let r = { r with ShowOutline = false; ShowEquations = false; Zoom = zoom; Help = None; Cards = None }
+            // studying: the tutor waits, and comes in at the end of the stretch now being heard
+            let r, stopTutor =
+                match r.Study with
+                | Some s ->
+                    let _, s, cmd = hold { r with Playing = false } s
+                    let now =
+                        match s.Plan with
+                        | Some plan ->
+                            Study.stops r.Script plan
+                            |> List.tryFind (fun st -> i >= st.First && i <= st.Last)
+                            |> Option.map (fun st -> StudyNow.Listening st.Last)
+                            |> Option.defaultValue s.Now
+                        | None -> StudyNow.Starting
+                    { r with Study = Some(goTo now { s with Running = true; ShowPlan = false; ShowTutor = false; Voice = None }) }, cmd
+                | None -> r, Cmd.none
             let r, cmd = seek r model.Settings { Segment = i; OffsetMs = 0 }
-            if r.Playing then r, cmd else play r model.Settings)
+            let r, cmd = if r.Playing then r, cmd else play r model.Settings
+            r, Cmd.batch [ stopTutor; cmd ])
     | CycleSpeed ->
         let i = speeds |> Array.tryFindIndex (fun s -> abs (s - model.Settings.Speed) < 0.01) |> Option.defaultValue 1
         let speed = speeds.[(i + 1) % speeds.Length]
@@ -1253,7 +1616,39 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         Cmd.batch [ saveSettings settings; Cmd.ofEffect (fun _ -> (platform ()).Player.SetSpeed speed) ]
     | Tick position ->
         withReader model (fun r -> (if r.Playing && not r.Waiting then { r with Offset = position } else r), Cmd.none)
+    | ClipEnded gen when
+        (match model with
+         | Studying (r, { Now = StudyNow.Listening last }) -> gen = r.Generation && r.Playing && r.Current >= last
+         | _ -> false)
+        ->
+        match model with
+        | Studying (r, s) ->
+            // the stretch has been heard: the tutor's turn
+            let heard = r.Current + 1
+            let r =
+                { r with
+                    Current = min heard (r.Script.Segments.Length - 1)
+                    Offset = 0
+                    Playing = false
+                    Waiting = false
+                    Held = None
+                    Generation = r.Generation + 1 }
+            let s = { s with Progress = { s.Progress with Heard = max s.Progress.Heard heard } }
+            let r, s, cmd = advance model.Settings r s model.Concepts
+            setStudy model r s, Cmd.batch [ playbackState r false; saveProgress r; moveSynth r.Current; cmd ]
+        | _ -> model, Cmd.none
     | ClipEnded gen ->
+        let model, keep =
+            // studying: what has been heard so far, for going on from there
+            match model with
+            | Studying (r, s) when gen = r.Generation && r.Playing ->
+                match s.Now with
+                | StudyNow.Listening _
+                | StudyNow.Starting when r.Current + 1 > s.Progress.Heard ->
+                    let progress = { s.Progress with Heard = r.Current + 1 }
+                    setStudy model r { s with Progress = progress }, saveStudy r.Paper.Id progress
+                | _ -> model, Cmd.none
+            | _ -> model, Cmd.none
         withReader model (fun r ->
             if gen <> r.Generation || not r.Playing then r, Cmd.none
             elif stopsHere model.Settings r && r.Current + 1 < r.Script.Segments.Length then
@@ -1274,6 +1669,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             else
                 { r with Playing = false; Waiting = false; Finished = true; Offset = 0 },
                 Cmd.batch [ playbackState r false; saveProgress { r with Current = 0 } ])
+        |> fun (m, cmd) -> m, Cmd.batch [ cmd; keep ]
     | ClipReady (paperId, key, i, d) ->
         withReader model (fun r ->
             if r.Paper.Id <> paperId || r.VoiceKey <> key then r, Cmd.none
@@ -1296,6 +1692,12 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
     | ZoomVisual v -> withReader model (fun r -> { r with Zoom = Some v }, Cmd.none)
 
     // ----- Ask
+    | OpenHelp _ when
+        (match model with
+         | Studying (_, s) -> (match s.Now with StudyNow.Listening _ | StudyNow.Starting -> false | _ -> true)
+         | _ -> false)
+        ->
+        update ToggleTutor model
     | OpenHelp about ->
         withReader model (fun r ->
             let wasPlaying = r.Playing
@@ -1630,6 +2032,14 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         { model with Screen = Screen.Learn; Notice = None; ConfirmDelete = None; Decks = loadDecks model.Papers; Studied = studied model.Papers }, Cmd.none
     | CloseLearn -> { model with Screen = Screen.Library; MakeError = None }, Cmd.none
     | ToggleDeck id -> { model with LearnOpen = (if model.LearnOpen = Some id then None else Some id) }, Cmd.none
+    | OpenCards about when (match model with Studying (_, s) -> s.Running | _ -> false) ->
+        // the tutor waits while cards are made
+        match model with
+        | Studying (r, s) ->
+            let r, s, cmd = hold r s
+            let m, open' = update (OpenCards about) (setStudy model r s)
+            m, Cmd.batch [ cmd; open' ]
+        | _ -> model, Cmd.none
     | OpenCards about ->
         withReader model (fun r ->
             let wasPlaying = r.Playing
@@ -1797,60 +2207,72 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
     // ----- Study
     | OpenStudy ->
         match model.Screen with
+        | Screen.Reader r when r.Study.IsSome -> model, Cmd.none
+        | Screen.Reader _ when not (Settings.hasKey model.Settings) ->
+            { model with Notice = Some "Studying needs a Mistral API key (Settings): the tutor is a model that reads the whole paper." }, Cmd.none
         | Screen.Reader r ->
             let r, pauseCmd = if r.Playing then pause r else r, Cmd.none
-            let r = { r with Cards = None; ShowOutline = false; ShowEquations = false; Zoom = None }
-            match r.Study with
-            | Some s -> setStudy model r { s with Hidden = false }, pauseCmd
+            let r = { r with Cards = None; Help = None; ShowOutline = false; ShowEquations = false; Zoom = None }
+            let p = paths ()
+            let id = r.Paper.Id
+            let plan = Study.loadPlan p id r.Script
+            let progress = Study.loadProgress p id |> Option.defaultValue (Study.Progress.empty DateTime.UtcNow)
+            // the plan's confirmed known ideas, for those not linked yet (and still known)
+            let progress =
+                match plan with
+                | Some plan ->
+                    let links =
+                        plan.Ideas
+                        |> List.fold
+                            (fun (links: Map<string, string>) i ->
+                                match i.Same with
+                                | Some c when not (links.ContainsKey i.Id) && model.Concepts.ContainsKey c -> links.Add(i.Id, c)
+                                | _ -> links)
+                            progress.Links
+                    { progress with Links = links }
+                | None -> progress
+            let lessons =
+                match plan with
+                | Some plan -> plan.Ideas |> List.choose (fun i -> Study.loadLesson p id r.Script i.Id |> Option.map (fun l -> i.Id, l)) |> Map.ofList
+                | None -> Map.empty
+            let s =
+                { Plan = plan
+                  Planning = None
+                  Progress = progress
+                  Lessons = lessons
+                  Writing = Map.empty
+                  Failed = Map.empty
+                  Now = StudyNow.Starting
+                  Running = true
+                  Voice = None
+                  Aside = None
+                  Ear = Ear.Off
+                  Tries = 0
+                  Heard = ""
+                  ChatAbout = ""
+                  Chat = []
+                  Followups = []
+                  Pending = None
+                  Input = ""
+                  ShowTutor = false
+                  ShowPlan = false
+                  RecapInput = ""
+                  Feedback = None
+                  Grading = false
+                  Error = None
+                  Last = None
+                  Cancel = new CancellationTokenSource() }
+            match plan with
+            | Some plan ->
+                let r, s, cmd = advance model.Settings r s model.Concepts
+                setStudy { model with MakeError = None } r s, Cmd.batch [ pauseCmd; cmd; rematch model.Settings r plan progress model.Concepts ]
             | None ->
-                let p = paths ()
-                let id = r.Paper.Id
-                let plan = Study.loadPlan p id r.Script
-                let progress = Study.loadProgress p id |> Option.defaultValue (Study.Progress.empty DateTime.UtcNow)
-                // the plan's confirmed known ideas, for those not linked yet (and still known)
-                let progress =
-                    match plan with
-                    | Some plan ->
-                        let links =
-                            plan.Ideas
-                            |> List.fold
-                                (fun (links: Map<string, string>) i ->
-                                    match i.Same with
-                                    | Some c when not (links.ContainsKey i.Id) && model.Concepts.ContainsKey c -> links.Add(i.Id, c)
-                                    | _ -> links)
-                                progress.Links
-                        { progress with Links = links }
-                    | None -> progress
-                let lessons =
-                    match plan with
-                    | Some plan -> plan.Ideas |> List.choose (fun i -> Study.loadLesson p id r.Script i.Id |> Option.map (fun l -> i.Id, l)) |> Map.ofList
-                    | None -> Map.empty
-                let s =
-                    { Plan = plan
-                      Planning = None
-                      Progress = progress
-                      Lessons = lessons
-                      Writing = Map.empty
-                      Failed = Map.empty
-                      Screen = StudyScreen.Overview
-                      ChatAbout = ""
-                      Chat = []
-                      Followups = []
-                      Pending = None
-                      Input = ""
-                      RecapInput = ""
-                      Feedback = None
-                      Grading = false
-                      Mic = Mic.Idle
-                      Error = None
-                      Hidden = false
-                      Last = None
-                      Cancel = new CancellationTokenSource() }
-                let matching =
-                    match plan with
-                    | Some plan -> rematch model.Settings r plan progress model.Concepts
-                    | None -> Cmd.none
-                setStudy { model with MakeError = None } r s, Cmd.batch [ pauseCmd; matching ]
+                // the paper is read aloud from the start while the tutor reads it and plans
+                let concepts = model.Concepts |> Map.toList |> List.map snd
+                let r = { r with Current = min progress.Heard (r.Script.Segments.Length - 1); Offset = 0; Finished = false; Held = None }
+                let r, playCmd = play r model.Settings
+                let s = { s with Planning = Some("Getting ready", []) }
+                setStudy { model with MakeError = None } r s, Cmd.batch [ pauseCmd; playCmd; writePlan model.Settings r concepts s.Cancel.Token ]
         | _ -> model, Cmd.none
     | StudyPaper paper ->
         match model.Screen with
@@ -1860,27 +2282,15 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             let model, openCmd = update (OpenPaper paper) { model with StudyOnOpen = Some paper.Id }
             model, Cmd.batch [ close; openCmd ]
     | CloseStudy ->
-        withReader model (fun r ->
-            r.Study |> Option.iter (fun s -> s.Cancel.Cancel())
-            (platform ()).Recorder |> Option.iter (fun rec' -> if r.Study |> Option.exists (fun s -> s.Mic = Mic.Recording) then rec'.Cancel())
-            { r with Study = None }, Cmd.none)
-        |> fun (m, cmd) ->
-            match m.Screen with
-            | Screen.Reader r -> { m with Studied = Map.fold (fun acc k v -> Map.add k v acc) m.Studied (studied [ r.Paper ]) }, cmd
-            | _ -> m, cmd
-    | StudyStart ->
         match model with
         | Studying (r, s) ->
-            match s.Plan with
-            | Some _ ->
-                let s, cmd = advance model.Settings r s model.Concepts
-                setStudy model r s, cmd
-            | None when s.Planning.IsSome -> model, Cmd.none
-            | None when not (Settings.hasKey model.Settings) ->
-                setStudy model r { s with Error = Some "Studying needs a Mistral API key (Settings): the tutor is a model that reads the whole paper." }, Cmd.none
-            | None ->
-                let concepts = model.Concepts |> Map.toList |> List.map snd
-                setStudy model r { s with Planning = Some("Getting ready", []); Error = None }, writePlan model.Settings r concepts s.Cancel.Token
+            let listening = match s.Now with StudyNow.Listening _ | StudyNow.Starting -> r.Playing | _ -> false
+            s.Cancel.Cancel()
+            let r, _, cmd = hold r s
+            // the paper goes on being read aloud if it was
+            let r, playCmd = if listening then play r model.Settings else r, Cmd.none
+            let m = { model with Screen = Screen.Reader { r with Study = None } }
+            { m with Studied = Map.fold (fun acc k v -> Map.add k v acc) m.Studied (studied [ r.Paper ]) }, Cmd.batch [ cmd; playCmd ]
         | _ -> model, Cmd.none
     | StudyStep (id, step) ->
         match model with
@@ -1903,12 +2313,32 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                     plan.Ideas
                     |> List.choose (fun i -> i.Same |> Option.filter model.Concepts.ContainsKey |> Option.map (fun c -> i.Id, c))
                     |> Map.ofList
-                let progress = { Study.Progress.empty DateTime.UtcNow with Links = links }
-                let s = { s with Plan = Some plan; Planning = None; Progress = progress; Lessons = Map.empty; Screen = StudyScreen.Overview }
-                // the first lessons are written while the plan is read
-                let s, write = prefetch model.Settings r s model.Concepts
-                setStudy model r s, Cmd.batch [ saveStudy id progress; write ]
+                let progress = { Study.Progress.empty DateTime.UtcNow with Links = links; Heard = s.Progress.Heard }
+                let s = { s with Plan = Some plan; Planning = None; Progress = progress; Lessons = Map.empty }
+                match s.Now with
+                | StudyNow.Starting when r.Playing || not s.Running ->
+                    // the tutor comes in at the end of the stretch being read
+                    let last =
+                        Study.stops r.Script plan
+                        |> List.tryFind (fun st -> r.Current >= st.First && r.Current <= st.Last)
+                        |> Option.map (fun st -> st.Last)
+                        |> Option.defaultValue (r.Script.Segments.Length - 1)
+                    let s, write = prefetch model.Settings r (goTo (StudyNow.Listening last) s) model.Concepts
+                    setStudy model r s, Cmd.batch [ saveStudy id progress; write ]
+                | StudyNow.Starting ->
+                    // the paper was read to the end meanwhile
+                    let r, s, cmd = advance model.Settings r s model.Concepts
+                    setStudy model r s, cmd
+                | _ ->
+                    let s, write = prefetch model.Settings r s model.Concepts
+                    setStudy model r s, Cmd.batch [ saveStudy id progress; write ]
             | Error e -> setStudy model r { s with Planning = None; Error = (if e = "Cancelled." then None else Some e) }, Cmd.none
+        | _ -> model, Cmd.none
+    | RetryPlan ->
+        match model with
+        | Studying (r, ({ Plan = None; Planning = None } as s)) ->
+            let concepts = model.Concepts |> Map.toList |> List.map snd
+            setStudy model r { s with Planning = Some("Getting ready", []); Error = None }, writePlan model.Settings r concepts s.Cancel.Token
         | _ -> model, Cmd.none
     | StudyLessonText (id, idea, text) ->
         match model with
@@ -1920,9 +2350,18 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             let s = { s with Writing = s.Writing.Remove idea }
             match result with
             | Ok text ->
-                let s = { s with Lessons = s.Lessons.Add(idea, Study.parseLesson r.Script id idea text) }
+                let lesson = Study.parseLesson r.Script id idea text
+                let s = { s with Lessons = s.Lessons.Add(idea, lesson) }
                 let s, write = prefetch model.Settings r s model.Concepts
-                setStudy model r s, write
+                match s.Now, s.Voice, s.Plan |> Option.bind (fun p -> p.Idea idea) with
+                | StudyNow.Teach i, None, Some it when i = idea ->
+                    // the lesson the learner is waiting for
+                    let s, cmd = say model.Settings r s (Study.lessonSaid it lesson) Then.Question
+                    setStudy model r s, Cmd.batch [ write; cmd ]
+                | _, _, Some it ->
+                    // its first words are made ahead, so the tutor starts at once
+                    setStudy model r s, Cmd.batch [ write; makeClips model.Settings id None (Study.lessonSaid it lesson |> List.truncate 2) s.Cancel.Token ]
+                | _ -> setStudy model r s, write
             | Error e -> setStudy model r { s with Failed = s.Failed.Add(idea, e) }, Cmd.none
         | _ -> model, Cmd.none
     | StudyRetryLesson idea ->
@@ -1940,9 +2379,9 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                     Matched = DateTime.UtcNow }
             setStudy model r { s with Progress = progress }, saveStudy id progress
         | _ -> model, Cmd.none
-    | StudyShowOverview ->
+    | ToggleStudyPlan ->
         match model with
-        | Studying (r, s) -> setStudy model r (show StudyScreen.Overview s), Cmd.none
+        | Studying (r, s) -> setStudy model r { s with ShowPlan = not s.ShowPlan; ShowTutor = false }, Cmd.none
         | _ -> model, Cmd.none
     | StudyTeach idea ->
         match model with
@@ -1955,26 +2394,24 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                 | Some Study.Outcome.Refreshed -> { p with Done = p.Done.Remove idea; Teach = p.Teach.Add idea }
                 | None when p.Links.ContainsKey idea -> { p with Teach = p.Teach.Add idea }
                 | _ -> p
-            let s, write = prefetch model.Settings r (show (StudyScreen.Teach idea) { s with Progress = p }) model.Concepts
-            setStudy model r s, Cmd.batch [ saveStudy r.Paper.Id p; write ]
+            let r, pauseCmd = if r.Playing then pause r else r, Cmd.none
+            let s = { s with Progress = p; ShowPlan = false; Running = true }
+            let s, cmd = teach model.Settings r s idea
+            let s, write = prefetch model.Settings r s model.Concepts
+            setStudy model r s, Cmd.batch [ pauseCmd; cmd; write; saveStudy r.Paper.Id p ]
         | _ -> model, Cmd.none
-    | StudyCheck
     | StudyTestOut ->
         match model with
-        | Studying (r, ({ Screen = StudyScreen.Teach idea } as s)) when s.Lessons.ContainsKey idea ->
-            let concept = s.Progress.Links.TryFind idea |> Option.filter model.Concepts.ContainsKey
-            let purpose = if msg = StudyTestOut then QuizPurpose.TestOut else QuizPurpose.Check
-            match questionFor s model.Concepts (Some idea) concept Set.empty with
-            | Some q -> setStudy model r (show (newQuiz (Some idea) concept purpose q) s), Cmd.none
-            | None ->
-                // a lesson without a question to check it: on to the next idea
-                let s = { s with Progress = { s.Progress with Done = s.Progress.Done.Add(idea, Study.Outcome.Learned) } }
-                let s, cmd = advance model.Settings r s model.Concepts
-                setStudy model r s, cmd
+        | Studying (r, ({ Now = StudyNow.Teach idea } as s)) ->
+            let r, s, cmd = checkIdea model.Settings r { s with Running = true } model.Concepts idea QuizPurpose.TestOut
+            setStudy model r s, cmd
         | _ -> model, Cmd.none
-    | StudyChoose choice ->
+    | StudyChoose choice
+    | StudySaid choice ->
         match model with
-        | Studying (r, ({ Screen = StudyScreen.Quiz ({ Choice = None } as q); Plan = Some plan } as s)) ->
+        | Studying (r, ({ Now = StudyNow.Quiz ({ Choice = None } as q); Plan = Some plan } as s)) ->
+            let spoken = match msg with StudySaid _ -> true | _ -> false
+            stopEar ()
             let now = DateTime.UtcNow
             let idea = q.Idea |> Option.bind plan.Idea
             let before = q.Concept |> Option.orElse (idea |> Option.bind (fun i -> s.Progress.Links.TryFind i.Id)) |> Option.bind model.Concepts.TryFind
@@ -1994,12 +2431,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             match concept with
             | None -> model, Cmd.none
             | Some concept ->
-                let concept =
-                    match q.Purpose with
-                    // right after the explanation, a right answer shows it landed, not that it will last: the
-                    // memory stays as the wrong answer left it, and the idea comes back minutes later for that
-                    | QuizPurpose.Retry -> Knowledge.asked now q.Question.Id concept
-                    | _ -> Knowledge.answer model.Settings.Retention now (Knowledge.rating q.Question choice) q.Question.Id concept
+                let concept = Knowledge.answer model.Settings.Retention now (Knowledge.rating q.Question choice) q.Question.Id concept
                 let right = choice = Some q.Question.Correct
                 let p = s.Progress
                 let p = match idea with Some i -> { p with Links = p.Links.Add(i.Id, concept.Id) } | None -> p
@@ -2007,25 +2439,48 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                     match q.Purpose, idea with
                     | QuizPurpose.Check, Some i -> { p with Done = p.Done.Add(i.Id, Study.Outcome.Learned); Teach = p.Teach.Remove i.Id }
                     | QuizPurpose.TestOut, Some i when right -> { p with Done = p.Done.Add(i.Id, Study.Outcome.TestedOut); Teach = p.Teach.Remove i.Id }
+                    // not known after all: the lesson
+                    | QuizPurpose.TestOut, Some i -> { p with Teach = p.Teach.Add i.Id }
                     | QuizPurpose.QuickCheck, Some i when right -> { p with Done = p.Done.Add(i.Id, Study.Outcome.Refreshed) }
                     // forgotten: taught again, here
                     | QuizPurpose.QuickCheck, Some i -> { p with Teach = p.Teach.Add i.Id }
                     | _ -> p
-                let q = { q with Choice = Some choice; Concept = Some concept.Id; Before = Some(before, s.Progress) }
+                let q = { q with Choice = Some choice; Spoken = spoken; Concept = Some concept.Id; Before = Some(before, s.Progress) }
                 let concepts = model.Concepts.Add(concept.Id, concept)
-                let s = { s with Screen = StudyScreen.Quiz q; Progress = p; Last = Some concept.Id }
-                { setStudy model r s with Concepts = concepts }, Cmd.batch [ saveConcepts concepts; saveStudy r.Paper.Id p ]
+                let s = { s with Now = StudyNow.Quiz q; Progress = p; Last = Some concept.Id; Ear = Ear.Off; Running = true }
+                let outro =
+                    match q.Purpose, right with
+                    | QuizPurpose.TestOut, true -> "You knew it, so the lesson is skipped."
+                    | QuizPurpose.TestOut, false -> "Let's go through it."
+                    | QuizPurpose.QuickCheck, true -> "You still know it, so it's skipped here."
+                    | QuizPurpose.QuickCheck, false -> "It has faded, so let's go through it again."
+                    | _ -> ""
+                // what was heard, so a misheard answer is noticed
+                let heardBack =
+                    match spoken, choice with
+                    | true, Some c -> Study.said (sprintf "You said option %d." ((q.Order |> List.tryFindIndex ((=) c) |> Option.defaultValue c) + 1))
+                    | true, None -> Study.said "You said you don't know."
+                    | false, _ -> []
+                let s, cmd = say model.Settings r s (heardBack @ Study.feedbackSaid q.Question q.Order choice @ Study.said outro) Then.Next
+                { setStudy model r s with Concepts = concepts }, Cmd.batch [ cmd; saveConcepts concepts; saveStudy r.Paper.Id p ]
         | _ -> model, Cmd.none
-    | StudyRetry ->
+    | StudyMisheard ->
         match model with
-        | Studying (r, ({ Screen = StudyScreen.Quiz ({ Choice = Some _ } as q) } as s)) ->
-            match questionFor s model.Concepts q.Idea q.Concept (Set.singleton q.Question.Id) with
-            | Some next -> setStudy model r (show (newQuiz q.Idea q.Concept QuizPurpose.Retry next) s), Cmd.none
-            | None -> setStudy model r { s with Error = Some "There's no other question on this idea yet." }, Cmd.none
+        | Studying (r, ({ Now = StudyNow.Quiz ({ Choice = Some _; Before = Some (before, progress) } as q) } as s)) ->
+            // as if the answer never happened
+            let concepts =
+                match before, q.Concept with
+                | Some c, _ -> model.Concepts.Add(c.Id, c)
+                | None, Some c -> model.Concepts.Remove c
+                | None, None -> model.Concepts
+            let q = { q with Choice = None; Spoken = false; Before = None; Concept = before |> Option.map (fun c -> c.Id) }
+            let s = goTo (StudyNow.Quiz q) { s with Progress = progress; Last = None; Running = true }
+            let s, cmd = say model.Settings r s (Study.said "Sorry. Which option was it?") Then.Answer
+            { setStudy model r s with Concepts = concepts }, Cmd.batch [ cmd; saveConcepts concepts; saveStudy r.Paper.Id progress ]
         | _ -> model, Cmd.none
     | StudyReport ->
         match model with
-        | Studying (r, ({ Screen = StudyScreen.Quiz ({ Choice = Some _; Before = Some (before, progress) } as q) } as s)) ->
+        | Studying (r, ({ Now = StudyNow.Quiz ({ Choice = Some _; Before = Some (before, progress) } as q) } as s)) ->
             // the answer never happened, and the question is gone for good
             let concepts =
                 match before, q.Concept with
@@ -2034,48 +2489,140 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                 | None, None -> model.Concepts
             let progress = { progress with Reported = progress.Reported.Add q.Question.Id }
             let concept = before |> Option.map (fun c -> c.Id)
-            let s = { s with Progress = progress; Last = None }
-            let s =
+            let s = { s with Progress = progress; Last = None; Running = true }
+            let r, s, cmd =
                 match questionFor s concepts q.Idea concept Set.empty with
-                | Some next -> show (newQuiz q.Idea concept q.Purpose next) s
-                | None ->
-                    match q.Idea with
-                    | Some idea -> show (StudyScreen.Teach idea) s
-                    | None -> show StudyScreen.Overview s
-            { setStudy model r s with Concepts = concepts }, Cmd.batch [ saveConcepts concepts; saveStudy r.Paper.Id progress ]
+                | Some next ->
+                    let s, cmd = askQuiz model.Settings r s "Sorry about that. Another question." (newQuiz q.Idea concept q.Purpose next)
+                    r, s, cmd
+                | None -> advance model.Settings r s concepts
+            { setStudy model r s with Concepts = concepts }, Cmd.batch [ cmd; saveConcepts concepts; saveStudy r.Paper.Id progress ]
         | _ -> model, Cmd.none
-    | StudyRead ->
+    | StudyAgain ->
         match model with
-        | Studying (r, ({ Screen = StudyScreen.Quiz { Idea = Some idea } } as s)) -> setStudy model r (show (StudyScreen.Teach idea) s), Cmd.none
+        | Studying (_, { Now = StudyNow.Listening _ | StudyNow.Starting }) -> update Back15 model
+        | Studying (r, ({ Voice = Some v } as s)) ->
+            // back a sentence, or to the start of this one when it has been going a while
+            let position = if v.Playing then (platform ()).Player.PositionMs else 0
+            let at = if v.At >= v.Said.Length then 0 elif position > 2500 then v.At else max 0 (v.At - 1)
+            stopEar ()
+            let v = { v with At = at; Playing = true }
+            let s = { s with Voice = Some v; Ear = Ear.Off; Running = true; Tries = 0 }
+            voiceCancel.Cancel()
+            voiceCancel <- CancellationTokenSource.CreateLinkedTokenSource s.Cancel.Token
+            let make = if v.Ready.Count = v.Said.Length then Cmd.none else makeClips model.Settings r.Paper.Id (Some v.Id) v.Said voiceCancel.Token
+            setStudy model r s, Cmd.batch [ make; playClip model.Settings v; tutorPlayback r s true ]
         | _ -> model, Cmd.none
-    | StudyContinue ->
+    | StudySkip ->
         match model with
-        | Studying (r, s) ->
-            match s.Screen with
-            | StudyScreen.Quiz { Choice = None } -> model, Cmd.none
-            | StudyScreen.Quiz ({ Purpose = QuizPurpose.TestOut; Idea = Some idea; Choice = Some c } as q) when c <> Some q.Question.Correct ->
-                // not known after all: the lesson
-                setStudy model r (show (StudyScreen.Teach idea) s), Cmd.none
-            | StudyScreen.Recap part when s.Feedback.IsSome && not s.Grading ->
-                let s = { s with Progress = { s.Progress with Recaps = s.Progress.Recaps.Add part } }
-                let s, cmd = advance model.Settings r s model.Concepts
-                setStudy model r s, cmd
-            | StudyScreen.Recap _ -> model, Cmd.none
-            | StudyScreen.Teach _ -> update StudyCheck model
-            | StudyScreen.Finished -> update CloseStudy model
-            | StudyScreen.Overview -> update StudyStart model
-            | StudyScreen.Quiz _ ->
-                let s, cmd = advance model.Settings r s model.Concepts
-                setStudy model r s, cmd
+        | Studying (_, { Now = StudyNow.Listening _ | StudyNow.Starting }) -> update Forward15 model
+        | Studying (_, { Now = StudyNow.Teach _ }) -> update StudyTestOut model
+        | Studying (_, { Now = StudyNow.Quiz { Choice = None } }) -> update (StudyChoose None) model
+        | Studying (r, ({ Now = StudyNow.Recap part } as s)) ->
+            let s = { s with Progress = { s.Progress with Recaps = s.Progress.Recaps.Add part }; Running = true }
+            let r, s, cmd = advance model.Settings r s model.Concepts
+            setStudy model r s, cmd
+        | Studying (r, ({ Now = StudyNow.Quiz _ } as s)) ->
+            let r, s, cmd = advance model.Settings r { s with Running = true } model.Concepts
+            setStudy model r s, cmd
         | _ -> model, Cmd.none
     | StudyKey n ->
         match model with
-        | Studying (_, s) ->
-            match s.Screen with
-            | StudyScreen.Quiz ({ Choice = None } as q) when n >= 1 && n <= q.Order.Length -> update (StudyChoose(Some q.Order.[n - 1])) model
-            | StudyScreen.Recap _ -> model, Cmd.none
-            | _ when n = 0 -> update StudyContinue model
-            | _ -> model, Cmd.none
+        | Studying (_, { Now = StudyNow.Quiz ({ Choice = None } as q) }) when n >= 1 && n <= q.Order.Length -> update (StudyChoose(Some q.Order.[n - 1])) model
+        | _ -> model, Cmd.none
+    | StudyClipReady (id, i, path) ->
+        match model with
+        | Studying (r, ({ Voice = Some v } as s)) when v.Id = id ->
+            let v = { v with Ready = v.Ready.Add(i, path) }
+            let s = { s with Voice = Some v }
+            setStudy model r s, (if v.Playing && v.At = i then playClip model.Settings v else Cmd.none)
+        | _ -> model, Cmd.none
+    | StudyClipFailed (id, i, message) ->
+        match model with
+        | Studying (r, ({ Voice = Some v } as s)) when v.Id = id && v.At = i ->
+            // the tutor's words stay on screen; its voice is paused until the learner goes on
+            let r, s, cmd = hold r s
+            setStudy model r { s with Error = Some("The tutor's voice failed: " + message) }, cmd
+        | _ -> model, Cmd.none
+    | StudyClipEnded (id, i) ->
+        match model with
+        | Studying (r, ({ Voice = Some v } as s)) when v.Id = id && v.At = i && v.Playing ->
+            let v = { v with At = v.At + 1 }
+            if v.At < v.Said.Length then setStudy model r { s with Voice = Some v }, playClip model.Settings v
+            else
+                let r, s, cmd = voiceDone model.Settings r { s with Voice = Some v } model.Concepts v.Then
+                setStudy model r s, cmd
+        | _ -> model, Cmd.none
+    | StudyListen purpose ->
+        match model with
+        | Studying (r, s) when (s.Running || purpose = Hearing.Question) && canHear model.Settings ->
+            earCancel.Cancel()
+            earCancel <- CancellationTokenSource.CreateLinkedTokenSource s.Cancel.Token
+            let ct = earCancel.Token
+            let settings = model.Settings
+            let chime = chimePath ()
+            setStudy model r { s with Ear = Ear.Opening purpose; Error = None },
+            Cmd.ofEffect (fun dispatch ->
+                let start () = if not ct.IsCancellationRequested then Task.Run(fun () -> hearing settings purpose ct dispatch) |> ignore
+                try
+                    if not (File.Exists chime) then Wav.writeChime chime
+                    (platform ()).Player.Play(chime, 0, 1.0, start, (fun _ -> start ()))
+                with _ -> start ())
+        | _ -> model, Cmd.none
+    | StudyEarOpened purpose ->
+        match model with
+        | Studying (r, ({ Ear = Ear.Opening p } as s)) when p = purpose -> setStudy model r { s with Ear = Ear.Open(purpose, 0.0, false) }, Cmd.none
+        | _ -> model, Cmd.none
+    | StudyEarLevel level ->
+        match model with
+        | Studying (r, ({ Ear = Ear.Open (p, _, spoke) } as s)) -> setStudy model r { s with Ear = Ear.Open(p, level, spoke || level > 0.1) }, Cmd.none
+        | _ -> model, Cmd.none
+    | StudyEarTranscribing purpose ->
+        match model with
+        | Studying (r, s) when s.Ear <> Ear.Off -> setStudy model r { s with Ear = Ear.Transcribing purpose }, Cmd.none
+        | _ -> model, Cmd.none
+    | StudyHeard (purpose, result) ->
+        match model with
+        | Studying (r, s) when s.Ear <> Ear.Off ->
+            let s = { s with Ear = Ear.Off; Heard = (match result with Ok t -> t | Error _ -> s.Heard) }
+            match purpose, result, s.Now with
+            | _, Error e, _ -> setStudy model r { s with Error = Some e }, Cmd.none
+            | Hearing.Answer, Ok text, StudyNow.Quiz ({ Choice = None } as q) ->
+                let heard = if text = "" then Study.Heard.Unclear else Study.heardAnswer (q.Order |> List.map (fun i -> q.Question.Options.[i])) text
+                match heard with
+                | Study.Heard.Option pos -> update (StudySaid(Some q.Order.[pos])) (setStudy model r s)
+                | Study.Heard.DontKnow -> update (StudySaid None) (setStudy model r s)
+                | Study.Heard.Unclear when s.Tries = 0 ->
+                    let numbers = q.Order |> List.mapi (fun i _ -> string (i + 1))
+                    let prompt =
+                        (if text = "" then "I didn't hear an answer. " else "Sorry, I didn't catch that. ")
+                        + sprintf "Say option %s or %s, or I don't know." (String.Join(", ", numbers |> List.take (numbers.Length - 1))) (List.last numbers)
+                    let s, cmd = say model.Settings r { s with Tries = 1 } (Study.said prompt) Then.Answer
+                    setStudy model r s, cmd
+                | Study.Heard.Unclear ->
+                    // waiting for a tap, or Continue to be asked again
+                    let r, s, cmd = hold r { s with Tries = s.Tries + 1 }
+                    setStudy model r s, cmd
+            | Hearing.Explanation, Ok "", StudyNow.Recap part ->
+                let s = { s with Progress = { s.Progress with Recaps = s.Progress.Recaps.Add part } }
+                let s, cmd = say model.Settings r s (Study.said "Let's go on.") Then.Next
+                setStudy model r s, cmd
+            | Hearing.Explanation, Ok text, StudyNow.Recap _ -> update SubmitRecap (setStudy model r { s with RecapInput = text })
+            | Hearing.Question, Ok text, _ when text <> "" -> update (StudyAsk(text, false)) (setStudy model r s)
+            | _ -> setStudy model r s, Cmd.none
+        | _ -> model, Cmd.none
+    | ToggleTutor ->
+        match model with
+        | Studying (r, s) when s.ShowTutor ->
+            // back to what the tutor was saying before the questions
+            let r, s, stop = hold r s
+            let s = { s with ShowTutor = false; Voice = (match s.Aside with Some v -> Some v | None -> s.Voice); Aside = None }
+            let r, s, cmd = resume model.Settings r s model.Concepts
+            setStudy model r s, Cmd.batch [ stop; cmd ]
+        | Studying (r, s) ->
+            let r, s, cmd = hold r s
+            let s = { s with ShowTutor = true; ShowPlan = false }
+            setStudy model r s, Cmd.batch [ cmd; (if canHear model.Settings && s.Pending.IsNone then Cmd.ofMsg (StudyListen Hearing.Question) else Cmd.none) ]
         | _ -> model, Cmd.none
     | StudyAsk (question, quick) ->
         match model with
@@ -2084,7 +2631,8 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             else
                 match momentOf s model.Concepts with
                 | Some m ->
-                    let s, cmd = askTutor model.Settings r s m (question.Trim()) quick
+                    stopEar ()
+                    let s, cmd = askTutor model.Settings r { s with Ear = Ear.Off; ShowTutor = true } m (question.Trim()) quick
                     setStudy model r s, cmd
                 | None -> model, Cmd.none
         | _ -> model, Cmd.none
@@ -2097,7 +2645,16 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         | Studying (r, ({ Pending = Some (id, q, _) } as s)) when id = askId ->
             match result with
             | Ok reply ->
-                setStudy model r { s with Pending = None; Chat = s.Chat @ [ { Question = q; Answer = reply.Answer } ]; Followups = reply.Followups }, Cmd.none
+                let s =
+                    { s with
+                        Pending = None
+                        Chat = s.Chat @ [ { Question = q; Answer = reply.Answer } ]
+                        Followups = reply.Followups
+                        Running = true
+                        Aside = (match s.Aside with Some v -> Some v | None -> s.Voice |> Option.map (fun v -> { v with Playing = false })) }
+                // the answer is said; the session waits in the panel until the learner goes on
+                let s, cmd = say model.Settings r s (Study.said reply.Answer) Then.Wait
+                setStudy model r s, cmd
             | Error e -> setStudy model r { s with Pending = None; Error = (if e = "Cancelled." then None else Some e) }, Cmd.none
         | _ -> model, Cmd.none
     | SetStudyInput text ->
@@ -2114,9 +2671,13 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         | _ -> model, Cmd.none
     | SubmitRecap ->
         match model with
-        | Studying (r, ({ Screen = StudyScreen.Recap part; Plan = Some plan } as s)) when not s.Grading && s.RecapInput.Trim() <> "" ->
+        | Studying (r, ({ Now = StudyNow.Recap part; Plan = Some plan } as s)) when not s.Grading && s.RecapInput.Trim() <> "" ->
             if not (Settings.hasKey model.Settings) then setStudy model r { s with Error = Some "Feedback on your answer needs a Mistral API key (Settings)." }, Cmd.none
-            else setStudy model r { s with Grading = true; Feedback = None; Error = None }, gradeRecap model.Settings r s plan part s.RecapInput
+            else
+                stopEar ()
+                voiceCancel.Cancel()
+                let s = { s with Grading = true; Feedback = None; Error = None; Ear = Ear.Off; Voice = None; Running = true }
+                setStudy model r s, Cmd.batch [ stopAudio; gradeRecap model.Settings r s plan part s.RecapInput ]
         | _ -> model, Cmd.none
     | RecapText f ->
         match model with
@@ -2124,66 +2685,26 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         | _ -> model, Cmd.none
     | RecapDone result ->
         match model with
-        | Studying (r, s) when s.Grading ->
+        | Studying (r, ({ Now = StudyNow.Recap part } as s)) when s.Grading ->
             match result with
-            | Ok f -> setStudy model r { s with Grading = false; Feedback = Some f }, Cmd.none
+            | Ok f ->
+                let s = { s with Grading = false; Feedback = Some f; Progress = { s.Progress with Recaps = s.Progress.Recaps.Add part } }
+                let verdict =
+                    match f.Verdict with
+                    | Some Study.Verdict.GotIt -> "You've got it. "
+                    | Some Study.Verdict.Partly -> "Partly there. "
+                    | Some Study.Verdict.NotYet -> "Not yet. "
+                    | None -> ""
+                let s, cmd = say model.Settings r s (Study.said (verdict + f.Text)) Then.Next
+                setStudy model r s, Cmd.batch [ cmd; saveStudy r.Paper.Id s.Progress ]
             | Error e -> setStudy model r { s with Grading = false; Feedback = None; Error = (if e = "Cancelled." then None else Some e) }, Cmd.none
         | _ -> model, Cmd.none
-    | SkipRecap ->
-        match model with
-        | Studying (r, ({ Screen = StudyScreen.Recap part } as s)) ->
-            let s = { s with Progress = { s.Progress with Recaps = s.Progress.Recaps.Add part } }
-            let s, cmd = advance model.Settings r s model.Concepts
-            setStudy model r s, cmd
-        | _ -> model, Cmd.none
-    | StudyListen segment ->
-        match model with
-        | Studying (r, s) -> update (JumpToSegment segment) (setStudy model r { s with Hidden = true })
-        | _ -> model, Cmd.none
-    | StudyBack ->
-        match model with
-        | Studying (r, s) ->
-            let r, pauseCmd = if r.Playing then pause r else r, Cmd.none
-            setStudy model r { s with Hidden = false }, pauseCmd
-        | _ -> model, Cmd.none
-    | StudyMic ->
-        match model with
-        | Studying (r, s) ->
-            match (platform ()).Recorder, s.Mic with
-            | None, _ -> setStudy model r { s with Error = Some "Recording isn't available on this device." }, Cmd.none
-            | Some _, _ when not (Settings.hasKey model.Settings) -> setStudy model r { s with Error = Some "Speaking needs a Mistral API key (Settings)." }, Cmd.none
-            | Some recorder, Mic.Idle ->
-                setStudy model r { s with Error = None }, runTask (fun () -> recorder.Start()) (Ok >> StudyMicStarted) (errorText >> Error >> StudyMicStarted)
-            | Some recorder, Mic.Recording ->
-                let key = model.Settings.MistralApiKey
-                let ct = s.Cancel.Token
-                let work () =
-                    task {
-                        let! audio, name = recorder.Stop()
-                        return! Mistral.transcribe key audio name ct
-                    }
-                setStudy model r { s with Mic = Mic.Transcribing }, runTask work (Ok >> StudyTranscribed) (errorText >> Error >> StudyTranscribed)
-            | Some _, Mic.Transcribing -> model, Cmd.none
-        | _ -> model, Cmd.none
-    | StudyMicStarted result ->
-        match model with
-        | Studying (r, s) ->
-            match result with
-            | Ok () -> setStudy model r { s with Mic = Mic.Recording }, Cmd.none
-            | Error e -> setStudy model r { s with Mic = Mic.Idle; Error = Some("Couldn't use the microphone: " + e) }, Cmd.none
-        | _ -> model, Cmd.none
-    | StudyTranscribed result ->
-        match model with
-        | Studying (r, s) ->
-            let s = { s with Mic = Mic.Idle }
-            let add (text: string) (spoken: string) = if text.Trim() = "" then spoken else text.TrimEnd() + " " + spoken
-            match result, s.Screen with
-            | Ok text, _ when text.Trim().Length <= 1 -> setStudy model r { s with Error = Some "I didn't catch that. Try again, a little closer to the microphone." }, Cmd.none
-            // spoken words go into the box, to read over before sending
-            | Ok text, StudyScreen.Recap _ -> setStudy model r { s with RecapInput = add s.RecapInput text }, Cmd.none
-            | Ok text, _ -> setStudy model r { s with Input = add s.Input text }, Cmd.none
-            | Error e, _ -> setStudy model r { s with Error = Some e }, Cmd.none
-        | _ -> model, Cmd.none
+    | SetStudy on ->
+        let settings = { model.Settings with Study = on }
+        { model with Settings = settings }, saveSettings settings
+    | SetAnswerAloud on ->
+        let settings = { model.Settings with AnswerAloud = on }
+        { model with Settings = settings }, saveSettings settings
 
     // ----- settings
     | SetShowSettings show ->
@@ -2256,8 +2777,8 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         else
             match model.Screen with
             | Screen.Reader r when r.Zoom.IsSome -> update ToggleZoom model
-            | Screen.Reader { Study = Some s } when not s.Hidden ->
-                update (match s.Screen with StudyScreen.Overview -> CloseStudy | _ -> StudyShowOverview) model
+            | Screen.Reader { Study = Some s } when s.ShowTutor -> update ToggleTutor model
+            | Screen.Reader { Study = Some s } when s.ShowPlan -> update ToggleStudyPlan model
             | Screen.Reader r when r.Help.IsSome -> update (CloseHelp false) model
             | Screen.Reader r when r.Cards.IsSome -> update (CloseCards false) model
             | Screen.Reader r when r.ShowOutline -> update ToggleOutline model

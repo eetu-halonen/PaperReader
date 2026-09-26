@@ -25,6 +25,9 @@ type IRecorder =
     abstract Stop: unit -> Task<byte[] * string>
     /// Stops and throws the recording away.
     abstract Cancel: unit -> unit
+    /// How loud the last moment of the recording is, 0 (silence) to 1; below 0 where it can't be measured. Tells when
+    /// the learner starts and stops speaking.
+    abstract Level: float
 
 /// What the device provides to the shared app.
 type IPlatform =

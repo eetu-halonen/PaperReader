@@ -1,19 +1,19 @@
-/// Studying a paper with a tutor. The model (with Ask's system prompt: the whole paper, every equation, figure and
-/// table) plans the ideas to learn, teaches them one at a time and writes questions that check them; what the learner
-/// knows is kept across papers (Knowledge), so a new paper skips the ideas already known, or checks them with one
-/// quick question when they are fading.
+/// Studying a paper with a tutor, by ear. The paper's narration plays section by section; between sections a tutor
+/// (the model, with Ask's system prompt: the whole paper, every equation, figure and table) speaks: background the
+/// next section needs before it, and after it a short lesson on each idea it covered and a question, answered aloud or
+/// with a tap. What the learner knows is kept across papers (Knowledge), so a new paper skips the ideas already known,
+/// or checks them with one quick question when they are fading.
 ///
 /// It follows what is known to make learning last rather than to feel easy:
-/// - small steps, prerequisites first, background only where this learner needs it (segmenting, pre-training);
+/// - small steps: a section at a time, background the learner lacks taught before it (segmenting, pre-training);
 /// - each explanation tied to the equation or figure on screen, with a concrete example (dual coding, worked examples);
 /// - retrieval right after: multiple-choice questions whose wrong options are real misconceptions, feedback on every
 ///   option, and "I don't know" rather than a guess (retrieval practice, feedback);
-/// - when an answer is wrong, the tutor explains what was missed, then a different question on the same idea (mastery);
 /// - the idea comes back minutes later in the session, between other ideas, then at growing intervals (spacing,
 ///   interleaving, FSRS), each time with a different question;
-/// - at the end of each part, the learner explains its ideas in their own words and gets feedback against the paper
-///   (generation, elaboration);
-/// - known ideas are tested, never assumed: "I know this" asks the question first.
+/// - at the end of each part, the learner explains its ideas aloud in their own words and gets feedback against the
+///   paper (generation, elaboration);
+/// - known ideas are tested, never assumed: skipping a lesson asks its question first.
 module PaperReader.Core.Study
 
 open System
@@ -101,15 +101,28 @@ type Progress =
       /// Questions the learner reported as wrong: never asked again.
       Reported: Set<string>
       /// When the plan was last matched against what the learner knows.
-      Matched: DateTime }
+      Matched: DateTime
+      /// The first segment of the narration not yet heard in the session.
+      Heard: int }
 
 module Progress =
     let empty (now: DateTime) =
-        { Links = Map.empty; Done = Map.empty; Recaps = Set.empty; Teach = Set.empty; Reported = Set.empty; Matched = now }
+        { Links = Map.empty; Done = Map.empty; Recaps = Set.empty; Teach = Set.empty; Reported = Set.empty; Matched = now; Heard = 0 }
+
+/// A stretch of the narration and the tutor's part around it: the background ideas taught before it is heard, and
+/// the paper's ideas it covers, taught and checked right after it.
+type Stop =
+    { /// The narration heard in it: first and last segment.
+      First: int
+      Last: int
+      Before: Idea list
+      After: Idea list }
 
 /// What to do next in a study session.
 [<RequireQualifiedAccess>]
 type Step =
+    /// Hear the paper's narration from one segment to another (inclusive).
+    | Listen of first: int * last: int
     /// Explain an idea of the plan, then check it.
     | Teach of idea: string
     /// An idea the learner knows but may be forgetting: one question; right skips it, wrong teaches it.
@@ -122,9 +135,67 @@ type Step =
 
 let private learning (m: Memory) = m.Stage = CardStage.Learning || m.Stage = CardStage.Relearning
 
+/// Where the narration covers an idea: where its first equation or figure is read, or where its section starts.
+let segmentOf (script: Script) (idea: Idea) : int option =
+    let order = Narration.equationOrder script
+    idea.Visuals
+    |> List.tryPick (fun v -> order |> Array.tryFind (fun (x, _) -> x.Id = v) |> Option.map snd)
+    |> Option.orElse (if idea.Section > 0 && idea.Section < script.Sections.Length then Some script.Sections.[idea.Section].FirstSegment else None)
+
+/// The last segment of a section.
+let private sectionEnd (script: Script) (section: int) =
+    let n = script.Segments.Length
+    if section + 1 < script.Sections.Length then max 0 (min (n - 1) (script.Sections.[section + 1].FirstSegment - 1)) else n - 1
+
+/// The session's stops, in the order of the narration. Each idea of the paper is taught right after the section it is
+/// in is heard (one without a section, with the idea before it); each background idea before the stop of the next
+/// idea of the paper in the plan, which is the first one that needs it.
+let stops (script: Script) (plan: Plan) : Stop list =
+    let n = script.Segments.Length
+    if n = 0 then []
+    else
+        let firstEnd = sectionEnd script script.Segments.[0].Section
+        let after = Collections.Generic.List<int * Idea>()
+        let before = Collections.Generic.List<int * Idea>()
+        let waiting = Collections.Generic.List<Idea>()
+        let mutable previous = None
+        for i in plan.Ideas do
+            if i.Background then waiting.Add i
+            else
+                let section =
+                    if i.Section > 0 && i.Section < script.Sections.Length then Some i.Section
+                    else segmentOf script i |> Option.map (fun seg -> script.Segments.[seg].Section)
+                let e =
+                    match section, previous with
+                    | Some s, _ -> sectionEnd script s
+                    | None, Some e -> e
+                    | None, None -> firstEnd
+                after.Add((e, i))
+                for b in waiting do before.Add((e, b))
+                waiting.Clear()
+                previous <- Some e
+        for b in waiting do before.Add((defaultArg previous firstEnd, b))
+        let ends = Seq.append (Seq.map fst after) (Seq.map fst before) |> Seq.distinct |> Seq.sort |> List.ofSeq
+        let ends = if List.isEmpty ends || List.last ends < n - 1 then ends @ [ n - 1 ] else ends
+        ends
+        |> List.mapi (fun k e ->
+            { First = (if k = 0 then 0 else ends.[k - 1] + 1)
+              Last = e
+              Before = [ for (x, i) in before do if x = e then yield i ]
+              After = [ for (x, i) in after do if x = e then yield i ] })
+
+/// The stop after which a part's ideas have all been taught, where its recap comes.
+let private recapStop (all: Stop list) (part: Part) =
+    let ids = part.Ideas |> List.map (fun i -> i.Id) |> Set.ofList
+    all
+    |> List.indexed
+    |> List.filter (fun (_, st) -> st.Before @ st.After |> List.exists (fun i -> ids.Contains i.Id))
+    |> List.tryLast
+    |> Option.map fst
+
 /// The next step, and the progress with the known ideas passed on the way marked as skipped. `last` is the idea
 /// (Concept id) just asked about, so it isn't asked again straight away.
-let next (now: DateTime) (plan: Plan) (progress: Progress) (concepts: Map<string, Concept>) (last: string option) : Step * Progress =
+let next (now: DateTime) (script: Script) (plan: Plan) (progress: Progress) (concepts: Map<string, Concept>) (last: string option) : Step * Progress =
     let dueAgain =
         progress.Links
         |> Map.toSeq
@@ -138,27 +209,36 @@ let next (now: DateTime) (plan: Plan) (progress: Progress) (concepts: Map<string
     match dueAgain with
     | Some c -> Step.Review c.Id, progress
     | None ->
-        let mutable p = progress
-        let mutable step = None
-        for pi, part in List.indexed plan.Parts do
-            if step.IsNone then
-                for idea in part.Ideas do
-                    if step.IsNone && not (p.Done.ContainsKey idea.Id) then
-                        if p.Teach.Contains idea.Id then step <- Some(Step.Teach idea.Id)
-                        else
-                            match p.Links.TryFind idea.Id |> Option.bind concepts.TryFind with
-                            | Some c when Knowledge.skippable now c -> p <- { p with Done = p.Done.Add(idea.Id, Outcome.Known) }
-                            | Some c when c.Memory.Stage <> CardStage.New -> step <- Some(Step.Check(idea.Id, c.Id))
-                            | _ -> step <- Some(Step.Teach idea.Id)
-                // a part whose ideas were all known already needs no recap
-                let learnedHere = part.Ideas |> List.exists (fun i -> p.Done.TryFind i.Id |> Option.exists (fun o -> o <> Outcome.Known))
-                if step.IsNone && part.Recap <> "" && learnedHere && not (p.Recaps.Contains pi) then step <- Some(Step.Recap pi)
-        defaultArg step Step.Finished, p
+        let all = stops script plan
+        let recapAt = plan.Parts |> List.map (recapStop all)
+        let p = ref progress
+        let step = ref None
+        let visit (ideas: Idea list) =
+            for idea in ideas do
+                if step.Value.IsNone && not (p.Value.Done.ContainsKey idea.Id) then
+                    if p.Value.Teach.Contains idea.Id then step.Value <- Some(Step.Teach idea.Id)
+                    else
+                        match p.Value.Links.TryFind idea.Id |> Option.bind concepts.TryFind with
+                        | Some c when Knowledge.skippable now c -> p.Value <- { p.Value with Done = p.Value.Done.Add(idea.Id, Outcome.Known) }
+                        | Some c when c.Memory.Stage <> CardStage.New -> step.Value <- Some(Step.Check(idea.Id, c.Id))
+                        | _ -> step.Value <- Some(Step.Teach idea.Id)
+        for si, stop in List.indexed all do
+            if step.Value.IsNone then
+                visit stop.Before
+                if step.Value.IsNone && p.Value.Heard <= stop.Last then step.Value <- Some(Step.Listen(max stop.First p.Value.Heard, stop.Last))
+                visit stop.After
+                for pi, part in List.indexed plan.Parts do
+                    // a part whose ideas were all known already needs no recap
+                    let learnedHere = part.Ideas |> List.exists (fun i -> p.Value.Done.TryFind i.Id |> Option.exists (fun o -> o <> Outcome.Known))
+                    if step.Value.IsNone && recapAt.[pi] = Some si && part.Recap <> "" && learnedHere && not (p.Value.Recaps.Contains pi) then
+                        step.Value <- Some(Step.Recap pi)
+        defaultArg step.Value Step.Finished, p.Value
 
-/// The ideas to be taught next, in order, for writing their lessons ahead. Known ideas aren't among them: they are
-/// only taught if a quick question shows they are forgotten.
-let upcoming (plan: Plan) (progress: Progress) (concepts: Map<string, Concept>) (count: int) =
-    plan.Ideas
+/// The ideas to be taught next, in the session's order, for writing their lessons ahead. Known ideas aren't among
+/// them: they are only taught if a quick question shows they are forgotten.
+let upcoming (script: Script) (plan: Plan) (progress: Progress) (concepts: Map<string, Concept>) (count: int) =
+    stops script plan
+    |> List.collect (fun st -> st.Before @ st.After)
     |> List.filter (fun i ->
         not (progress.Done.ContainsKey i.Id)
         && (progress.Teach.Contains i.Id
@@ -168,26 +248,24 @@ let upcoming (plan: Plan) (progress: Progress) (concepts: Map<string, Concept>) 
     |> List.truncate count
     |> List.map (fun i -> i.Id)
 
-/// Roughly how long what is left takes: a few minutes per idea to learn, one per quick check, two per recap.
-let minutesLeft (now: DateTime) (plan: Plan) (progress: Progress) (concepts: Map<string, Concept>) =
+/// Roughly how long what is left takes: the narration not heard yet (150 words a minute), two minutes per idea to
+/// learn, one per quick check, two per recap.
+let minutesLeft (now: DateTime) (script: Script) (plan: Plan) (progress: Progress) (concepts: Map<string, Concept>) =
+    let words =
+        script.Segments
+        |> Seq.skip (min script.Segments.Length (max 0 progress.Heard))
+        |> Seq.sumBy (fun s -> s.Say.Split([| ' ' |], StringSplitOptions.RemoveEmptyEntries).Length)
     let ideas =
         plan.Ideas
         |> List.filter (fun i -> not (progress.Done.ContainsKey i.Id))
         |> List.sumBy (fun i ->
             match progress.Links.TryFind i.Id |> Option.bind concepts.TryFind with
-            | _ when progress.Teach.Contains i.Id -> 3
+            | _ when progress.Teach.Contains i.Id -> 2
             | Some c when Knowledge.skippable now c -> 0
             | Some c when c.Memory.Stage <> CardStage.New -> 1
-            | _ -> 3)
+            | _ -> 2)
     let recaps = plan.Parts |> List.indexed |> List.filter (fun (i, p) -> p.Recap <> "" && not (progress.Recaps.Contains i)) |> List.length
-    ideas + 2 * recaps
-
-/// Where the narration covers an idea: where its first equation or figure is read, or where its section starts.
-let segmentOf (script: Script) (idea: Idea) : int option =
-    let order = Narration.equationOrder script
-    idea.Visuals
-    |> List.tryPick (fun v -> order |> Array.tryFind (fun (x, _) -> x.Id = v) |> Option.map snd)
-    |> Option.orElse (if idea.Section > 0 && idea.Section < script.Sections.Length then Some script.Sections.[idea.Section].FirstSegment else None)
+    words / 150 + ideas + 2 * recaps
 
 // ---------------------------------------------------------------------------------------------
 // Reading the model's text
@@ -423,6 +501,168 @@ let parseFeedback (text: string) : Feedback =
     | _ -> { Verdict = None; Text = text.Trim() }
 
 // ---------------------------------------------------------------------------------------------
+// What the tutor says, and what the learner answers aloud
+// ---------------------------------------------------------------------------------------------
+
+/// A piece of what the tutor says: the text on screen while it is said (with its $LaTeX$), and the words spoken.
+type Said = { Show: string; Say: string }
+
+let private sentenceBreak = Regex(@"(?<=[.!?])\s+(?=[""“(*]?[A-Z0-9$])", RegexOptions.Compiled)
+
+/// Text as clips to say one after another: a short first one, so speech starts quickly, then a sentence or a few.
+let said (text: string) : Said list =
+    let sentences =
+        text.Replace("\r", "").Split('\n')
+        |> Seq.map (fun p -> p.Trim())
+        |> Seq.filter (fun p -> p <> "")
+        |> Seq.collect (fun p -> if p.StartsWith "$$" then [| p |] else sentenceBreak.Split p)
+        |> Seq.map (fun x -> x.Trim())
+        |> Seq.filter (fun x -> x <> "")
+    let clips = ResizeArray<string>()
+    let current = StringBuilder()
+    for x in sentences do
+        let limit = if clips.Count = 0 then 140 else 280
+        if current.Length > 0 && current.Length + x.Length > limit then
+            clips.Add(current.ToString())
+            current.Clear() |> ignore
+        if current.Length > 0 then current.Append(' ') |> ignore
+        current.Append(x) |> ignore
+    if current.Length > 0 then clips.Add(current.ToString())
+    [ for c in clips do
+          let say = Help.spoken c
+          if say.Trim() <> "" then yield { Show = c; Say = say } ]
+
+/// A lesson as the tutor says it: which idea, the explanation, then the example.
+let lessonSaid (idea: Idea) (lesson: Lesson) : Said list =
+    let intro = if idea.Background then sprintf "Some background first: %s." idea.Name else sprintf "Now: %s." idea.Name
+    // the idea's name is on screen already
+    [ yield! said intro |> List.map (fun x -> { x with Show = "" })
+      yield! said lesson.Explanation
+      if lesson.Example <> "" then
+          yield! said "Here's an example."
+          yield! said lesson.Example ]
+
+/// Options are said and heard by number: letters sound alike (B, D, E), numbers don't.
+let private optionName (position: int) = sprintf "option %d" (position + 1)
+
+/// A multiple-choice question as it is read out, its options in the order shown (`order`: indices into the question's).
+let questionSaid (q: Question) (order: int list) : Said list =
+    let options =
+        order
+        |> List.mapi (fun pos i -> sprintf "Option %d: %s." (pos + 1) (Help.spoken q.Options.[i]))
+        |> String.concat " "
+    [ yield! said q.Prompt
+      { Show = ""; Say = options } ]
+
+let private verdictWord = Regex(@"^\W*(correct|right|yes|incorrect|wrong|no)\b[\s.:;,!—–-]*", RegexOptions.Compiled ||| RegexOptions.IgnoreCase)
+
+/// Why an option is right or wrong, without the "Correct:" or "Wrong:" the model may start it with.
+let private whyOf (q: Question) (i: int) =
+    if i >= 0 && i < q.Why.Length then
+        let w = verdictWord.Replace(q.Why.[i].Trim(), "")
+        if w = "" then "" else string (Char.ToUpperInvariant w.[0]) + w.Substring 1
+    else ""
+
+/// The feedback said after an answer: right or not, and why (for a wrong one, also the right answer and why).
+let feedbackSaid (q: Question) (order: int list) (choice: int option) : Said list =
+    let position i = order |> List.tryFindIndex ((=) i) |> Option.defaultValue i
+    let rightOne = sprintf "The answer is %s: %s." (optionName (position q.Correct)) q.Options.[q.Correct]
+    let text =
+        match choice with
+        | Some c when c = q.Correct -> "Right. " + whyOf q c
+        | Some c when c >= 0 && c < q.Options.Length -> sprintf "Not quite. %s %s %s" (whyOf q c) rightOne (whyOf q q.Correct)
+        | _ -> sprintf "%s %s" rightOne (whyOf q q.Correct)
+    said text
+
+/// What was heard in answer to a multiple-choice question.
+[<RequireQualifiedAccess>]
+type Heard =
+    /// An option, by its position on screen.
+    | Option of position: int
+    | DontKnow
+    | Unclear
+
+/// Number words that are rarely anything else, so they count even inside a sentence ("I'd go for two").
+let private numberWords =
+    [| set [ "1"; "one"; "first"; "yksi"; "eka"; "ensimmäinen"; "ykkönen" ]
+       set [ "2"; "two"; "second"; "kaksi"; "toka"; "toinen"; "kakkonen" ]
+       set [ "3"; "three"; "third"; "kolme"; "kolmas"; "kolmonen" ]
+       set [ "4"; "four"; "fourth"; "neljä"; "neljäs"; "nelonen" ] |]
+
+/// Also what a number or a letter can come out as when said alone ("to", "tree", "bee").
+let private letterWords =
+    [| numberWords.[0] + set [ "won"; "a"; "ay"; "eh"; "aa"; "alpha" ]
+       numberWords.[1] + set [ "to"; "too"; "b"; "bee"; "be"; "bravo" ]
+       numberWords.[2] + set [ "tree"; "c"; "see"; "sea"; "si"; "cee"; "charlie" ]
+       numberWords.[3] + set [ "for"; "d"; "dee"; "delta" ] |]
+
+let private fillers =
+    set [ "option"; "answer"; "letter"; "the"; "is"; "it"; "its"; "it's"; "s"; "i"; "think"; "say"; "would"; "i'd"; "id"
+          "my"; "guess"; "maybe"; "probably"; "um"; "uh"; "er"; "erm"; "hmm"; "mm"; "ok"; "okay"; "so"; "well"; "that"
+          "one"; "number"; "vastaus"; "se"; "on"; "kai"; "ehkä"; "luulen"; "että"; "vaihtoehto"; "numero" ]
+
+let private dontKnow =
+    Regex(@"\b(i\s*)?(don'?t|do not|dunno)\s+know\b|\bno (idea|clue)\b|\bpass\b|\bskip\b|\ben tiedä\b|\bei (aavistusta|hajuakaan)\b",
+          RegexOptions.Compiled ||| RegexOptions.IgnoreCase)
+
+let private words (s: string) =
+    Regex.Split(s.ToLowerInvariant(), @"[^\p{L}\p{N}']+") |> Array.filter (fun w -> w <> "") |> List.ofArray
+
+let private common =
+    set [ "the"; "and"; "for"; "that"; "with"; "from"; "this"; "are"; "was"; "its"; "it's"; "into"; "than"; "then"; "they"
+          "their"; "which"; "what"; "each"; "only"; "not"; "but"; "all"; "can"; "has"; "have"; "one"; "you"; "because" ]
+
+/// The words that carry meaning, for matching a spoken answer with an option.
+let private meaningful (s: string) = words s |> List.filter (fun w -> w.Length > 2 && not (common.Contains w)) |> set
+
+/// Reads a spoken answer: a number ("two", "option 2", "the second one"), a letter ("B"), "I don't know", or the
+/// words of an option. `options` are in the order shown.
+let heardAnswer (options: string list) (transcript: string) : Heard =
+    let tokens = words transcript
+    let letterOf (w: string) = letterWords |> Array.tryFindIndex (fun set -> set.Contains w) |> Option.filter (fun i -> i < options.Length)
+    let named =
+        // "option b", "answer c", "letter a"
+        tokens
+        |> List.pairwise
+        |> List.tryPick (fun (a, b) -> if a = "option" || a = "answer" || a = "letter" || a = "vaihtoehto" then letterOf b else None)
+    let content = tokens |> List.filter (fun w -> not (fillers.Contains w))
+    match named with
+    | Some i -> Heard.Option i
+    | None ->
+        match content with
+        | [ w ] when (letterOf w).IsSome -> Heard.Option (letterOf w).Value
+        | [] ->
+            // only fillers, one of which may be the letter ("one", "the first one")
+            match tokens |> List.choose letterOf |> List.distinct with
+            | [ i ] -> Heard.Option i
+            | _ -> Heard.Unclear
+        | _ when dontKnow.IsMatch transcript -> Heard.DontKnow
+        | _ ->
+            // the words of an option
+            let said = meaningful transcript
+            let scores =
+                options
+                |> List.map (fun o ->
+                    let ws = meaningful o
+                    if ws.IsEmpty || said.IsEmpty then 0.0
+                    else float (Set.intersect ws said).Count / float (min ws.Count said.Count))
+            match scores |> List.indexed |> List.sortByDescending snd with
+            | (best, b) :: (_, second) :: _ when b >= 0.5 && b - second >= 0.2 -> Heard.Option best
+            | [ (best, b) ] when b >= 0.5 -> Heard.Option best
+            | _ when tokens.Length > 8 -> Heard.Unclear
+            | _ ->
+                // a number in a short sentence; "one" after a number is not one ("the second one")
+                let numberOf (w: string) = numberWords |> Array.tryFindIndex (fun set -> set.Contains w)
+                let numbers =
+                    ("" :: tokens)
+                    |> List.pairwise
+                    |> List.choose (fun (before, w) -> if w = "one" && (numberOf before).IsSome then None else numberOf w)
+                    |> List.filter (fun i -> i < options.Length)
+                match List.distinct numbers with
+                | [ i ] -> Heard.Option i
+                | _ -> Heard.Unclear
+
+// ---------------------------------------------------------------------------------------------
 // What the model is asked
 // ---------------------------------------------------------------------------------------------
 
@@ -451,18 +691,26 @@ let private taskHeader (what: string) =
 /// The plan request, after Ask's system prompt (so the paper is cached for every request).
 let planPrompt (script: Script) (known: (string * Concept) list) =
     taskHeader "Plan a study session in which a tutor teaches this paper to the learner, one idea at a time."
-    + $$"""HOW TO PLAN
+    + $$"""HOW THE SESSION GOES
+The learner listens to the paper read aloud, section by section (perhaps while walking). After each section, the tutor
+speaks: a short lesson on each idea of the plan that section covered, and a question on it. Background the next section
+needs is taught just before it.
+
+HOW TO PLAN
 - List the ideas a learner must understand to really know this paper. For a research paper: the problem and why it
   matters, the key idea and how it differs from earlier work, each part of the method (its important equations: what
   they compute and why they have that form), the main results and what they show, and the limitations. For any other
   document (a book, an article, a report, slides, notes): its main ideas, arguments, terms, and key examples.
 - Add background ideas the paper relies on without explaining them, only when this learner may not know them (see THE
   LISTENER and WHAT THE LEARNER ALREADY KNOWS), each just before the first idea that needs it.
-- One idea each: small enough to explain in about 150 words and to check with one question. Split bigger ones.
-- Teaching order: every idea after the ones it builds on; otherwise the paper's order.
+- One idea each: small enough to explain in about a minute of speech (100 to 150 words) and to check with one
+  question. Split bigger ones.
+- The paper's order: list the ideas in the order the paper covers them, and give every idea of the paper the section
+  where the paper covers it (the most specific one, from SECTIONS). An idea spread over several sections goes with the
+  last of them.
 - Usually 8 to 20 ideas; up to 30 for a long or dense document. Prefer what an expert would still want to know a year
   from now. Leave out related work, setup trivia and acknowledgements.
-- Group the ideas into 2 to 6 parts that follow the paper's arc. At the end of each part: a question the learner
+- Group the ideas into 2 to 6 parts that follow the paper's sections in order. At the end of each part: a question the learner
   answers from memory in their own words, which connects the part's ideas (why, how they fit together), not a list of
   facts; and the key points of a good answer, as the paper supports them.
 - Everything must come from the paper, or for background ideas from standard textbook knowledge. Never invent.
@@ -490,7 +738,7 @@ core: <yes if central to the paper, else no>
 requires: <ids of earlier ideas of this plan it builds on, comma-separated, or none>
 uses known: <ids from WHAT THE LEARNER ALREADY KNOWS it builds on, comma-separated, or none>
 same as known: <the id from WHAT THE LEARNER ALREADY KNOWS that this idea is, or none>
-section: <the number from SECTIONS where the paper covers it, or none>
+section: <the number from SECTIONS where the paper covers it; none only for background>
 show: <ids from VISUALS about it, comma-separated, or none>
 goal: <one sentence: what the learner will understand>
 define: <one sentence defining it so it makes sense without this paper; for an idea of this paper, name the method
@@ -552,6 +800,12 @@ let lessonPrompt (script: Script) (plan: Plan) (progress: Progress) (concepts: M
         if idea.Background then "background: the paper relies on it without explaining it. Teach it from standard knowledge, then say in a sentence how this paper uses it."
         elif idea.Section > 0 && idea.Section < script.Sections.Length then sprintf "from the paper, section \"%s\"" script.Sections.[idea.Section].Title
         else "from the paper"
+    let moment =
+        if idea.Background then
+            "The learner is about to hear the next section of the paper read aloud, and needs this first. Prepare them for it."
+        elif idea.Section > 0 && idea.Section < script.Sections.Length then
+            sprintf "The learner has just heard the paper's section \"%s\" read aloud. Don't retell it: make sure they understood it. Explain what it means and why, clear up what is easy to miss, and connect it to what they know." script.Sections.[idea.Section].Title
+        else "The learner has just heard the part of the paper about it read aloud. Don't retell it: make sure they understood it."
     let builds =
         idea.Requires
         |> List.choose plan.Idea
@@ -577,16 +831,20 @@ Builds on: {{builds}}
 Equations, figures and tables about it: {{visuals}}
 
 HOW TO TEACH
+- The lesson is spoken to the learner by text-to-speech; they are listening, perhaps walking, with the equation, figure
+  or table you SHOW on their screen. {{moment}}
 - Write for this learner (THE LISTENER). They have been through the ideas before this one: build on them by name
   instead of explaining them again. Don't teach ideas that come later in the plan.
 - Explain what it is, how it works, and why it is done this way (what problem it solves, what would go wrong without
-  it). For an equation: what it computes, what each symbol stands for, and why it has this form. For a result: what
+  it). For an equation: what it computes, what its main symbols stand for, and why it has this form. For a result: what
   was compared, the key numbers, and what they show. For a limitation: what it is and why it matters.
-- 100 to 220 words in short paragraphs, conversational, like a good tutor talking to one student. No headings; a list
-  only for steps. Bold (**...**) each key term where it is introduced.
-- The equation, figure or table you SHOW is on the learner's screen next to your text: talk them through it.
-- Then one concrete example that makes it click, 40 to 120 words: a small worked example with numbers, a case from the
-  paper, or an everyday analogy (say it is an analogy, and where it breaks down if that matters).
+- Write for the ear: 80 to 160 words, short sentences, conversational, like a good tutor talking to one student. No
+  headings, lists, tables or parentheses. Bold (**...**) each key term where it is introduced.
+- Math is read out, so keep formulas out of the sentences: say in words what a symbol stands for, and point to the
+  formula on screen ("the formula on your screen"). Name a symbol as inline LaTeX ($d_k$) only when you must; never
+  write display equations.
+- Then one concrete example that makes it click, 30 to 90 words: a small worked example with round numbers, a case from
+  the paper, or an everyday analogy (say it is an analogy, and where it breaks down if that matters).
 - Stay faithful to the paper: its notation, terms and numbers. Never present as the paper's anything it doesn't say,
   and don't make up details it doesn't give. Background comes from standard textbook knowledge.
 
@@ -594,20 +852,22 @@ HOW TO WRITE THE QUESTIONS
 - 3 multiple-choice questions about this idea, each from a different angle: why it is done this way, what would happen
   if something changed, applying it to a new case, what a symbol, term or result means, how it compares with an
   alternative. They test understanding: a learner who only memorized the wording should not be able to answer.
-- 4 options each, exactly one right. The right one follows from the paper (or standard knowledge, for background);
+- The questions are read aloud with their options and answered by saying a letter: each question under 30 words, each
+  option under 15 words.
+- 3 options each, exactly one right. The right one follows from the paper (or standard knowledge, for background);
   check it before writing it. Each wrong option is a mistake a learner could really make: a common misconception, a
   near miss, a mix-up with a related idea, something that sounds right but isn't. Never silly, never a trick. All
   options alike in length, detail and style, so the form doesn't give the answer away: the right option must not be
   the longest or the only precise one (write the wrong ones with the same care, or shorten the right one). No "all of
   the above", "none of the above", or "which is NOT".
-- For each option, one sentence to the learner: why it is right, or the misconception that makes it wrong.
+- For each option, one short sentence to the learner, read aloud after they answer: why it is right, or the
+  misconception that makes it wrong.
 - Each question must make sense on its own months from now, mixed with questions from other papers: name the method or
   paper ("In the Transformer, ..."), never "the paper", "the authors" or "the equation above". WITH shows one equation,
   figure or table with the question when the question is about it.
 - Then 1 recall question, to answer from memory in a sentence or two, and its answer: the heart of the idea, precise
   enough to have one right answer.
-- Math as inline LaTeX between single dollars ($\sqrt{d_k}$) everywhere; in the explanation a formula that matters may
-  stand alone on its own line as $$...$$.
+- Math as inline LaTeX between single dollars ($\sqrt{d_k}$), sparingly.
 
 FORMAT (plain text in exactly this shape, nothing before or after)
 SHOW: <the id of the one equation, figure or table from VISUALS to show with the explanation, or none>
@@ -620,12 +880,10 @@ WITH: <id or none>
 A: <option>
 B: <option>
 C: <option>
-D: <option>
 RIGHT: <letter>
 WHY A: <one sentence>
 WHY B: <one sentence>
 WHY C: <one sentence>
-WHY D: <one sentence>
 QUESTION: <second question, in the same shape>
 ...
 QUESTION: <third question, in the same shape>
@@ -641,7 +899,7 @@ type Moment =
       Goal: string
       Background: bool
       Section: int
-      /// The lesson the learner read, if any.
+      /// The lesson the learner heard, if any.
       Lesson: Lesson option
       /// A question just answered, and the option chosen (None: "I don't know").
       Answered: (Question * int option) option }
@@ -652,26 +910,27 @@ let private questionBlock (q: Question) (choice: int option) =
     let sb = StringBuilder()
     sb.AppendFormat("They were asked: \"{0}\"\n", oneLine q.Prompt) |> ignore
     for i, o in List.indexed q.Options do
-        sb.AppendFormat("  {0}) {1}{2}\n", letters.[i], oneLine o, (if i = q.Correct then "   (right)" else "")) |> ignore
+        sb.AppendFormat("  {0}) {1}{2}\n", i + 1, oneLine o, (if i = q.Correct then "   (right)" else "")) |> ignore
     match choice with
     | Some c when c = q.Correct -> sb.Append("They answered right.\n") |> ignore
-    | Some c when c >= 0 && c < q.Options.Length -> sb.AppendFormat("They chose {0}), which is wrong.\n", letters.[c]) |> ignore
+    | Some c when c >= 0 && c < q.Options.Length -> sb.AppendFormat("They chose option {0}, which is wrong.\n", c + 1) |> ignore
     | _ -> sb.Append("They said they didn't know.\n") |> ignore
     sb.ToString()
 
 /// A question to the tutor, after Ask's system prompt; the reply follows its REPLY FORMAT.
 let tutorPrompt (script: Script) (m: Moment) (history: TutorTurn list) (question: string) =
     let sb = StringBuilder()
-    sb.Append("STUDYING NOW: the learner is in a study session on this paper, reading a tutor's lessons and answering its \
-               questions instead of listening. Answer as that tutor, about the idea below (the HOW TO ANSWER rules apply, \
-               about this idea in place of LISTENING NOW). Build on the lesson they read rather than repeating it.\n\n") |> ignore
+    sb.Append("STUDYING NOW: the learner is in a study session on this paper: they hear it read aloud section by section, \
+               and between sections a tutor's spoken lessons and questions. Answer as that tutor, about the idea below (the \
+               HOW TO ANSWER rules apply, about this idea in place of LISTENING NOW). Build on the lesson they heard rather \
+               than repeating it.\n\n") |> ignore
     sb.AppendFormat("Idea: \"{0}\": {1}\n", m.Name, oneLine m.Goal) |> ignore
     if m.Background then sb.Append("Background knowledge the paper relies on (not explained in it).\n") |> ignore
     elif m.Section > 0 && m.Section < script.Sections.Length then
         sb.AppendFormat("In the paper: section \"{0}\".\n", script.Sections.[m.Section].Title) |> ignore
     match m.Lesson with
     | Some l when l.Explanation <> "" ->
-        sb.Append("The lesson they read:\n\"\"\"\n").Append(l.Explanation) |> ignore
+        sb.Append("The lesson they heard:\n\"\"\"\n").Append(l.Explanation) |> ignore
         if l.Example <> "" then sb.Append("\n\nExample: ").Append(l.Example) |> ignore
         sb.Append("\n\"\"\"\n") |> ignore
     | _ -> ()
@@ -694,19 +953,21 @@ let tutorTaps (answeredWrong: bool) =
 let recapPrompt (plan: Plan) (partIndex: int) (answer: string) =
     let part = plan.Parts.[partIndex]
     let names = part.Ideas |> List.map (fun i -> i.Name) |> String.concat "; "
-    taskHeader "Give the learner feedback on an answer they wrote."
+    taskHeader "Give the learner feedback on an answer they gave."
     + $$"""In a study session on this paper, the learner has just gone through these ideas: {{names}}.
 They were asked to explain, from memory and in their own words:
 "{{oneLine part.Recap}}"
 A good answer covers (as the paper supports it): {{oneLine part.Points}}
 
-Their answer:
+Their answer (usually spoken aloud and transcribed automatically: ignore filler words, false starts and words the
+transcription got wrong):
 """
     + "\"\"\"\n" + answer.Trim() + "\n\"\"\"\n\n"
     + """Judge understanding, not wording, spelling or style; a short answer that has the key ideas right has got it.
-Talk to the learner in 2 to 5 sentences: first what they got right (specifically), then what is missing or wrong, with
-the correct idea as the paper puts it. Encouraging and honest; don't repeat their answer back, don't lecture beyond the
-question. Math as inline LaTeX between single dollars. Never invent anything the paper doesn't say.
+Talk to the learner in 2 to 5 short sentences, which are read aloud to them: first what they got right (specifically),
+then what is missing or wrong, with the correct idea as the paper puts it. Encouraging and honest; don't repeat their
+answer back, don't lecture beyond the question. No formulas; inline LaTeX only for a symbol you must name. Never invent
+anything the paper doesn't say.
 
 FORMAT
 VERDICT: <got it, partly, or not yet>
@@ -906,6 +1167,7 @@ let saveProgress (p: Store.Paths) (id: string) (s: Progress) =
         list "teach" s.Teach
         list "reported" s.Reported
         w.WriteString("matched", s.Matched.ToString("o"))
+        w.WriteNumber("heard", s.Heard)
         w.WriteEndObject()
         w.Flush()
     File.Move(path + ".tmp", path, true)
@@ -937,5 +1199,9 @@ let loadProgress (p: Store.Paths) (id: string) : Progress option =
                     match DateTime.TryParse(t.GetString(), Globalization.CultureInfo.InvariantCulture, Globalization.DateTimeStyles.RoundtripKind) with
                     | true, t -> t.ToUniversalTime()
                     | _ -> DateTime.UtcNow
-                | _ -> DateTime.UtcNow }
+                | _ -> DateTime.UtcNow
+              Heard =
+                match e.TryGetProperty "heard" with
+                | true, h when h.ValueKind = JsonValueKind.Number -> h.GetInt32()
+                | _ -> 0 }
     with _ -> None

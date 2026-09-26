@@ -101,6 +101,10 @@ public static partial class Js
     [JSImport("recCancel", Module)]
     public static partial void RecCancel();
 
+    /// <summary>How loud the microphone is now, 0 to 1 (-1 if it can't be measured).</summary>
+    [JSImport("recLevel", Module)]
+    public static partial double RecLevel();
+
     // ---- media session and screen
 
     [JSImport("setPlayback", Module)]

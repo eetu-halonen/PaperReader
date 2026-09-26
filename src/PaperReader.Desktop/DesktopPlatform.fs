@@ -257,6 +257,25 @@ type FfmpegRecorder(exe: string, dir: string) =
 
         member _.Cancel() = kill ()
 
+        // the loudest sample of the last tenth of a second of the file ffmpeg is writing (16-bit, 16 kHz)
+        member _.Level =
+            try
+                if isNull current then 0.0
+                else
+                    use f = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite ||| FileShare.Delete)
+                    let window = 3200
+                    if f.Length < int64 (100 + window) then 0.0
+                    else
+                        f.Seek((f.Length - int64 window) &&& ~~~1L, SeekOrigin.Begin) |> ignore
+                        let bytes = Array.zeroCreate<byte> window
+                        let n = f.Read(bytes, 0, window)
+                        let mutable peak = 0
+                        for i in 0 .. 2 .. n - 2 do
+                            let v = abs (int (BitConverter.ToInt16(bytes, i)))
+                            if v > peak then peak <- v
+                        float peak / 32768.0
+            with _ -> 0.0
+
 // ---------------------------------------------------------------------------------------------
 // Platform
 // ---------------------------------------------------------------------------------------------

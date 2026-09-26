@@ -2005,7 +2005,7 @@ let private studyHero (model: Model) (r: ReaderState) (dispatch: Msg -> unit) : 
                         (match progress with
                          | Some (d, n) when d >= n -> sprintf "You've studied all %d ideas. They come back for review before you'd forget them." n
                          | Some (d, n) -> sprintf "%d of %d ideas done. Carry on where you left off." d n
-                         | None -> "A tutor teaches every idea in it and checks you understood each one, skipping what you already know from other papers.")
+                         | None -> "The paper is read to you, and between its sections a tutor explains each idea and asks you about it, skipping what you already know from other papers.")
                         14.0 Palette.muted
                     StackPanel.create [
                         StackPanel.orientation Orientation.Horizontal
@@ -2151,7 +2151,7 @@ let private cardsOverlay (model: Model) (r: ReaderState) (panel: CardsPanel) (di
                                 StackPanel.margin (Thickness(20.0, 8.0, 20.0, 20.0))
                                 StackPanel.spacing 14.0
                                 StackPanel.children [
-                                    studyHero model r dispatch
+                                    if r.Study.IsNone then studyHero model r dispatch
                                     // what "this" is
                                     StackPanel.create [
                                         StackPanel.spacing 8.0
@@ -2291,7 +2291,7 @@ let private choiceOption (q: Question) (i: int) (position: int) (choice: int opt
                         Border.background (if answered && right then Palette.good elif picked then Palette.danger else Palette.bg)
                         Border.child (
                             TextBlock.create [
-                                TextBlock.text (string "ABCDEF".[position])
+                                TextBlock.text (string (position + 1))
                                 TextBlock.fontSize 14.0
                                 TextBlock.fontWeight FontWeight.Bold
                                 TextBlock.foreground (if answered && (right || picked) then Palette.onAccent else Palette.muted)
@@ -2765,636 +2765,6 @@ let private learnView (model: Model) (dispatch: Msg -> unit) : IView =
         ]
     ]
 
-// ---------------------------------------------------------------------------------------------
-// Study: a tutor teaches the paper idea by idea, checks each one, and skips what the learner knows
-// ---------------------------------------------------------------------------------------------
-
-/// Where a plan's idea comes from, as a small heading.
-let private ideaSource (script: Script) (idea: Study.Idea) =
-    if idea.Background then "BACKGROUND · NOT EXPLAINED IN THE PAPER"
-    elif idea.Section > 0 && idea.Section < script.Sections.Length then "FROM THE PAPER · " + script.Sections.[idea.Section].Title.ToUpperInvariant()
-    else "FROM THE PAPER"
-
-/// How an idea of the plan stands: done, known, to be checked, or to learn.
-let private ideaStatus (model: Model) (s: StudyState) (idea: Study.Idea) : string * bool =
-    let now = DateTime.UtcNow
-    let concept = s.Progress.Links.TryFind idea.Id |> Option.bind model.Concepts.TryFind
-    let strength = concept |> Option.map (fun c -> sprintf " · %.0f%%" (100.0 * Knowledge.strength now c)) |> Option.defaultValue ""
-    match s.Progress.Done.TryFind idea.Id with
-    | Some Study.Outcome.Learned -> "learned" + strength, true
-    | Some Study.Outcome.TestedOut -> "knew it" + strength, true
-    | Some Study.Outcome.Refreshed -> "still known" + strength, true
-    | Some Study.Outcome.Known -> "you know it", true
-    | None when s.Progress.Teach.Contains idea.Id -> (if idea.Background then "background" else ""), false
-    | None ->
-        match concept with
-        | Some c when Knowledge.skippable now c -> "you know it", false
-        | Some c when c.Memory.Stage <> CardStage.New -> "quick check", false
-        | _ -> (if idea.Background then "background" else ""), false
-
-/// The idea the session goes to next, for marking it on the plan.
-let private nextIdea (model: Model) (s: StudyState) =
-    match s.Plan with
-    | Some plan ->
-        match fst (Study.next DateTime.UtcNow plan s.Progress model.Concepts s.Last) with
-        | Study.Step.Teach i
-        | Study.Step.Check (i, _) -> Some i
-        | _ -> None
-    | None -> None
-
-let private ideaRow (model: Model) (s: StudyState) (idea: Study.Idea) (current: bool) (dispatch: Msg -> unit) : IView =
-    let status, isDone = ideaStatus model s idea
-    plainButton (if current then Palette.surfaceHigh else "Transparent") [
-        Button.horizontalAlignment HorizontalAlignment.Stretch
-        Button.horizontalContentAlignment HorizontalAlignment.Stretch
-        Button.padding (Thickness(10.0, 9.0, 12.0, 9.0))
-        Button.cornerRadius 12.0
-        Button.onClick ((fun _ -> dispatch (StudyTeach idea.Id)), SubPatchOptions.OnChangeOf idea.Id)
-        Button.content (
-            Grid.create [
-                Grid.columnDefinitions "Auto,*,Auto"
-                Grid.children [
-                    Border.create [
-                        Grid.column 0
-                        Border.width 22.0
-                        Border.margin (Thickness(0.0, 1.0, 10.0, 0.0))
-                        Border.verticalAlignment VerticalAlignment.Top
-                        Border.child (
-                            if isDone then icon Icons.check Palette.accent 18.0 false
-                            else
-                                Ellipse.create [
-                                    Ellipse.width 10.0
-                                    Ellipse.height 10.0
-                                    Ellipse.margin (Thickness(4.0, 5.0, 0.0, 0.0))
-                                    if current then Ellipse.fill Palette.accent
-                                    else
-                                        Ellipse.stroke Palette.faint
-                                        Ellipse.strokeThickness 1.5
-                                ]
-                        )
-                    ]
-                    Border.create [ Grid.column 1; Border.child (richParagraph idea.Name 15.0 (if isDone then Palette.muted else Palette.text)) ]
-                    TextBlock.create [
-                        Grid.column 2
-                        TextBlock.text status
-                        TextBlock.fontSize 12.0
-                        TextBlock.foreground Palette.faint
-                        TextBlock.margin (Thickness(10.0, 2.0, 0.0, 0.0))
-                        TextBlock.verticalAlignment VerticalAlignment.Top
-                    ]
-                ]
-            ]
-        )
-    ]
-
-/// The plan: what the paper is about, the ideas part by part and how each stands; or, before there is one, what
-/// studying does.
-let private studyOverview (model: Model) (r: ReaderState) (s: StudyState) (dispatch: Msg -> unit) : IView list =
-    match s.Plan, s.Planning with
-    | None, Some (step, names) ->
-        [ TextBlock.create [ TextBlock.text "Planning your study"; TextBlock.fontSize 24.0; TextBlock.fontWeight FontWeight.Bold; TextBlock.foreground Palette.text ]
-          spinnerLine (step + "…")
-          label "The tutor reads the whole paper and breaks it into ideas, in the order to learn them." 13.0 Palette.faint
-          StackPanel.create [
-              StackPanel.spacing 6.0
-              StackPanel.children [ for i, n in List.indexed names -> richParagraph (sprintf "%d. %s" (i + 1) n) 15.0 Palette.text ]
-          ] ]
-    | None, None ->
-        [ TextBlock.create [ TextBlock.text "Study this paper"; TextBlock.fontSize 26.0; TextBlock.fontWeight FontWeight.Bold; TextBlock.foreground Palette.text ]
-          label "A tutor takes you through every idea in it, one at a time." 17.0 Palette.text
-          StackPanel.create [
-              StackPanel.spacing 8.0
-              StackPanel.children [
-                  for line in
-                      [ "A short explanation of each idea, with its equation or figure and an example."
-                        "A question to check you understood, with why each answer is right or wrong. Miss it, and the tutor explains what you missed before another one."
-                        "At the end of each part, you explain it back in your own words and get feedback."
-                        "Ideas you know from papers you studied before are skipped, or checked with one quick question."
-                        "What you learn comes back for review just before you'd forget it, a little later each time." ] ->
-                      Grid.create [
-                          Grid.columnDefinitions "Auto,*"
-                          Grid.children [
-                              Border.create [ Grid.column 0; Border.margin (Thickness(0.0, 2.0, 10.0, 0.0)); Border.verticalAlignment VerticalAlignment.Top; Border.child (icon Icons.check Palette.accent 16.0 false) ]
-                              Border.create [ Grid.column 1; Border.child (label line 15.0 Palette.muted) ]
-                          ]
-                      ]
-              ]
-          ]
-          label "Stop whenever you like: you carry on where you left off. Planning takes about half a minute." 13.0 Palette.faint
-          if not (Settings.hasKey model.Settings) then
-              StackPanel.create [
-                  StackPanel.spacing 10.0
-                  StackPanel.children [
-                      label "Studying needs a Mistral API key: the tutor is a model (GLM 5.3) that reads the whole paper." 15.0 Palette.text
-                      StackPanel.create [ StackPanel.orientation Orientation.Horizontal; StackPanel.children [ pill "Open settings" (fun () -> dispatch (SetShowSettings true)) false ] ]
-                  ]
-              ] ]
-    | Some plan, _ ->
-        let now = DateTime.UtcNow
-        let current = nextIdea model s
-        let known = plan.Ideas |> List.filter (fun i -> fst (ideaStatus model s i) |> fun t -> t = "you know it" || t.StartsWith "still known") |> List.length
-        let minutes = Study.minutesLeft now plan s.Progress model.Concepts
-        let uses =
-            plan.Ideas |> List.collect (fun i -> i.Uses) |> List.distinct |> List.choose model.Concepts.TryFind |> List.map (fun c -> c.Name)
-        [ TextBlock.create [
-              TextBlock.text r.Script.Title
-              TextBlock.fontSize 22.0
-              TextBlock.fontWeight FontWeight.Bold
-              TextBlock.foreground Palette.text
-              TextBlock.textWrapping TextWrapping.Wrap
-          ]
-          if plan.Overview <> "" then richText plan.Overview 15.0 Palette.muted
-          label
-              ([ sprintf "%d ideas" plan.Ideas.Length
-                 if s.Progress.Done.Count > 0 then sprintf "%d done" (min plan.Ideas.Length s.Progress.Done.Count)
-                 if known > 0 then sprintf "%d you know already" known
-                 if minutes > 0 then sprintf "about %d min left" (max 5 (int (Math.Round(float minutes / 5.0)) * 5)) ]
-               |> String.concat " · ")
-              14.0 Palette.accent
-          if not uses.IsEmpty then label ("Builds on what you know: " + String.Join(", ", uses) + ". Not taught again.") 13.0 Palette.faint
-          for pi, part in List.indexed plan.Parts do
-              StackPanel.create [
-                  StackPanel.spacing 2.0
-                  StackPanel.children [
-                      sectionLabel (sprintf "PART %d · %s" (pi + 1) (part.Title.ToUpperInvariant()))
-                      for idea in part.Ideas do ideaRow model s idea (current = Some idea.Id) dispatch
-                      if part.Recap <> "" then
-                          Grid.create [
-                              Grid.columnDefinitions "Auto,*"
-                              Grid.margin (Thickness(10.0, 6.0, 12.0, 6.0))
-                              Grid.children [
-                                  Border.create [
-                                      Grid.column 0
-                                      Border.width 22.0
-                                      Border.margin (Thickness(0.0, 0.0, 10.0, 0.0))
-                                      Border.child (if s.Progress.Recaps.Contains pi then icon Icons.check Palette.accent 18.0 false else icon Icons.ask Palette.faint 16.0 false)
-                                  ]
-                                  TextBlock.create [
-                                      Grid.column 1
-                                      TextBlock.text "Explain it back, in your own words"
-                                      TextBlock.fontSize 14.0
-                                      TextBlock.fontStyle FontStyle.Italic
-                                      TextBlock.foreground Palette.faint
-                                      TextBlock.verticalAlignment VerticalAlignment.Center
-                                  ]
-                              ]
-                          ]
-                  ]
-              ]
-          label "Tap an idea to study it now, even one you know or have done." 12.0 Palette.faint ]
-
-/// The conversation with the tutor about the idea on screen, and ways to ask.
-let private tutorSection (model: Model) (s: StudyState) (answeredWrong: bool) (dispatch: Msg -> unit) : IView list =
-    let hasKey = Settings.hasKey model.Settings
-    let busy = s.Pending.IsSome || s.Mic = Mic.Transcribing
-    let taps = if s.Chat.IsEmpty || s.Followups.IsEmpty then Study.tutorTaps answeredWrong else s.Followups
-    [ sectionLabel "ASK THE TUTOR"
-      for t in s.Chat do
-          StackPanel.create [
-              StackPanel.spacing 8.0
-              StackPanel.children [ label t.Question 15.0 Palette.accent; richText t.Answer 16.0 Palette.text ]
-          ]
-      match s.Pending with
-      | Some (_, q, partial) ->
-          StackPanel.create [
-              StackPanel.spacing 8.0
-              StackPanel.children [ label q 15.0 Palette.accent; (if partial = "" then spinnerLine "Thinking…" else richText partial 16.0 Palette.text) ]
-          ]
-      | None -> ()
-      if hasKey && not busy then
-          WrapPanel.create [ WrapPanel.children [ for t in taps -> chip (t.Replace("$", "")) (fun () -> dispatch (StudyAsk(t, true))) ] ]
-      if hasKey then
-          Grid.create [
-              Grid.columnDefinitions "*,Auto,Auto"
-              Grid.children [
-                  match s.Mic with
-                  | Mic.Recording -> label "Listening… tap the button when you're done." 15.0 Palette.text
-                  | Mic.Transcribing -> label "Writing down what you said…" 15.0 Palette.muted
-                  | Mic.Idle ->
-                      TextBox.create [
-                          Grid.column 0
-                          TextBox.text s.Input
-                          TextBox.watermark "Ask anything about it"
-                          TextBox.fontSize 15.0
-                          TextBox.cornerRadius 20.0
-                          TextBox.padding (Thickness(14.0, 9.0))
-                          TextBox.verticalContentAlignment VerticalAlignment.Center
-                          TextBox.onTextChanged ((fun t -> if t <> s.Input then dispatch (SetStudyInput t)), SubPatchOptions.OnChangeOf s.Input)
-                          TextBox.onKeyDown ((fun e -> if e.Key = Input.Key.Enter then e.Handled <- true; dispatch SendStudyInput), SubPatchOptions.Never)
-                      ]
-                  if s.Mic = Mic.Idle && s.Input.Trim() <> "" then
-                      Button.create [
-                          Grid.column 1
-                          Button.width 44.0
-                          Button.height 44.0
-                          Button.margin (Thickness(8.0, 0.0, 0.0, 0.0))
-                          Button.cornerRadius 22.0
-                          Button.padding 0.0
-                          Button.background Palette.accent
-                          Button.horizontalContentAlignment HorizontalAlignment.Center
-                          Button.verticalContentAlignment VerticalAlignment.Center
-                          Button.isEnabled (not busy)
-                          Button.onClick ((fun _ -> dispatch SendStudyInput), SubPatchOptions.Never)
-                          Button.content (icon Icons.send Palette.onAccent 20.0 false)
-                      ]
-                  if (Services.get ()).Recorder.IsSome then
-                      Button.create [
-                          Grid.column 2
-                          Button.width 44.0
-                          Button.height 44.0
-                          Button.margin (Thickness(8.0, 0.0, 0.0, 0.0))
-                          Button.cornerRadius 22.0
-                          Button.padding 0.0
-                          Button.background (if s.Mic = Mic.Recording then Palette.danger else Palette.surfaceHigh)
-                          Button.horizontalContentAlignment HorizontalAlignment.Center
-                          Button.verticalContentAlignment VerticalAlignment.Center
-                          Button.isEnabled (s.Mic <> Mic.Transcribing && s.Pending.IsNone)
-                          Button.onClick ((fun _ -> dispatch StudyMic), SubPatchOptions.Never)
-                          Button.content (if s.Mic = Mic.Recording then icon Icons.stop Palette.onAccent 18.0 true else icon Icons.mic Palette.text 22.0 false)
-                      ]
-              ]
-          ] ]
-
-/// An idea's lesson: where it comes from, the explanation beside its equation or figure, an example, and the tutor.
-let private studyTeach (model: Model) (r: ReaderState) (s: StudyState) (idea: Study.Idea) (dispatch: Msg -> unit) : IView list =
-    let lesson =
-        s.Lessons.TryFind idea.Id
-        |> Option.orElse (s.Writing.TryFind idea.Id |> Option.map (Study.parseLesson r.Script r.Paper.Id idea.Id))
-    let writing = s.Writing.ContainsKey idea.Id
-    let ready = s.Lessons.ContainsKey idea.Id
-    let isDone = s.Progress.Done.ContainsKey idea.Id
-    let uses = idea.Uses |> List.choose model.Concepts.TryFind |> List.map (fun c -> c.Name)
-    [ TextBlock.create [
-          TextBlock.text (ideaSource r.Script idea)
-          TextBlock.fontSize 12.0
-          TextBlock.fontWeight FontWeight.Bold
-          TextBlock.foreground Palette.accent
-          TextBlock.textTrimming TextTrimming.CharacterEllipsis
-      ]
-      richParagraph idea.Name 24.0 Palette.text |> fun v -> Border.create [ Border.child v; Border.margin (Thickness(0.0, -6.0, 0.0, 0.0)) ]
-      if not uses.IsEmpty then label ("Builds on what you know: " + String.Join(", ", uses)) 13.0 Palette.faint
-      match lesson with
-      | Some l when l.Explanation <> "" ->
-          match l.Show with
-          | Some v -> visualThumb r v 280.0 dispatch
-          | None -> ()
-          richText l.Explanation 17.0 Palette.text
-          if l.Example <> "" then
-              Border.create [
-                  Border.background Palette.surface
-                  Border.cornerRadius 16.0
-                  Border.padding (Thickness(16.0, 12.0, 16.0, 14.0))
-                  Border.child (StackPanel.create [ StackPanel.spacing 6.0; StackPanel.children [ sectionLabel "EXAMPLE"; richText l.Example 16.0 Palette.text ] ])
-              ]
-          if writing then spinnerLine "Writing…"
-      | _ ->
-          match s.Failed.TryFind idea.Id with
-          | Some e ->
-              label ("The lesson couldn't be written: " + e) 14.0 Palette.danger
-              StackPanel.create [ StackPanel.orientation Orientation.Horizontal; StackPanel.children [ pill "Try again" (fun () -> dispatch (StudyRetryLesson idea.Id)) false ] ]
-          | None when not (Settings.hasKey model.Settings) -> label "Writing this lesson needs a Mistral API key (Settings)." 15.0 Palette.muted
-          | None -> spinnerLine "Writing the lesson…"
-      WrapPanel.create [
-          WrapPanel.children [
-              match Study.segmentOf r.Script idea with
-              | Some seg -> textLink "Listen to it in the paper" (fun () -> dispatch (StudyListen seg)) ("listen", idea.Id)
-              | None -> ()
-              if ready && not isDone then textLink "I know this: test me" (fun () -> dispatch StudyTestOut) ("testout", idea.Id)
-          ]
-      ]
-      if ready then yield! tutorSection model s false dispatch ]
-
-/// A multiple-choice question: why it is asked, the question, the options, then what the answer means.
-let private studyQuiz (model: Model) (r: ReaderState) (s: StudyState) (q: Quiz) (dispatch: Msg -> unit) : IView list =
-    let now = DateTime.UtcNow
-    let idea = q.Idea |> Option.bind (fun i -> s.Plan |> Option.bind (fun p -> p.Idea i))
-    let concept = q.Concept |> Option.bind model.Concepts.TryFind
-    let name = idea |> Option.map (fun i -> i.Name) |> Option.orElse (concept |> Option.map (fun c -> c.Name)) |> Option.defaultValue ""
-    let right = q.Choice = Some(Some q.Question.Correct)
-    let heading =
-        match q.Purpose with
-        | QuizPurpose.Check -> "CHECK YOUR UNDERSTANDING"
-        | QuizPurpose.Retry -> "ANOTHER QUESTION ON IT"
-        | QuizPurpose.TestOut -> "TEST YOURSELF"
-        | QuizPurpose.QuickCheck -> "QUICK CHECK · YOU STUDIED THIS BEFORE"
-        | QuizPurpose.Again -> "AGAIN, A LITTLE LATER"
-    [ TextBlock.create [ TextBlock.text heading; TextBlock.fontSize 12.0; TextBlock.fontWeight FontWeight.Bold; TextBlock.foreground Palette.accent ]
-      richParagraph name 14.0 Palette.muted
-      match q.Purpose, concept with
-      | QuizPurpose.QuickCheck, Some c when q.Choice.IsNone ->
-          match c.Sources |> List.tryFind (fun x -> x.PaperId <> r.Paper.Id) with
-          | Some src -> label (sprintf "You learned it in “%s”. If you still know it, it's skipped here." src.Title) 13.0 Palette.faint
-          | None -> ()
-      | QuizPurpose.Again, _ when q.Choice.IsNone -> label "Asking again after a few minutes, between other ideas, is what makes it last." 13.0 Palette.faint
-      | _ -> ()
-      match q.Question.Visual with
-      | Some v when q.Question.PaperId = r.Paper.Id -> visualThumb r v 240.0 dispatch
-      | Some v -> cardImage q.Question.PaperId v 240.0
-      | None -> ()
-      richText q.Question.Prompt 20.0 Palette.text
-      StackPanel.create [
-          StackPanel.spacing 8.0
-          StackPanel.children [
-              for pos, i in List.indexed q.Order do
-                  choiceOption q.Question i pos q.Choice (fun () -> dispatch (StudyChoose(Some i)))
-              if q.Choice.IsNone then dontKnow (fun () -> dispatch (StudyChoose None))
-          ]
-      ]
-      match q.Choice with
-      | Some choice ->
-          let outcome =
-              match q.Purpose, right with
-              | QuizPurpose.QuickCheck, true -> "Right: you still know it, so it's skipped here."
-              | QuizPurpose.QuickCheck, false -> "It has faded, so you'll go through it again next."
-              | QuizPurpose.TestOut, true -> "Right: you knew it."
-              | QuizPurpose.TestOut, false -> "Not quite. The lesson is next."
-              | QuizPurpose.Retry, true -> "Right. It's asked again in a few minutes, to make sure it sticks."
-              | _, true -> "Right."
-              | _, false when choice.IsNone -> "Fine: now you know. The right answer is in green."
-              | _, false -> "Not quite. The right answer is in green."
-          StackPanel.create [
-              StackPanel.spacing 4.0
-              StackPanel.children [
-                  label outcome 16.0 (if right then Palette.good else Palette.text)
-                  match concept with
-                  | Some c when c.Memory.Due > now && not (q.Purpose = QuizPurpose.Retry && right) ->
-                      label (sprintf "It comes back in %s." (Fsrs.formatInterval (c.Memory.Due - now))) 13.0 Palette.faint
-                  | _ -> ()
-              ]
-          ]
-          WrapPanel.create [
-              WrapPanel.children [
-                  if q.Purpose = QuizPurpose.TestOut && right then textLink "Read the lesson anyway" (fun () -> dispatch StudyRead) ("read", q.Question.Id)
-                  textLink "This question is wrong" (fun () -> dispatch StudyReport) ("report", q.Question.Id)
-              ]
-          ]
-          yield! tutorSection model s (not right) dispatch
-      | None -> () ]
-
-/// Explaining a part's ideas in one's own words, and the tutor's feedback.
-let private studyRecap (model: Model) (s: StudyState) (plan: Study.Plan) (part: int) (dispatch: Msg -> unit) : IView list =
-    let p = plan.Parts.[part]
-    let locked = s.Grading || s.Feedback.IsSome
-    [ TextBlock.create [
-          TextBlock.text (sprintf "EXPLAIN IT BACK · END OF PART %d" (part + 1))
-          TextBlock.fontSize 12.0
-          TextBlock.fontWeight FontWeight.Bold
-          TextBlock.foreground Palette.accent
-      ]
-      label p.Title 14.0 Palette.muted
-      richText p.Recap 20.0 Palette.text
-      if not locked then
-          label "From memory, in your own words: a few sentences is enough. Putting it together yourself is what makes it stick, so don't look back." 13.0 Palette.faint
-      TextBox.create [
-          TextBox.text s.RecapInput
-          TextBox.watermark "Your answer"
-          TextBox.fontSize 16.0
-          TextBox.minHeight 130.0
-          TextBox.acceptsReturn true
-          TextBox.textWrapping TextWrapping.Wrap
-          TextBox.cornerRadius 14.0
-          TextBox.padding (Thickness(14.0, 10.0))
-          TextBox.isReadOnly locked
-          TextBox.onTextChanged ((fun t -> if t <> s.RecapInput then dispatch (SetRecapInput t)), SubPatchOptions.OnChangeOf s.RecapInput)
-      ]
-      if not locked && (Services.get ()).Recorder.IsSome then
-          StackPanel.create [
-              StackPanel.orientation Orientation.Horizontal
-              StackPanel.spacing 10.0
-              StackPanel.children [
-                  Button.create [
-                      Button.width 44.0
-                      Button.height 44.0
-                      Button.cornerRadius 22.0
-                      Button.padding 0.0
-                      Button.background (if s.Mic = Mic.Recording then Palette.danger else Palette.surfaceHigh)
-                      Button.horizontalContentAlignment HorizontalAlignment.Center
-                      Button.verticalContentAlignment VerticalAlignment.Center
-                      Button.isEnabled (s.Mic <> Mic.Transcribing)
-                      Button.onClick ((fun _ -> dispatch StudyMic), SubPatchOptions.Never)
-                      Button.content (if s.Mic = Mic.Recording then icon Icons.stop Palette.onAccent 18.0 true else icon Icons.mic Palette.text 22.0 false)
-                  ]
-                  label
-                      (match s.Mic with
-                       | Mic.Recording -> "Listening… tap when you're done."
-                       | Mic.Transcribing -> "Writing down what you said…"
-                       | Mic.Idle -> "Or say it out loud")
-                      14.0 Palette.muted
-                  |> fun l -> Border.create [ Border.verticalAlignment VerticalAlignment.Center; Border.child l ]
-              ]
-          ]
-      match s.Feedback with
-      | Some f ->
-          match f.Verdict with
-          | Some Study.Verdict.GotIt -> label "You've got it" 18.0 Palette.good
-          | Some Study.Verdict.Partly -> label "Partly there" 18.0 Palette.accent
-          | Some Study.Verdict.NotYet -> label "Not yet" 18.0 Palette.danger
-          | None -> ()
-          richText f.Text 16.0 Palette.text
-          if not s.Grading && p.Points <> "" then
-              Border.create [
-                  Border.background Palette.surface
-                  Border.cornerRadius 16.0
-                  Border.padding (Thickness(16.0, 12.0, 16.0, 14.0))
-                  Border.child (StackPanel.create [ StackPanel.spacing 6.0; StackPanel.children [ sectionLabel "A GOOD ANSWER COVERS"; richText p.Points 15.0 Palette.muted ] ])
-              ]
-      | None when s.Grading -> spinnerLine "Reading your answer…"
-      | None -> () ]
-
-let private studyFinished (model: Model) (r: ReaderState) (s: StudyState) (plan: Study.Plan) : IView list =
-    let now = DateTime.UtcNow
-    let count (f: Study.Outcome -> bool) = s.Progress.Done |> Map.filter (fun _ o -> f o) |> Map.count
-    let learned = count (fun o -> o = Study.Outcome.Learned || o = Study.Outcome.TestedOut)
-    let known = count (fun o -> o = Study.Outcome.Known || o = Study.Outcome.Refreshed)
-    let next =
-        Knowledge.ofPaper r.Paper.Id (model.Concepts |> Map.toList |> List.map snd)
-        |> List.map (fun c -> c.Memory.Due)
-        |> List.filter (fun d -> d > now)
-        |> List.sort
-        |> List.tryHead
-    [ TextBlock.create [
-          TextBlock.text "You've been through the whole paper"
-          TextBlock.fontSize 26.0
-          TextBlock.fontWeight FontWeight.Bold
-          TextBlock.foreground Palette.text
-          TextBlock.textWrapping TextWrapping.Wrap
-      ]
-      label
-          ([ sprintf "%d idea%s learned" learned (if learned = 1 then "" else "s")
-             if known > 0 then sprintf "%d you knew already" known ]
-           |> String.concat " · ")
-          16.0 Palette.accent
-      label
-          ((match next with
-            | Some d -> sprintf "What you learned comes back for review just before you'd forget it, the first in %s. " (Fsrs.formatInterval (d - now))
-            | None -> "What you learned comes back for review just before you'd forget it. ")
-           + "A few minutes a day keeps it for months; each time with a different question.")
-          14.0 Palette.muted
-      if plan.Overview <> "" then
-          sectionLabel "THE PAPER IN SHORT"
-          richText plan.Overview 15.0 Palette.muted ]
-
-/// The study session over the reader.
-let private studyOverlay (model: Model) (r: ReaderState) (s: StudyState) (dispatch: Msg -> unit) : IView =
-    let plan = s.Plan
-    let ideas = plan |> Option.map (fun p -> p.Ideas) |> Option.defaultValue []
-    let position (id: string) = ideas |> List.tryFindIndex (fun i -> i.Id = id)
-    let partTitle (id: string) =
-        plan |> Option.bind (fun p -> p.PartOf id |> Option.map (fun i -> sprintf "Part %d · %s" (i + 1) p.Parts.[i].Title))
-    let title, subtitle =
-        match s.Screen with
-        | StudyScreen.Overview -> "Study", r.Script.Title
-        | StudyScreen.Teach id ->
-            defaultArg (partTitle id) "Study", (match position id with Some i -> sprintf "Idea %d of %d" (i + 1) ideas.Length | None -> "")
-        | StudyScreen.Quiz q ->
-            match q.Idea with
-            | Some id -> defaultArg (partTitle id) "Study", (match position id with Some i -> sprintf "Idea %d of %d" (i + 1) ideas.Length | None -> "")
-            | None -> "Quick review", r.Script.Title
-        | StudyScreen.Recap part ->
-            (match plan with Some p -> sprintf "Part %d · %s" (part + 1) p.Parts.[part].Title | None -> "Study"), "Explain it back"
-        | StudyScreen.Finished -> "Study", "Done"
-    let fraction = if ideas.IsEmpty then 0.0 else float (min ideas.Length s.Progress.Done.Count) / float ideas.Length
-    let body =
-        match s.Screen, plan with
-        | StudyScreen.Overview, _ -> studyOverview model r s dispatch
-        | StudyScreen.Teach id, Some p ->
-            match p.Idea id with
-            | Some idea -> studyTeach model r s idea dispatch
-            | None -> []
-        | StudyScreen.Quiz q, _ -> studyQuiz model r s q dispatch
-        | StudyScreen.Recap part, Some p -> studyRecap model s p part dispatch
-        | StudyScreen.Finished, Some p -> studyFinished model r s p
-        | _ -> []
-    let row (buttons: IView list) =
-        Grid.create [
-            Grid.columnDefinitions (String.Join(",", List.replicate buttons.Length "*"))
-            Grid.children buttons
-        ]
-        :> IView
-    let buttons: IView list =
-        match s.Screen with
-        | StudyScreen.Overview ->
-            match plan with
-            | None when s.Planning.IsNone -> [ wideButton 0 "Start studying" true (Settings.hasKey model.Settings) (fun () -> dispatch StudyStart) ]
-            | None -> []
-            | Some p ->
-                match fst (Study.next DateTime.UtcNow p s.Progress model.Concepts s.Last) with
-                | Study.Step.Finished -> [ wideButton 0 "Close" true true (fun () -> dispatch CloseStudy) ]
-                | _ -> [ wideButton 0 (if s.Progress.Done.IsEmpty then "Start" else "Continue") true true (fun () -> dispatch StudyStart) ]
-        | StudyScreen.Teach id ->
-            let ready = s.Lessons.TryFind id |> Option.exists (fun l -> not l.Checks.IsEmpty)
-            [ wideButton 0 "Check my understanding" true ready (fun () -> dispatch StudyCheck) ]
-        | StudyScreen.Quiz { Choice = None } -> []
-        | StudyScreen.Quiz q when q.Choice <> Some(Some q.Question.Correct) && q.Purpose <> QuizPurpose.QuickCheck && q.Purpose <> QuizPurpose.TestOut ->
-            [ wideButton 0 "Another question" false true (fun () -> dispatch StudyRetry); wideButton 1 "Continue" true true (fun () -> dispatch StudyContinue) ]
-        | StudyScreen.Quiz _ -> [ wideButton 0 "Continue" true true (fun () -> dispatch StudyContinue) ]
-        | StudyScreen.Recap _ when s.Feedback.IsSome && not s.Grading -> [ wideButton 0 "Continue" true true (fun () -> dispatch StudyContinue) ]
-        | StudyScreen.Recap _ ->
-            [ wideButton 0 "Skip" false (not s.Grading) (fun () -> dispatch SkipRecap)
-              wideButton 1 "Check my answer" true (not s.Grading && s.RecapInput.Trim() <> "") (fun () -> dispatch SubmitRecap) ]
-        | StudyScreen.Finished ->
-            let due = reviewQueue model (Some r.Paper.Id) DateTime.UtcNow |> List.length
-            [ if due > 0 then wideButton 0 "Review now" false true (fun () -> dispatch (StartReview(Some r.Paper.Id)))
-              wideButton (if due > 0 then 1 else 0) "Done" true true (fun () -> dispatch CloseStudy) ]
-    Border.create [
-        Border.background Palette.bg
-        Border.child (
-            DockPanel.create [
-                DockPanel.children [
-                    Grid.create [
-                        DockPanel.dock Dock.Top
-                        Grid.columnDefinitions "Auto,*,Auto"
-                        Grid.margin (Thickness(4.0, 6.0, 4.0, 0.0))
-                        Grid.children [
-                            Border.create [ Grid.column 0; Border.child (iconButton Icons.close 22.0 (fun () -> dispatch CloseStudy) "close-study") ]
-                            StackPanel.create [
-                                Grid.column 1
-                                StackPanel.verticalAlignment VerticalAlignment.Center
-                                StackPanel.spacing 2.0
-                                StackPanel.children [
-                                    TextBlock.create [
-                                        TextBlock.text title
-                                        TextBlock.fontSize 14.0
-                                        TextBlock.fontWeight FontWeight.SemiBold
-                                        TextBlock.foreground Palette.accent
-                                        TextBlock.textTrimming TextTrimming.CharacterEllipsis
-                                    ]
-                                    TextBlock.create [
-                                        TextBlock.text subtitle
-                                        TextBlock.fontSize 12.0
-                                        TextBlock.foreground Palette.muted
-                                        TextBlock.textTrimming TextTrimming.CharacterEllipsis
-                                    ]
-                                ]
-                            ]
-                            match s.Screen, plan with
-                            | StudyScreen.Overview, _
-                            | _, None -> ()
-                            | _ -> Border.create [ Grid.column 2; Border.child (iconButton Icons.list 22.0 (fun () -> dispatch StudyShowOverview) "study-overview") ]
-                        ]
-                    ]
-                    ProgressBar.create [
-                        DockPanel.dock Dock.Top
-                        ProgressBar.margin (Thickness(20.0, 6.0, 20.0, 4.0))
-                        ProgressBar.minimum 0.0
-                        ProgressBar.maximum 1.0
-                        ProgressBar.value fraction
-                        ProgressBar.height 4.0
-                        ProgressBar.minHeight 4.0
-                        ProgressBar.cornerRadius 2.0
-                        ProgressBar.foreground Palette.accent
-                        ProgressBar.background Palette.surfaceHigh
-                        ProgressBar.isVisible plan.IsSome
-                    ]
-                    if not buttons.IsEmpty || s.Error.IsSome then
-                        Border.create [
-                            DockPanel.dock Dock.Bottom
-                            Border.background Palette.surface
-                            Border.cornerRadius (24.0, 24.0, 0.0, 0.0)
-                            Border.padding (Thickness(13.0, 14.0, 13.0, 16.0))
-                            Border.child (
-                                StackPanel.create [
-                                    StackPanel.spacing 10.0
-                                    StackPanel.children [
-                                        match s.Error with
-                                        | Some e -> Border.create [ Border.margin (Thickness(4.0, 0.0)); Border.child (label e 14.0 Palette.danger) ]
-                                        | None -> ()
-                                        if not buttons.IsEmpty then row buttons
-                                    ]
-                                ]
-                            )
-                        ]
-                    // a new screen starts at the top
-                    View.withKey (sprintf "study-%s" (match s.Screen with
-                                                      | StudyScreen.Overview -> "overview"
-                                                      | StudyScreen.Teach i -> "teach-" + i
-                                                      | StudyScreen.Quiz q -> "quiz-" + q.Question.Id
-                                                      | StudyScreen.Recap p -> sprintf "recap-%d" p
-                                                      | StudyScreen.Finished -> "finished")) (
-                    ScrollViewer.create [
-                        ScrollViewer.content (
-                            StackPanel.create [
-                                StackPanel.margin (Thickness(22.0, 12.0, 22.0, 28.0))
-                                StackPanel.spacing 16.0
-                                StackPanel.children body
-                            ]
-                        )
-                    ])
-                ]
-            ]
-        )
-    ]
-
-// ---------------------------------------------------------------------------------------------
-// Walking mode: the simple player, big buttons and the equation large
-// ---------------------------------------------------------------------------------------------
-
-/// Display size of a crop pixel in walking mode: larger than the full player, glanced at from arm's length.
-let private walkMathScale = 1.3
-
-let private sectionName (r: ReaderState) (seg: Segment) =
-    if seg.Section < r.Script.Sections.Length && seg.Section > 0 then r.Script.Sections.[seg.Section].Title else "Beginning"
-
 /// A button big enough to hit while walking, icon above its word; smaller type on the lower buttons of short screens.
 let private walkButton (column: int) (height: float) (data: string) (text: string) (primary: bool) (key: obj) (onClick: unit -> unit) : IView =
     let fg = if primary then Palette.onAccent else Palette.text
@@ -3442,6 +2812,720 @@ let private walkButton (column: int) (height: float) (data: string) (text: strin
             ]
         )
     ]
+
+// ---------------------------------------------------------------------------------------------
+// Study: the paper read aloud, and a tutor between its sections who teaches and asks
+// ---------------------------------------------------------------------------------------------
+
+/// Where a plan's idea comes from, as a small heading.
+let private ideaSource (script: Script) (idea: Study.Idea) =
+    if idea.Background then "BACKGROUND · NOT EXPLAINED IN THE PAPER"
+    elif idea.Section > 0 && idea.Section < script.Sections.Length then "FROM THE PAPER · " + script.Sections.[idea.Section].Title.ToUpperInvariant()
+    else "FROM THE PAPER"
+
+/// How an idea of the plan stands: done, known, to be checked, or to learn.
+let private ideaStatus (model: Model) (s: StudyState) (idea: Study.Idea) : string * bool =
+    let now = DateTime.UtcNow
+    let concept = s.Progress.Links.TryFind idea.Id |> Option.bind model.Concepts.TryFind
+    let strength = concept |> Option.map (fun c -> sprintf " · %.0f%%" (100.0 * Knowledge.strength now c)) |> Option.defaultValue ""
+    match s.Progress.Done.TryFind idea.Id with
+    | Some Study.Outcome.Learned -> "learned" + strength, true
+    | Some Study.Outcome.TestedOut -> "knew it" + strength, true
+    | Some Study.Outcome.Refreshed -> "still known" + strength, true
+    | Some Study.Outcome.Known -> "you know it", true
+    | None when s.Progress.Teach.Contains idea.Id -> (if idea.Background then "background" else ""), false
+    | None ->
+        match concept with
+        | Some c when Knowledge.skippable now c -> "you know it", false
+        | Some c when c.Memory.Stage <> CardStage.New -> "quick check", false
+        | _ -> (if idea.Background then "background" else ""), false
+
+/// The tutor is speaking, asking or listening (rather than the paper being read).
+let private tutorTurn (s: StudyState) =
+    match s.Now with
+    | StudyNow.Listening _
+    | StudyNow.Starting -> false
+    | _ -> true
+
+/// The idea the session is on, or goes to next.
+let private nextIdea (model: Model) (r: ReaderState) (s: StudyState) =
+    match s.Now with
+    | StudyNow.Teach i -> Some i
+    | StudyNow.Quiz q -> q.Idea
+    | _ ->
+        match s.Plan with
+        | Some plan ->
+            match fst (Study.next DateTime.UtcNow r.Script plan s.Progress model.Concepts s.Last) with
+            | Study.Step.Teach i
+            | Study.Step.Check (i, _) -> Some i
+            | _ -> None
+        | None -> None
+
+let private ideaRow (model: Model) (s: StudyState) (idea: Study.Idea) (current: bool) (dispatch: Msg -> unit) : IView =
+    let status, isDone = ideaStatus model s idea
+    plainButton (if current then Palette.surfaceHigh else "Transparent") [
+        Button.horizontalAlignment HorizontalAlignment.Stretch
+        Button.horizontalContentAlignment HorizontalAlignment.Stretch
+        Button.padding (Thickness(10.0, 9.0, 12.0, 9.0))
+        Button.cornerRadius 12.0
+        Button.onClick ((fun _ -> dispatch (StudyTeach idea.Id)), SubPatchOptions.OnChangeOf idea.Id)
+        Button.content (
+            Grid.create [
+                Grid.columnDefinitions "Auto,*,Auto"
+                Grid.children [
+                    Border.create [
+                        Grid.column 0
+                        Border.width 22.0
+                        Border.margin (Thickness(0.0, 1.0, 10.0, 0.0))
+                        Border.verticalAlignment VerticalAlignment.Top
+                        Border.child (
+                            if isDone then icon Icons.check Palette.accent 18.0 false
+                            else
+                                Ellipse.create [
+                                    Ellipse.width 10.0
+                                    Ellipse.height 10.0
+                                    Ellipse.margin (Thickness(4.0, 5.0, 0.0, 0.0))
+                                    if current then Ellipse.fill Palette.accent
+                                    else
+                                        Ellipse.stroke Palette.faint
+                                        Ellipse.strokeThickness 1.5
+                                ]
+                        )
+                    ]
+                    Border.create [ Grid.column 1; Border.child (richParagraph idea.Name 15.0 (if isDone then Palette.muted else Palette.text)) ]
+                    TextBlock.create [
+                        Grid.column 2
+                        TextBlock.text status
+                        TextBlock.fontSize 12.0
+                        TextBlock.foreground Palette.faint
+                        TextBlock.margin (Thickness(10.0, 2.0, 0.0, 0.0))
+                        TextBlock.verticalAlignment VerticalAlignment.Top
+                    ]
+                ]
+            ]
+        )
+    ]
+
+/// A plan that failed, or a lesson that couldn't be written, with a way to try again.
+let private studyErrors (s: StudyState) (dispatch: Msg -> unit) : IView list =
+    [ match s.Error with
+      | Some e ->
+          label e 14.0 Palette.danger
+          if s.Plan.IsNone && s.Planning.IsNone then
+              StackPanel.create [ StackPanel.orientation Orientation.Horizontal; StackPanel.children [ pill "Try again" (fun () -> dispatch RetryPlan) false ] ]
+      | None -> ()
+      match s.Now with
+      | StudyNow.Teach i when s.Failed.ContainsKey i ->
+          label ("The lesson couldn't be written: " + s.Failed.[i]) 14.0 Palette.danger
+          StackPanel.create [ StackPanel.orientation Orientation.Horizontal; StackPanel.children [ pill "Try again" (fun () -> dispatch (StudyRetryLesson i)) false ] ]
+      | _ -> () ]
+
+/// The plan: what the paper is about, the ideas part by part and how each stands.
+let private studyPlanBody (model: Model) (r: ReaderState) (s: StudyState) (dispatch: Msg -> unit) : IView list =
+    match s.Plan, s.Planning with
+    | None, Some (step, names) ->
+        [ spinnerLine (step + "…")
+          label "The tutor reads the whole paper and breaks it into the ideas to learn, in the paper's order. The paper is read to you meanwhile." 13.0 Palette.faint
+          StackPanel.create [
+              StackPanel.spacing 6.0
+              StackPanel.children [ for i, n in List.indexed names -> richParagraph (sprintf "%d. %s" (i + 1) n) 15.0 Palette.text ]
+          ] ]
+    | None, None -> studyErrors s dispatch
+    | Some plan, _ ->
+        let now = DateTime.UtcNow
+        let current = nextIdea model r s
+        let known = plan.Ideas |> List.filter (fun i -> fst (ideaStatus model s i) |> fun t -> t = "you know it" || t.StartsWith "still known") |> List.length
+        let minutes = Study.minutesLeft now r.Script plan s.Progress model.Concepts
+        let uses =
+            plan.Ideas |> List.collect (fun i -> i.Uses) |> List.distinct |> List.choose model.Concepts.TryFind |> List.map (fun c -> c.Name)
+        [ if plan.Overview <> "" then richText plan.Overview 15.0 Palette.muted
+          label
+              ([ sprintf "%d ideas" plan.Ideas.Length
+                 if s.Progress.Done.Count > 0 then sprintf "%d done" (min plan.Ideas.Length s.Progress.Done.Count)
+                 if known > 0 then sprintf "%d you know already" known
+                 if minutes > 0 then sprintf "about %d min left" (max 5 (int (Math.Round(float minutes / 5.0)) * 5)) ]
+               |> String.concat " · ")
+              14.0 Palette.accent
+          if not uses.IsEmpty then label ("Builds on what you know: " + String.Join(", ", uses) + ". Not taught again.") 13.0 Palette.faint
+          for pi, part in List.indexed plan.Parts do
+              StackPanel.create [
+                  StackPanel.spacing 2.0
+                  StackPanel.children [
+                      sectionLabel (sprintf "PART %d · %s" (pi + 1) (part.Title.ToUpperInvariant()))
+                      for idea in part.Ideas do ideaRow model s idea (current = Some idea.Id) dispatch
+                      if part.Recap <> "" then
+                          Grid.create [
+                              Grid.columnDefinitions "Auto,*"
+                              Grid.margin (Thickness(10.0, 6.0, 12.0, 6.0))
+                              Grid.children [
+                                  Border.create [
+                                      Grid.column 0
+                                      Border.width 22.0
+                                      Border.margin (Thickness(0.0, 0.0, 10.0, 0.0))
+                                      Border.child (if s.Progress.Recaps.Contains pi then icon Icons.check Palette.accent 18.0 false else icon Icons.ask Palette.faint 16.0 false)
+                                  ]
+                                  TextBlock.create [
+                                      Grid.column 1
+                                      TextBlock.text "Explain it back, in your own words"
+                                      TextBlock.fontSize 14.0
+                                      TextBlock.fontStyle FontStyle.Italic
+                                      TextBlock.foreground Palette.faint
+                                      TextBlock.verticalAlignment VerticalAlignment.Center
+                                  ]
+                              ]
+                          ]
+                  ]
+              ]
+          label "Tap an idea to have it taught now, even one you know or have done." 12.0 Palette.faint ]
+
+/// The microphone while the learner is heard: listening (with how loud it is), or writing down what was said.
+let private earLine (s: StudyState) (hint: string) : IView list =
+    match s.Ear with
+    | Ear.Opening _
+    | Ear.Open _ ->
+        let level = match s.Ear with Ear.Open (_, l, _) -> l | _ -> 0.0
+        [ Grid.create [
+              Grid.columnDefinitions "Auto,*"
+              Grid.children [
+                  Border.create [
+                      Grid.column 0
+                      Border.width 40.0
+                      Border.height 40.0
+                      Border.cornerRadius 20.0
+                      Border.background Palette.danger
+                      Border.verticalAlignment VerticalAlignment.Center
+                      Border.child (Border.create [ Border.horizontalAlignment HorizontalAlignment.Center; Border.verticalAlignment VerticalAlignment.Center; Border.child (icon Icons.mic Palette.onAccent 22.0 false) ])
+                  ]
+                  StackPanel.create [
+                      Grid.column 1
+                      StackPanel.margin (Thickness(12.0, 0.0, 0.0, 0.0))
+                      StackPanel.spacing 6.0
+                      StackPanel.verticalAlignment VerticalAlignment.Center
+                      StackPanel.children [
+                          label ("Listening… " + hint) 16.0 Palette.text
+                          ProgressBar.create [
+                              ProgressBar.minimum 0.0
+                              ProgressBar.maximum 1.0
+                              ProgressBar.value (min 1.0 (level * 2.5))
+                              ProgressBar.height 4.0
+                              ProgressBar.minHeight 4.0
+                              ProgressBar.cornerRadius 2.0
+                              ProgressBar.foreground Palette.danger
+                              ProgressBar.background Palette.surfaceHigh
+                          ]
+                      ]
+                  ]
+              ]
+          ] ]
+    | Ear.Transcribing _ -> [ spinnerLine "Writing down what you said…" ]
+    | Ear.Off -> []
+
+/// The sentence the tutor is saying, or said last.
+let private saying (s: StudyState) =
+    match s.Voice with
+    | Some v when not v.Said.IsEmpty ->
+        let x = v.Said.[min v.At (v.Said.Length - 1)]
+        if x.Show <> "" then Some x.Show else None
+    | _ -> None
+
+/// A lesson being said: its visual large, and the sentence being said under it.
+let private tutorTeach (model: Model) (r: ReaderState) (s: StudyState) (idea: Study.Idea) (large: bool) (dispatch: Msg -> unit) : IView list =
+    let _, vh = viewport model
+    let lesson = s.Lessons.TryFind idea.Id
+    let isDone = s.Progress.Done.ContainsKey idea.Id
+    let uses = idea.Uses |> List.choose model.Concepts.TryFind |> List.map (fun c -> c.Name)
+    [ TextBlock.create [
+          TextBlock.text (ideaSource r.Script idea)
+          TextBlock.fontSize 12.0
+          TextBlock.fontWeight FontWeight.Bold
+          TextBlock.foreground Palette.accent
+          TextBlock.textTrimming TextTrimming.CharacterEllipsis
+      ]
+      richParagraph idea.Name (if large then 26.0 else 22.0) Palette.text |> fun v -> Border.create [ Border.child v; Border.margin (Thickness(0.0, -6.0, 0.0, 0.0)) ]
+      if not uses.IsEmpty then label ("Builds on what you know: " + String.Join(", ", uses)) 13.0 Palette.faint
+      match lesson with
+      | Some l ->
+          match l.Show with
+          | Some v -> visualThumb r v (if large then vh * 0.34 else vh * 0.28) dispatch
+          | None -> ()
+          match saying s, s.Voice with
+          | Some text, _ -> richText text (if large then 22.0 else 19.0) Palette.text
+          // its name, being said
+          | None, Some v when v.At = 0 && v.Playing -> ()
+          | None, _ -> richText l.Explanation 17.0 Palette.text
+      | None when s.Failed.ContainsKey idea.Id -> ()
+      | None when not (Settings.hasKey model.Settings) -> label "Writing this lesson needs a Mistral API key (Settings)." 15.0 Palette.muted
+      | None -> spinnerLine "The tutor is writing the lesson…"
+      WrapPanel.create [
+          WrapPanel.children [
+              match Study.segmentOf r.Script idea with
+              | Some seg -> textLink "Hear it in the paper" (fun () -> dispatch (JumpToSegment seg)) ("listen", idea.Id)
+              | None -> ()
+              if not isDone then textLink "I know this: ask me first" (fun () -> dispatch StudyTestOut) ("testout", idea.Id)
+          ]
+      ] ]
+
+/// A question: its options big enough to tap while walking; after the answer, why each is right or wrong.
+let private tutorQuiz (model: Model) (r: ReaderState) (s: StudyState) (q: Quiz) (dispatch: Msg -> unit) : IView list =
+    let now = DateTime.UtcNow
+    let idea = q.Idea |> Option.bind (fun i -> s.Plan |> Option.bind (fun p -> p.Idea i))
+    let concept = q.Concept |> Option.bind model.Concepts.TryFind
+    let name = idea |> Option.map (fun i -> i.Name) |> Option.orElse (concept |> Option.map (fun c -> c.Name)) |> Option.defaultValue ""
+    let right = q.Choice = Some(Some q.Question.Correct)
+    let heading =
+        match q.Purpose with
+        | QuizPurpose.Check -> "CHECK YOUR UNDERSTANDING"
+        | QuizPurpose.TestOut -> "DO YOU KNOW IT ALREADY?"
+        | QuizPurpose.QuickCheck -> "QUICK CHECK · YOU STUDIED THIS BEFORE"
+        | QuizPurpose.Again -> "AGAIN, A LITTLE LATER"
+    let numbers = q.Order |> List.mapi (fun i _ -> string (i + 1))
+    [ TextBlock.create [ TextBlock.text heading; TextBlock.fontSize 12.0; TextBlock.fontWeight FontWeight.Bold; TextBlock.foreground Palette.accent ]
+      richParagraph name 14.0 Palette.muted
+      match q.Question.Visual with
+      | Some v when q.Question.PaperId = r.Paper.Id -> visualThumb r v 200.0 dispatch
+      | Some v -> cardImage q.Question.PaperId v 200.0
+      | None -> ()
+      richText q.Question.Prompt 20.0 Palette.text
+      if q.Spoken && q.Choice.IsSome then
+          // in view without scrolling: what was heard, and the way back if it was wrong
+          let heard = s.Heard.Trim().TrimEnd(',', '.', ';', ':')
+          let heard = if heard.Length > 60 then heard.Substring(0, 57).TrimEnd() + "…" else heard
+          WrapPanel.create [
+              WrapPanel.children [
+                  if heard <> "" then
+                      TextBlock.create [
+                          TextBlock.text (sprintf "Heard “%s”" heard)
+                          TextBlock.fontSize 13.0
+                          TextBlock.foreground Palette.faint
+                          TextBlock.verticalAlignment VerticalAlignment.Center
+                          TextBlock.margin (Thickness(0.0, 0.0, 10.0, 0.0))
+                      ]
+                  textLink "Misheard? Answer again" (fun () -> dispatch StudyMisheard) ("misheard", q.Question.Id)
+              ]
+          ]
+      StackPanel.create [
+          StackPanel.spacing 8.0
+          StackPanel.children [
+              for pos, i in List.indexed q.Order do
+                  choiceOption q.Question i pos q.Choice (fun () -> dispatch (StudyChoose(Some i)))
+              if q.Choice.IsNone then dontKnow (fun () -> dispatch (StudyChoose None))
+          ]
+      ]
+      yield! earLine s (sprintf "say option %s or %s" (String.Join(", ", numbers |> List.take (max 0 (numbers.Length - 1)))) (List.last numbers))
+      if q.Choice.IsNone && s.Heard <> "" && s.Ear = Ear.Off then label (sprintf "Heard: “%s”" s.Heard) 13.0 Palette.faint
+      if q.Choice.IsNone && s.Ear = Ear.Off && s.Voice |> Option.forall (fun v -> v.At >= v.Said.Length) then label "Tap your answer." 15.0 Palette.muted
+      match q.Choice with
+      | Some choice ->
+          let outcome =
+              match q.Purpose, right with
+              | QuizPurpose.QuickCheck, true -> "Right: you still know it, so it's skipped here."
+              | QuizPurpose.QuickCheck, false -> "It has faded, so the tutor goes through it again."
+              | QuizPurpose.TestOut, true -> "Right: you knew it."
+              | QuizPurpose.TestOut, false -> "Not quite. The lesson is next."
+              | _, true -> "Right."
+              | _, false when choice.IsNone -> "Fine: now you know. The right answer is in green."
+              | _, false -> "Not quite. The right answer is in green."
+          StackPanel.create [
+              StackPanel.spacing 4.0
+              StackPanel.children [
+                  label outcome 16.0 (if right then Palette.good else Palette.text)
+                  match concept with
+                  | Some c when c.Memory.Due > now -> label (sprintf "It comes back in %s." (Fsrs.formatInterval (c.Memory.Due - now))) 13.0 Palette.faint
+                  | _ -> ()
+              ]
+          ]
+          WrapPanel.create [ WrapPanel.children [ textLink "This question is wrong" (fun () -> dispatch StudyReport) ("report", q.Question.Id) ] ]
+      | None -> () ]
+
+/// Explaining a part's ideas in one's own words (aloud, or typed), and the tutor's feedback.
+let private tutorRecap (model: Model) (s: StudyState) (plan: Study.Plan) (part: int) (dispatch: Msg -> unit) : IView list =
+    let p = plan.Parts.[part]
+    let locked = s.Grading || s.Feedback.IsSome || s.Ear <> Ear.Off
+    [ TextBlock.create [
+          TextBlock.text (sprintf "EXPLAIN IT BACK · END OF PART %d" (part + 1))
+          TextBlock.fontSize 12.0
+          TextBlock.fontWeight FontWeight.Bold
+          TextBlock.foreground Palette.accent
+      ]
+      label p.Title 14.0 Palette.muted
+      richText p.Recap 20.0 Palette.text
+      yield! earLine s "take your time"
+      if s.Ear = Ear.Off && s.Feedback.IsNone && not s.Grading then
+          label "From memory, in your own words: a few sentences is enough. Say it after the chime, or type it." 13.0 Palette.faint
+      if s.RecapInput <> "" || (s.Ear = Ear.Off && s.Feedback.IsNone && not s.Grading) then
+          TextBox.create [
+              TextBox.text s.RecapInput
+              TextBox.watermark "Your answer"
+              TextBox.fontSize 16.0
+              TextBox.minHeight 100.0
+              TextBox.acceptsReturn true
+              TextBox.textWrapping TextWrapping.Wrap
+              TextBox.cornerRadius 14.0
+              TextBox.padding (Thickness(14.0, 10.0))
+              TextBox.isReadOnly locked
+              TextBox.onTextChanged ((fun t -> if t <> s.RecapInput then dispatch (SetRecapInput t)), SubPatchOptions.OnChangeOf s.RecapInput)
+          ]
+      if not locked && s.RecapInput.Trim() <> "" then
+          StackPanel.create [ StackPanel.orientation Orientation.Horizontal; StackPanel.children [ pill "Check my answer" (fun () -> dispatch SubmitRecap) true ] ]
+      match s.Feedback with
+      | Some f ->
+          match f.Verdict with
+          | Some Study.Verdict.GotIt -> label "You've got it" 18.0 Palette.good
+          | Some Study.Verdict.Partly -> label "Partly there" 18.0 Palette.accent
+          | Some Study.Verdict.NotYet -> label "Not yet" 18.0 Palette.danger
+          | None -> ()
+          richText f.Text 16.0 Palette.text
+          if not s.Grading && p.Points <> "" then
+              Border.create [
+                  Border.background Palette.surface
+                  Border.cornerRadius 16.0
+                  Border.padding (Thickness(16.0, 12.0, 16.0, 14.0))
+                  Border.child (StackPanel.create [ StackPanel.spacing 6.0; StackPanel.children [ sectionLabel "A GOOD ANSWER COVERS"; richText p.Points 15.0 Palette.muted ] ])
+              ]
+      | None when s.Grading -> spinnerLine "Reading your answer…"
+      | None -> () ]
+
+let private tutorFinished (model: Model) (r: ReaderState) (s: StudyState) (plan: Study.Plan) (dispatch: Msg -> unit) : IView list =
+    let now = DateTime.UtcNow
+    let count (f: Study.Outcome -> bool) = s.Progress.Done |> Map.filter (fun _ o -> f o) |> Map.count
+    let learned = count (fun o -> o = Study.Outcome.Learned || o = Study.Outcome.TestedOut)
+    let known = count (fun o -> o = Study.Outcome.Known || o = Study.Outcome.Refreshed)
+    let next =
+        Knowledge.ofPaper r.Paper.Id (model.Concepts |> Map.toList |> List.map snd)
+        |> List.map (fun c -> c.Memory.Due)
+        |> List.filter (fun d -> d > now)
+        |> List.sort
+        |> List.tryHead
+    let due = reviewQueue model (Some r.Paper.Id) now |> List.length
+    [ TextBlock.create [
+          TextBlock.text "You've been through the whole paper"
+          TextBlock.fontSize 26.0
+          TextBlock.fontWeight FontWeight.Bold
+          TextBlock.foreground Palette.text
+          TextBlock.textWrapping TextWrapping.Wrap
+      ]
+      label
+          ([ sprintf "%d idea%s learned" learned (if learned = 1 then "" else "s")
+             if known > 0 then sprintf "%d you knew already" known ]
+           |> String.concat " · ")
+          16.0 Palette.accent
+      label
+          ((match next with
+            | Some d -> sprintf "What you learned comes back for review just before you'd forget it, the first in %s. " (Fsrs.formatInterval (d - now))
+            | None -> "What you learned comes back for review just before you'd forget it. ")
+           + "A few minutes a day keeps it for months; each time with a different question.")
+          14.0 Palette.muted
+      if due > 0 then StackPanel.create [ StackPanel.orientation Orientation.Horizontal; StackPanel.children [ pill (sprintf "Review %d now" due) (fun () -> dispatch (StartReview(Some r.Paper.Id))) true ] ]
+      if plan.Overview <> "" then
+          sectionLabel "THE PAPER IN SHORT"
+          richText plan.Overview 15.0 Palette.muted ]
+
+/// Where the session is: the part and idea, and roughly how long is left.
+let private studyWhere (model: Model) (r: ReaderState) (s: StudyState) : string * string =
+    match s.Plan with
+    | None -> "Study", (if s.Planning.IsSome then "The tutor is planning…" else r.Script.Title)
+    | Some plan ->
+        let ideas = plan.Ideas
+        let position (id: string) = ideas |> List.tryFindIndex (fun i -> i.Id = id)
+        let partOf (id: string) = plan.PartOf id |> Option.map (fun i -> sprintf "Part %d · %s" (i + 1) plan.Parts.[i].Title)
+        let minutes = Study.minutesLeft DateTime.UtcNow r.Script plan s.Progress model.Concepts
+        let left = if minutes > 0 then sprintf " · about %d min left" (max 1 minutes) else ""
+        match s.Now with
+        | StudyNow.Teach id ->
+            defaultArg (partOf id) "Study", (match position id with Some i -> sprintf "Idea %d of %d%s" (i + 1) ideas.Length left | None -> left.TrimStart(' ', '·'))
+        | StudyNow.Quiz q ->
+            match q.Idea with
+            | Some id -> defaultArg (partOf id) "Study", (match position id with Some i -> sprintf "Idea %d of %d · a question" (i + 1) ideas.Length | None -> "A question")
+            | None -> "Study", "A question from earlier"
+        | StudyNow.Recap part -> sprintf "Part %d · %s" (part + 1) plan.Parts.[part].Title, "Explain it back"
+        | StudyNow.Finished -> "Study", "Finished"
+        | _ -> "Study", sprintf "%d of %d ideas done%s" (min ideas.Length s.Progress.Done.Count) ideas.Length left
+
+/// The tutor's turn, in the player's stage.
+let private tutorStage (model: Model) (r: ReaderState) (s: StudyState) (large: bool) (dispatch: Msg -> unit) : IView =
+    let body =
+        match s.Now, s.Plan with
+        | StudyNow.Teach id, Some plan ->
+            match plan.Idea id with
+            | Some idea -> tutorTeach model r s idea large dispatch
+            | None -> []
+        | StudyNow.Quiz q, _ -> tutorQuiz model r s q dispatch
+        | StudyNow.Recap part, Some plan -> tutorRecap model s plan part dispatch
+        | StudyNow.Finished, Some plan -> tutorFinished model r s plan dispatch
+        | _ -> []
+    ScrollViewer.create [
+        ScrollViewer.content (
+            StackPanel.create [
+                StackPanel.margin (Thickness(18.0, 8.0, 18.0, 18.0))
+                StackPanel.spacing 14.0
+                StackPanel.children (body @ studyErrors s dispatch)
+            ]
+        )
+    ]
+
+/// While the paper is read in a session: what the tutor does after this stretch (tap for the plan).
+let private studyStrip (model: Model) (r: ReaderState) (s: StudyState) (dispatch: Msg -> unit) : IView =
+    let text =
+        match s.Now, s.Plan with
+        | StudyNow.Starting, _ when s.Planning.IsSome -> "The tutor is reading the paper to plan your study…"
+        | StudyNow.Starting, _ -> "Studying"
+        | StudyNow.Listening last, Some plan ->
+            match Study.stops r.Script plan |> List.tryFind (fun st -> st.Last = last) with
+            | Some st when not st.After.IsEmpty ->
+                let names = st.After |> List.filter (fun i -> not (s.Progress.Done.ContainsKey i.Id)) |> List.map (fun i -> i.Name)
+                if names.IsEmpty then "Studying · listen on" else "After this part, the tutor: " + String.Join(" · ", names)
+            | _ -> "Studying · listen on"
+        | _ -> "Studying"
+    Border.create [
+        Border.margin (Thickness(16.0, 2.0, 16.0, 6.0))
+        Border.padding (Thickness(14.0, 10.0))
+        Border.cornerRadius 14.0
+        Border.background Palette.note
+        Border.onTapped ((fun _ -> dispatch ToggleStudyPlan), SubPatchOptions.Never)
+        Border.child (
+            StackPanel.create [
+                StackPanel.spacing 6.0
+                StackPanel.children [
+                    Grid.create [
+                        Grid.columnDefinitions "Auto,*"
+                        Grid.children [
+                            Border.create [ Grid.column 0; Border.verticalAlignment VerticalAlignment.Top; Border.child (icon Icons.study Palette.accent 20.0 false) ]
+                            TextBlock.create [
+                                Grid.column 1
+                                TextBlock.margin (Thickness(10.0, 0.0, 0.0, 0.0))
+                                TextBlock.text text
+                                TextBlock.fontSize 14.0
+                                TextBlock.foreground Palette.text
+                                TextBlock.textWrapping TextWrapping.Wrap
+                                TextBlock.maxLines 3
+                                TextBlock.textTrimming TextTrimming.CharacterEllipsis
+                            ]
+                        ]
+                    ]
+                    yield! studyErrors s dispatch
+                ]
+            ]
+        )
+    ]
+
+/// The session is going on by itself (the tutor speaking or listening, or the paper being read).
+let private studyGoing (r: ReaderState) (s: StudyState) =
+    if tutorTurn s then s.Running && (s.Voice |> Option.exists (fun v -> v.Playing) || s.Ear <> Ear.Off) else r.Playing
+
+/// The tutor's buttons: say it again, ask, skip, and pause or go on.
+let private tutorButtons (s: StudyState) (going: bool) (small: float) (big: float) (dispatch: Msg -> unit) : IView =
+    let skip =
+        match s.Now with
+        | StudyNow.Teach _ -> "Skip"
+        | StudyNow.Quiz { Choice = None } -> "Don't know"
+        | StudyNow.Quiz _ -> "Next"
+        | StudyNow.Recap _ -> "Skip"
+        | _ -> "Skip"
+    StackPanel.create [
+        StackPanel.spacing 12.0
+        StackPanel.children [
+            Grid.create [
+                Grid.columnDefinitions "*,*,*"
+                Grid.children [
+                    walkButton 0 small Icons.back "Again" false (box "study-again") (fun () -> dispatch StudyAgain)
+                    walkButton 1 small Icons.ask "Ask" false (box "study-ask") (fun () -> dispatch ToggleTutor)
+                    walkButton 2 small Icons.forward skip false (box ("study-skip", skip)) (fun () -> dispatch StudySkip)
+                ]
+            ]
+            Grid.create [
+                Grid.children [
+                    walkButton 0 big (if going then Icons.pause else Icons.play) (if going then "Pause" else "Continue") true (box "study-play") (fun () -> dispatch TogglePlay)
+                ]
+            ]
+        ]
+    ]
+
+/// The full player's controls in the tutor's turn.
+let private tutorControls (model: Model) (r: ReaderState) (s: StudyState) (dispatch: Msg -> unit) : IView =
+    let title, subtitle = studyWhere model r s
+    Border.create [
+        Border.background Palette.surface
+        Border.cornerRadius (24.0, 24.0, 0.0, 0.0)
+        Border.padding (Thickness(12.0, 12.0, 12.0, 16.0))
+        Border.child (
+            StackPanel.create [
+                StackPanel.spacing 10.0
+                StackPanel.children [
+                    Grid.create [
+                        Grid.columnDefinitions "*,Auto"
+                        Grid.margin (Thickness(6.0, 0.0))
+                        Grid.children [
+                            TextBlock.create [
+                                Grid.column 0
+                                TextBlock.text title
+                                TextBlock.fontSize 13.0
+                                TextBlock.fontWeight FontWeight.SemiBold
+                                TextBlock.foreground Palette.accent
+                                TextBlock.textTrimming TextTrimming.CharacterEllipsis
+                            ]
+                            TextBlock.create [
+                                Grid.column 1
+                                TextBlock.text subtitle
+                                TextBlock.fontSize 12.0
+                                TextBlock.foreground Palette.muted
+                                TextBlock.margin (Thickness(10.0, 0.0, 0.0, 0.0))
+                            ]
+                        ]
+                    ]
+                    tutorButtons s (studyGoing r s) 64.0 76.0 dispatch
+                ]
+            ]
+        )
+    ]
+
+/// A sheet over the reader with a title, a close button and a scrolling body.
+let private studySheet (title: string) (subtitle: string) (close: unit -> unit) (closeKey: string) (body: IView list) (footer: IView option) : IView =
+    Border.create [
+        Border.background Palette.bg
+        Border.child (
+            DockPanel.create [
+                DockPanel.children [
+                    Grid.create [
+                        DockPanel.dock Dock.Top
+                        Grid.columnDefinitions "*,Auto"
+                        Grid.margin (Thickness(20.0, 12.0, 8.0, 8.0))
+                        Grid.children [
+                            StackPanel.create [
+                                Grid.column 0
+                                StackPanel.spacing 2.0
+                                StackPanel.children [
+                                    TextBlock.create [
+                                        TextBlock.text title
+                                        TextBlock.fontSize 22.0
+                                        TextBlock.fontWeight FontWeight.Bold
+                                        TextBlock.foreground Palette.text
+                                        TextBlock.textWrapping TextWrapping.Wrap
+                                    ]
+                                    if subtitle <> "" then label subtitle 13.0 Palette.muted
+                                ]
+                            ]
+                            Border.create [ Grid.column 1; Border.child (iconButton Icons.close 22.0 close closeKey) ]
+                        ]
+                    ]
+                    match footer with
+                    | Some f -> Border.create [ DockPanel.dock Dock.Bottom; Border.padding (Thickness(16.0, 8.0, 16.0, 16.0)); Border.child f ]
+                    | None -> ()
+                    ScrollViewer.create [
+                        ScrollViewer.content (
+                            StackPanel.create [
+                                StackPanel.margin (Thickness(20.0, 0.0, 20.0, 24.0))
+                                StackPanel.spacing 14.0
+                                StackPanel.children body
+                            ]
+                        )
+                    ]
+                ]
+            ]
+        )
+    ]
+
+/// The plan, over the reader.
+let private studyPlanOverlay (model: Model) (r: ReaderState) (s: StudyState) (dispatch: Msg -> unit) : IView =
+    studySheet "Study plan" r.Script.Title (fun () -> dispatch ToggleStudyPlan) "close-plan" (studyPlanBody model r s dispatch)
+        (Some(wideButton 0 "Turn the tutor off: just listen" false true (fun () -> dispatch CloseStudy)))
+
+/// The conversation with the tutor about the idea on screen, over the reader.
+let private tutorOverlay (model: Model) (r: ReaderState) (s: StudyState) (dispatch: Msg -> unit) : IView =
+    let hasKey = Settings.hasKey model.Settings
+    let hearing = match s.Ear with Ear.Off -> false | _ -> true
+    let busy = s.Pending.IsSome || hearing
+    let answeredWrong = match s.Now with StudyNow.Quiz q -> q.Choice.IsSome && q.Choice <> Some(Some q.Question.Correct) | _ -> false
+    let taps = if s.Chat.IsEmpty || s.Followups.IsEmpty then Study.tutorTaps answeredWrong else s.Followups
+    let about =
+        match s.Now, s.Plan with
+        | StudyNow.Teach i, Some plan -> plan.Idea i |> Option.map (fun i -> i.Name) |> Option.defaultValue ""
+        | StudyNow.Quiz q, _ -> q.Idea |> Option.bind (fun i -> s.Plan |> Option.bind (fun p -> p.Idea i)) |> Option.map (fun i -> i.Name) |> Option.defaultValue ""
+        | _ -> ""
+    /// Always in view under the conversation, like a chat's input.
+    let input: IView =
+        Grid.create [
+            Grid.columnDefinitions "*,Auto,Auto"
+            Grid.children [
+                TextBox.create [
+                    Grid.column 0
+                    TextBox.text s.Input
+                    TextBox.watermark "Ask anything about it"
+                    TextBox.fontSize 15.0
+                    TextBox.cornerRadius 20.0
+                    TextBox.padding (Thickness(14.0, 9.0))
+                    TextBox.verticalContentAlignment VerticalAlignment.Center
+                    TextBox.onTextChanged ((fun t -> if t <> s.Input then dispatch (SetStudyInput t)), SubPatchOptions.OnChangeOf s.Input)
+                    TextBox.onKeyDown ((fun e -> if e.Key = Input.Key.Enter then e.Handled <- true; dispatch SendStudyInput), SubPatchOptions.Never)
+                ]
+                if s.Input.Trim() <> "" then
+                    Button.create [
+                        Grid.column 1
+                        Button.width 44.0
+                        Button.height 44.0
+                        Button.margin (Thickness(8.0, 0.0, 0.0, 0.0))
+                        Button.cornerRadius 22.0
+                        Button.padding 0.0
+                        Button.background Palette.accent
+                        Button.horizontalContentAlignment HorizontalAlignment.Center
+                        Button.verticalContentAlignment VerticalAlignment.Center
+                        Button.isEnabled (not busy)
+                        Button.onClick ((fun _ -> dispatch SendStudyInput), SubPatchOptions.Never)
+                        Button.content (icon Icons.send Palette.onAccent 20.0 false)
+                    ]
+                if (Services.get ()).Recorder.IsSome then
+                    Button.create [
+                        Grid.column 2
+                        Button.width 44.0
+                        Button.height 44.0
+                        Button.margin (Thickness(8.0, 0.0, 0.0, 0.0))
+                        Button.cornerRadius 22.0
+                        Button.padding 0.0
+                        Button.background Palette.surfaceHigh
+                        Button.horizontalContentAlignment HorizontalAlignment.Center
+                        Button.verticalContentAlignment VerticalAlignment.Center
+                        Button.isEnabled (s.Pending.IsNone)
+                        Button.onClick ((fun _ -> dispatch (StudyListen Hearing.Question)), SubPatchOptions.Never)
+                        Button.content (icon Icons.mic Palette.text 22.0 false)
+                    ]
+            ]
+        ]
+    let body: IView list =
+        [ for t in s.Chat do
+              StackPanel.create [
+                  StackPanel.spacing 8.0
+                  StackPanel.children [ label t.Question 15.0 Palette.accent; richText t.Answer 17.0 Palette.text ]
+              ]
+          match s.Pending with
+          | Some (_, q, partial) ->
+              StackPanel.create [
+                  StackPanel.spacing 8.0
+                  StackPanel.children [ label q 15.0 Palette.accent; (if partial = "" then spinnerLine "Thinking…" else richText partial 17.0 Palette.text) ]
+              ]
+          | None -> ()
+          yield! earLine s "ask your question"
+          if s.Chat.IsEmpty && s.Pending.IsNone && not hearing then label "Ask out loud or type, or tap a question." 14.0 Palette.faint
+          if hasKey && not busy then
+              WrapPanel.create [ WrapPanel.children [ for t in taps -> chip (t.Replace("$", "")) (fun () -> dispatch (StudyAsk(t, true))) ] ]
+          yield! studyErrors s dispatch ]
+    let footer: IView =
+        StackPanel.create [
+            StackPanel.spacing 12.0
+            StackPanel.children [
+                if hasKey && not hearing then input
+                wideButton 0 "Continue" true true (fun () -> dispatch ToggleTutor)
+            ]
+        ]
+    studySheet "Ask the tutor" about (fun () -> dispatch ToggleTutor) "close-tutor" body (Some footer)
+
+// ---------------------------------------------------------------------------------------------
+// Walking mode: the simple player, big buttons and the equation large
+// ---------------------------------------------------------------------------------------------
+
+/// Display size of a crop pixel in walking mode: larger than the full player, glanced at from arm's length.
+let private walkMathScale = 1.3
+
+let private sectionName (r: ReaderState) (seg: Segment) =
+    if seg.Section < r.Script.Sections.Length && seg.Section > 0 then r.Script.Sections.[seg.Section].Title else "Beginning"
 
 /// A switch in the app's colours, for a row that toggles as a whole (a bigger target than a switch).
 let private switchMark (on: bool) : IView =
@@ -3685,7 +3769,7 @@ let private walkingOverlay (model: Model) (r: ReaderState) (dispatch: Msg -> uni
             StackPanel.spacing 2.0
             StackPanel.children [
                 TextBlock.create [
-                    TextBlock.text (sectionName r seg)
+                    TextBlock.text (match r.Study with Some s when tutorTurn s -> fst (studyWhere model r s) | _ -> sectionName r seg)
                     TextBlock.fontSize 16.0
                     TextBlock.fontWeight FontWeight.SemiBold
                     TextBlock.foreground Palette.accent
@@ -3695,8 +3779,10 @@ let private walkingOverlay (model: Model) (r: ReaderState) (dispatch: Msg -> uni
                 ]
                 TextBlock.create [
                     TextBlock.text (
-                        if r.Finished then "Finished"
-                        else sprintf "%s %d of %d · %s" (capitalize (Formats.pageNoun r.Paper.Format)) (seg.Page + 1) r.Script.PageCount (formatMinutes (remainingMs r model.Settings.Speed)))
+                        match r.Study with
+                        | Some s when tutorTurn s -> snd (studyWhere model r s)
+                        | _ when r.Finished -> "Finished"
+                        | _ -> sprintf "%s %d of %d · %s" (capitalize (Formats.pageNoun r.Paper.Format)) (seg.Page + 1) r.Script.PageCount (formatMinutes (remainingMs r model.Settings.Speed)))
                     TextBlock.fontSize 13.0
                     TextBlock.foreground Palette.muted
                     TextBlock.textTrimming TextTrimming.CharacterEllipsis
@@ -3706,7 +3792,23 @@ let private walkingOverlay (model: Model) (r: ReaderState) (dispatch: Msg -> uni
     // a playback error or "preparing the voice": over the progress bar, or on its side under the equation, where the
     // narrow column of buttons has no room for it
     let status = playerStatus model r dispatch
+    // in a study session: the tutor's stage and buttons in its turn; the plan's strip over the paper otherwise
+    let stageView =
+        match r.Study with
+        | Some s when tutorTurn s -> tutorStage model r s true dispatch
+        | Some s ->
+            DockPanel.create [
+                DockPanel.children [
+                    Border.create [ DockPanel.dock Dock.Top; Border.margin (Thickness(-16.0, 0.0, -16.0, 0.0)); Border.child (studyStrip model r s dispatch) ]
+                    walkingStage model r seg dispatch
+                ]
+            ]
+            :> IView
+        | None -> walkingStage model r seg dispatch
     let buttons =
+        match r.Study with
+        | Some s when tutorTurn s -> tutorButtons s (studyGoing r s) small big dispatch
+        | _ ->
         StackPanel.create [
             StackPanel.spacing 12.0
             StackPanel.children [
@@ -3762,7 +3864,7 @@ let private walkingOverlay (model: Model) (r: ReaderState) (dispatch: Msg -> uni
                             DockPanel.children [
                                 if not status.IsEmpty then
                                     StackPanel.create [ DockPanel.dock Dock.Bottom; StackPanel.margin (Thickness(6.0, 8.0, 0.0, 4.0)); StackPanel.children status ]
-                                walkingStage model r seg dispatch
+                                stageView
                             ]
                         ]
                         DockPanel.create [
@@ -3793,7 +3895,7 @@ let private walkingOverlay (model: Model) (r: ReaderState) (dispatch: Msg -> uni
                             Grid.children [ exit; where; speed ]
                         ]
                         Border.create [ DockPanel.dock Dock.Bottom; Border.child buttons ]
-                        Border.create [ Border.margin (Thickness(5.0, 0.0)); Border.child (walkingStage model r seg dispatch) ]
+                        Border.create [ Border.margin (Thickness(5.0, 0.0)); Border.child stageView ]
                     ]
                 ]
                 :> IView
@@ -3813,7 +3915,7 @@ let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) :
             StackPanel.spacing 2.0
             StackPanel.children [
                 TextBlock.create [
-                    TextBlock.text (sectionName r seg)
+                    TextBlock.text (match r.Study with Some s when tutorTurn s -> "Tutor" | _ -> sectionName r seg)
                     TextBlock.fontSize (if titleRow then 16.0 else 14.0)
                     TextBlock.fontWeight FontWeight.SemiBold
                     TextBlock.foreground Palette.accent
@@ -3835,7 +3937,7 @@ let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) :
                         DockPanel.dock Dock.Top
                         StackPanel.children [
                             Grid.create [
-                                Grid.columnDefinitions "Auto,*,Auto,Auto,Auto,Auto,Auto"
+                                Grid.columnDefinitions "Auto,*,Auto,Auto,Auto,Auto,Auto,Auto"
                                 Grid.margin (Thickness(4.0, 6.0, 4.0, 2.0))
                                 Grid.children [
                                     Border.create [ Grid.column 0; Border.child (iconButton Icons.chevronLeft 24.0 (fun () -> dispatch CloseReader) "close-reader") ]
@@ -3867,53 +3969,38 @@ let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) :
                                             ]
                                         )
                                     ]
-                                    Border.create [ Grid.column 3; Border.child (iconButton Icons.walk 22.0 (fun () -> dispatch (SetWalking true)) "walking") ]
-                                    Border.create [ Grid.column 4; Border.child (iconButton Icons.cards 22.0 (fun () -> dispatch (OpenCards None)) "cards") ]
-                                    Border.create [ Grid.column 5; Border.child (iconButton Icons.sigma 22.0 (fun () -> dispatch ToggleEquations) "equations") ]
-                                    Border.create [ Grid.column 6; Border.child (iconButton Icons.sliders 22.0 (fun () -> dispatch (SetShowSettings true)) "reader-settings") ]
+                                    // the tutor on (lit) or off
+                                    Border.create [
+                                        Grid.column 3
+                                        Border.cornerRadius 22.0
+                                        Border.background (if r.Study.IsSome then Palette.note else "Transparent")
+                                        Border.child (iconButton Icons.study 22.0 (fun () -> dispatch (if r.Study.IsSome then ToggleStudyPlan else OpenStudy)) "study")
+                                    ]
+                                    Border.create [ Grid.column 4; Border.child (iconButton Icons.walk 22.0 (fun () -> dispatch (SetWalking true)) "walking") ]
+                                    Border.create [ Grid.column 5; Border.child (iconButton Icons.cards 22.0 (fun () -> dispatch (OpenCards None)) "cards") ]
+                                    Border.create [ Grid.column 6; Border.child (iconButton Icons.sigma 22.0 (fun () -> dispatch ToggleEquations) "equations") ]
+                                    Border.create [ Grid.column 7; Border.child (iconButton Icons.sliders 22.0 (fun () -> dispatch (SetShowSettings true)) "reader-settings") ]
                                 ]
                             ]
                             if titleRow then title
                         ]
                     ]
-                    Border.create [ DockPanel.dock Dock.Bottom; Border.child (controls model r dispatch) ]
-                    stage r seg dispatch
+                    match r.Study with
+                    | Some s when tutorTurn s ->
+                        Border.create [ DockPanel.dock Dock.Bottom; Border.child (tutorControls model r s dispatch) ]
+                        tutorStage model r s false dispatch
+                    | Some s ->
+                        Border.create [ DockPanel.dock Dock.Top; Border.child (studyStrip model r s dispatch) ]
+                        Border.create [ DockPanel.dock Dock.Bottom; Border.child (controls model r dispatch) ]
+                        stage r seg dispatch
+                    | None ->
+                        Border.create [ DockPanel.dock Dock.Bottom; Border.child (controls model r dispatch) ]
+                        stage r seg dispatch
                 ]
             ]
             if model.Settings.WalkingMode then walkingOverlay model r dispatch
             if r.ShowOutline then outlineOverlay r dispatch
             if r.ShowEquations then equationsOverlay r dispatch
-            match r.Study with
-            | Some s when s.Hidden ->
-                // listening from the study session: one tap goes back to it
-                Button.create [
-                    Button.horizontalAlignment HorizontalAlignment.Center
-                    Button.verticalAlignment VerticalAlignment.Top
-                    Button.margin (Thickness(0.0, 64.0, 0.0, 0.0))
-                    Button.height 44.0
-                    Button.cornerRadius 22.0
-                    Button.padding (Thickness(16.0, 0.0, 20.0, 0.0))
-                    Button.background Palette.accent
-                    Button.verticalContentAlignment VerticalAlignment.Center
-                    Button.onClick ((fun _ -> dispatch StudyBack), SubPatchOptions.Never)
-                    Button.content (
-                        StackPanel.create [
-                            StackPanel.orientation Orientation.Horizontal
-                            StackPanel.spacing 8.0
-                            StackPanel.children [
-                                icon Icons.study Palette.onAccent 20.0 false
-                                TextBlock.create [
-                                    TextBlock.text "Back to studying"
-                                    TextBlock.fontSize 15.0
-                                    TextBlock.fontWeight FontWeight.SemiBold
-                                    TextBlock.foreground Palette.onAccent
-                                    TextBlock.verticalAlignment VerticalAlignment.Center
-                                ]
-                            ]
-                        ]
-                    )
-                ]
-            | _ -> ()
             match r.Help with
             | Some h -> helpOverlay model r h dispatch
             | None -> ()
@@ -3921,7 +4008,8 @@ let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) :
             | Some c -> cardsOverlay model r c dispatch
             | None -> ()
             match r.Study with
-            | Some s when not s.Hidden -> studyOverlay model r s dispatch
+            | Some s when s.ShowPlan -> studyPlanOverlay model r s dispatch
+            | Some s when s.ShowTutor -> tutorOverlay model r s dispatch
             | _ -> ()
             match r.Zoom with
             | Some v -> zoomOverlay model r v dispatch
@@ -4003,6 +4091,16 @@ let private settingsView (model: Model) (dispatch: Msg -> unit) : IView =
                                     if Services.turnable then
                                         toggle "Turn wide equations sideways" "Full screen, a wide equation or figure runs along the long side of the screen, much larger. Turn the phone to read it." s.TurnSideways (SetTurnSideways >> dispatch)
                                     sectionTitle "ASK AND STUDY"
+                                    toggle
+                                        "Study with a tutor"
+                                        "Papers open with a tutor: the paper is read to you, and between its sections the tutor explains each idea and asks you about it. Off: papers are only read aloud (the tutor is one tap away in the reader)."
+                                        s.Study
+                                        (fun v -> dispatch (SetStudy v))
+                                    toggle
+                                        "Answer out loud"
+                                        "After each of the tutor's questions a chime sounds and the microphone listens for your answer (\"B\", or the answer in your words), so you can study while walking. Off: tap the answers."
+                                        s.AnswerAloud
+                                        (fun v -> dispatch (SetAnswerAloud v))
                                     label "About you" 16.0 Palette.text
                                     TextBox.create [
                                         TextBox.text s.AboutMe
@@ -4149,7 +4247,7 @@ let view (model: Model) (dispatch: Msg -> unit) : IView =
     reviewing <- model.Review.IsSome
     inReader <- (match model.Screen with Screen.Reader _ -> true | _ -> false)
     walking <- model.Settings.WalkingMode
-    studying <- (match model.Screen with Screen.Reader { Study = Some s } -> not s.Hidden && model.Review.IsNone | _ -> false)
+    studying <- (match model.Screen with Screen.Reader { Study = Some s } -> tutorTurn s && not s.ShowTutor && model.Review.IsNone | _ -> false)
     Grid.create [
         Grid.background Palette.bg
         Grid.children [

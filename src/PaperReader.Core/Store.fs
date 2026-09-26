@@ -70,6 +70,10 @@ type Paths(root: string) =
     member this.StudyPlan(id) = Path.Combine(this.StudyDir id, "plan.txt")
     member this.StudyLesson(id, idea: string) = Path.Combine(this.StudyDir id, "lesson-" + idea + ".txt")
     member this.StudyProgress(id) = Path.Combine(this.StudyDir id, "progress.json")
+    /// What the tutor says, by voice and by the text said (so nothing is made twice).
+    member this.StudyAudio(id, voiceKey: string, text: string) =
+        let hash = Security.Cryptography.SHA1.HashData(Text.Encoding.UTF8.GetBytes text) |> Convert.ToHexString
+        Path.Combine(this.StudyDir id, "audio", voiceKey, hash.Substring(0, 20).ToLowerInvariant() + ".wav")
     /// What the learner knows across papers: the ideas studied, their memory and their questions.
     member _.Knowledge = Path.Combine(root, "knowledge.json")
 
@@ -99,6 +103,8 @@ let saveSettings (p: Paths) (s: Settings) =
         w.WriteString("aboutMe", s.AboutMe)
         w.WriteString("openAlexKey", s.OpenAlexKey)
         w.WriteNumber("retention", s.Retention)
+        w.WriteBoolean("study", s.Study)
+        w.WriteBoolean("answerAloud", s.AnswerAloud)
         w.WriteEndObject())
 
 let loadSettings (p: Paths) : Settings =
@@ -120,7 +126,9 @@ let loadSettings (p: Paths) : Settings =
           HelpModel = str e "helpModel" def.HelpModel
           AboutMe = str e "aboutMe" def.AboutMe
           OpenAlexKey = str e "openAlexKey" def.OpenAlexKey
-          Retention = num e "retention" def.Retention |> max 0.7 |> min 0.97 }
+          Retention = num e "retention" def.Retention |> max 0.7 |> min 0.97
+          Study = boolean e "study" def.Study
+          AnswerAloud = boolean e "answerAloud" def.AnswerAloud }
     with _ -> Settings.defaults
 
 // ---- paper metadata (library entry + listening position)
