@@ -689,7 +689,7 @@ let analyze (path: string) (progress: int -> int -> unit) : Analysis =
                         |> List.choose (fun (_, (l, _, box)) -> toPageRectPadded (body * 0.22) (body * 0.08) l.Page box)
                     if chosen.IsEmpty then None
                     else
-                        let v = { Id = id; Kind = VisualKind.Inline; Parts = Array.ofList chosen; EqNumber = None; RawText = text; Latex = None }
+                        let v = { Id = id; Kind = VisualKind.Inline; Page = chosen.Head.Page; Parts = Array.ofList chosen; EqNumber = None; RawText = text; Latex = None }
                         visuals.Add v
                         Some v.Id
             if spoken.Length > 0 && (spoken |> Seq.exists Char.IsLetterOrDigit) then
@@ -813,7 +813,7 @@ let analyze (path: string) (progress: int -> int -> unit) : Analysis =
                 let id = nextId "E"
                 match toPageRect l.Page (bounds glyphs) with
                 | Some rect ->
-                    visuals.Add { Id = id; Kind = VisualKind.Algorithm; Parts = [| rect |]; EqNumber = algo; RawText = raw; Latex = None }
+                    visuals.Add { Id = id; Kind = VisualKind.Algorithm; Page = rect.Page; Parts = [| rect |]; EqNumber = algo; RawText = raw; Latex = None }
                     units.Add
                         { Id = id; Kind = UnitKind.Equation; Text = raw
                           Spoken = SpeechText.forSpeech (MathText.tidy caption + " The algorithm is shown on screen.")
@@ -881,7 +881,7 @@ let analyze (path: string) (progress: int -> int -> unit) : Analysis =
                     let id = nextId "E"
                     match toPageRect l.Page (bl, br, bb, bt) with
                     | Some rect ->
-                        visuals.Add { Id = id; Kind = VisualKind.Equation; Parts = [| rect |]; EqNumber = eqNumber; RawText = raw; Latex = None }
+                        visuals.Add { Id = id; Kind = VisualKind.Equation; Page = rect.Page; Parts = [| rect |]; EqNumber = eqNumber; RawText = raw; Latex = None }
                         let name = match eqNumber with Some e when e.Contains "–" -> sprintf "Equations %s" e | Some e -> sprintf "Equation %s" e | None -> "An equation"
                         let spoken =
                             let s = MathText.tidy spokenEq
@@ -930,6 +930,7 @@ let analyze (path: string) (progress: int -> int -> unit) : Analysis =
     flushParagraph true
 
     { Title = title
+      Source = "a PDF (most likely a research paper), text extracted from the page layout"
       PageCount = pageCount
       Sections = sections.ToArray()
       Units = units.ToArray()

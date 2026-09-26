@@ -1,9 +1,11 @@
 # Paper Reader
 
-An app that reads research papers (PDF) aloud and shows the math on screen while it talks.
+An app that reads research papers aloud and shows the math on screen while it talks. It reads other
+documents just as well: books, web articles, Word files, slides, notes, and photos of pages.
 It runs on Android, on the Linux desktop and in the browser (WebAssembly).
 
-- Open a PDF from the app, or use *Open with* / *Share* from any other app.
+- Open a document from the app, or use *Open with* / *Share* from any other app. Sharing a link from the browser
+  opens that page (or the PDF behind it). See [Documents it reads](#documents-it-reads).
 - The paper is analysed once: reading order, two-column layout, headings, display equations,
   algorithms and inline math. Citations, headers and footers are skipped.
 - Equations are cut out of the page as images and shown while the narration talks about them.
@@ -54,17 +56,34 @@ It runs on Android, on the Linux desktop and in the browser (WebAssembly).
 
 Written in F# with Avalonia, FuncUI and Elmish, for .NET 10.
 
+## Documents it reads
+
+| Kind | How it is read |
+| --- | --- |
+| PDF | Layout analysis (reading order, columns, equations cut out of the page); with a Mistral key, OCR checks the equations and finds figures and tables. A scanned PDF (pictures of pages) is read with Mistral OCR. |
+| Web pages (HTML) | The article is taken out of the page (menus, sidebars, footers, link lists and "See also" left out). Formulas in MathML are read from their LaTeX (Wikipedia, arXiv HTML, most converters); pictures are downloaded; tables, figures with captions and code listings are shown. Paste a web address in *Find papers*, share a link to the app, or pass it on the desktop command line. |
+| EPUB | Chapter by chapter in reading order; each chapter is a "page". |
+| Word (DOCX), OpenDocument (ODT) | Headings by their style, lists, tables, pictures with their captions, and Word equations (converted to LaTeX). |
+| PowerPoint (PPTX) | Slide by slide: the title, the text boxes, pictures and tables, then the speaker notes. |
+| Markdown, plain text | Headings, lists, `$…$` / `$$…$$` math, tables, code and embedded pictures; in plain text, chapter titles are recognised and Project Gutenberg's licence is left out. |
+| Photos of pages (PNG, JPEG, WebP) | Mistral OCR (needs a key). |
+
+Every format except PDF is read into the same blocks (headings, paragraphs, formulas, pictures, tables, listings,
+page breaks; `Blocks.fs`), which become the units the narrator, Ask and Learn work with. Formulas are typeset,
+tables and listings drawn, and pictures kept, once at import. Adding a format means writing one reader that
+returns blocks (`Markup.fs` for text formats, `Packages.fs` for zip-based ones) and a line in `Formats.detect`.
+
 ## Projects
 
 | Path | What it is |
 | --- | --- |
-| `src/PaperReader.Core` | Everything without UI: PDF layout analysis (PdfPig), math verbalisation, narration, Mistral client, WAV cache, paper search and recommendations (`Discover.fs`), flashcards (`Cards.fs`) and their FSRS scheduler (`Fsrs.fs`) |
+| `src/PaperReader.Core` | Everything without UI: PDF layout analysis (PdfPig), the other formats (`Formats.fs`, `Markup.fs`, `Packages.fs`, `Blocks.fs`), math verbalisation (including LaTeX), narration, Mistral client, WAV cache, paper search and recommendations (`Discover.fs`), flashcards (`Cards.fs`) and their FSRS scheduler (`Fsrs.fs`) |
 | `src/PaperReader` | The shared Elmish UI |
 | `src/PaperReader.Android` | Android head: audio player, phone TTS, PDF crops, playback service, microphone |
 | `src/PaperReader.Desktop` | Linux desktop head: ffplay audio, pdftoppm crops, optional espeak-ng, ffmpeg microphone |
 | `src/PaperReader.Browser` | WebAssembly head: HTML audio, pdf.js crops, IndexedDB storage, MediaRecorder |
 | `src/PaperReader.Browser.Interop` | The browser head's JavaScript imports (C#, because `[JSImport]` needs its source generator) |
-| `tools/ScriptDump` | Desktop tool that analyses a PDF and prints the narration, for tuning the layout rules |
+| `tools/ScriptDump` | Desktop tool that analyses a document (a file or a web address) and prints the narration, for tuning the reading rules (`--blocks` prints what a reader found) |
 | `tests/PaperReader.Core.Tests` | Unit tests |
 
 ## Build
@@ -96,8 +115,8 @@ src/PaperReader.Desktop/install.sh
 ```
 
 This publishes a self-contained build to `dist/linux-x64/paper-reader` and adds *Paper Reader*
-to the application menu and to *Open with* for PDFs. It can also be started directly:
-`dist/linux-x64/paper-reader paper.pdf`. Data lives in `~/.local/share/PaperReader`.
+to the application menu and to *Open with* for the documents it reads. It can also be started directly:
+`dist/linux-x64/paper-reader paper.pdf` (or a web address). Data lives in `~/.local/share/PaperReader`.
 
 Keys: Space play/pause, ← / → 15 seconds, A ask, Esc back. In a review: Space or Enter shows the answer (then
 answers Good), 1–4 answer Again / Hard / Good / Easy.
@@ -112,7 +131,7 @@ src/PaperReader.Browser/run.sh        # publishes to dist/web and serves http://
 
 `dist/web/wwwroot` is a static site: any web server works if it sends `.wasm` as `application/wasm` and
 `.mjs` as `text/javascript`. The microphone needs a secure page (localhost, or HTTPS elsewhere).
-`?pdf=<address>` opens a PDF from this site (or any site that allows it) straight away.
+`?url=<address>` (or `?pdf=`) opens a document from this site (or any site that allows it) straight away.
 
 Differences from the apps: a Mistral key is needed to read aloud (the browser has no voice that makes
 audio files); papers, settings and audio are kept in the browser's IndexedDB, and a paper's audio is

@@ -188,8 +188,8 @@ type Model =
       LearnOpen: string option }
 
 type Msg =
-    | OpenPdf
-    | PdfPicked of (string * string) option
+    | OpenDocument
+    | DocumentPicked of (string * string) option
     | ImportFile of path: string * name: string
     | ImportProgress of importId: Guid * step: string * progress: float option
     | ImportFinished of importId: Guid * Result<PaperInfo * Script * string option, string>
@@ -476,7 +476,7 @@ let init () : Model * Cmd<Msg> =
       Review = None
       LearnOpen = None },
     Cmd.ofEffect (fun dispatch ->
-        (platform ()).SetIncomingPdfHandler(fun (path, name) -> dispatch (ImportFile(path, name)))
+        (platform ()).SetIncomingFileHandler(fun (path, name) -> dispatch (ImportFile(path, name)))
         (platform ()).SetRemoteHandler(fun play -> dispatch (Remote play)))
 
 let private withReader (model: Model) (f: ReaderState -> ReaderState * Cmd<Msg>) : Model * Cmd<Msg> =
@@ -486,24 +486,26 @@ let private withReader (model: Model) (f: ReaderState -> ReaderState * Cmd<Msg>)
         { model with Screen = Screen.Reader r }, cmd
     | _ -> model, Cmd.none
 
-let private pickPdf () : Task<(string * string) option> =
+let private pickDocument () : Task<(string * string) option> =
     task {
         match Services.topLevel with
         | None -> return None
         | Some top ->
             let options =
                 Avalonia.Platform.Storage.FilePickerOpenOptions(
-                    Title = "Open a paper",
+                    Title = "Open a document",
                     AllowMultiple = false,
                     FileTypeFilter =
-                        [| Avalonia.Platform.Storage.FilePickerFileType("PDF", Patterns = [| "*.pdf" |], MimeTypes = [| "application/pdf" |]) |])
+                        [| Avalonia.Platform.Storage.FilePickerFileType("Documents", Patterns = Formats.patterns, MimeTypes = Formats.mimeTypes)
+                           Avalonia.Platform.Storage.FilePickerFileType("All files", Patterns = [| "*" |]) |])
             let! files = Dispatcher.UIThread.InvokeAsync<Collections.Generic.IReadOnlyList<Avalonia.Platform.Storage.IStorageFile>>(fun () -> top.StorageProvider.OpenFilePickerAsync options)
             if files.Count = 0 then return None
             else
                 let file = files.[0]
                 let incoming = Path.Combine((platform ()).DataDir, "incoming")
                 Directory.CreateDirectory incoming |> ignore
-                let dest = Path.Combine(incoming, Guid.NewGuid().ToString("N") + ".pdf")
+                // the extension is kept: it helps tell the format
+                let dest = Path.Combine(incoming, Guid.NewGuid().ToString("N") + Path.GetExtension(file.Name).ToLowerInvariant())
                 use! input = file.OpenReadAsync()
                 use output = File.Create dest
                 do! input.CopyToAsync output
@@ -606,7 +608,7 @@ let private startMaking (settings: Settings) (paperId: string) (script: Script o
                         let script =
                             match script |> Option.orElse (Store.loadScript p paperId) with
                             | Some s -> s
-                            | None -> failwith "This paper's cache is from an older version. Remove it and add the PDF again."
+                            | None -> failwith "This paper's cache is from an older version. Remove it and add the document again."
                         let! k =
                             match knowledge.TryGetValue paperId with
                             | true, k -> Task.FromResult k
@@ -676,11 +678,11 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
     | Dismiss -> { model with Notice = None }, Cmd.none
 
     // ----- library and import
-    | OpenPdf ->
+    | OpenDocument ->
         { model with Notice = None },
-        runTask pickPdf PdfPicked (fun e -> PdfPicked None)
-    | PdfPicked None -> model, Cmd.none
-    | PdfPicked (Some (path, name)) -> model, Cmd.ofMsg (ImportFile(path, name))
+        runTask pickDocument DocumentPicked (fun e -> DocumentPicked None)
+    | DocumentPicked None -> model, Cmd.none
+    | DocumentPicked (Some (path, name)) -> model, Cmd.ofMsg (ImportFile(path, name))
     | ImportFile (path, name) ->
         match model.Screen with
         | Screen.Importing _ -> { model with Notice = Some "Wait for the current paper to finish first." }, Cmd.none
@@ -750,7 +752,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                     task {
                         try
                             match Store.loadScript p paper.Id with
-                            | None -> dispatch (ImportFinished(importId, Error "This paper's cache is from an older version. Remove it and add the PDF again."))
+                            | None -> dispatch (ImportFinished(importId, Error "This paper's cache is from an older version. Remove it and add the document again."))
                             | Some script ->
                                 let! script =
                                     Import.refreshCrops (platform ()) settings p paper.Id script (fun step progress ->
@@ -773,7 +775,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         let load () =
             task {
                 match Store.loadScript p paper.Id with
-                | None -> return failwith "This paper's cache is from an older version. Remove it and add the PDF again."
+                | None -> return failwith "This paper's cache is from an older version. Remove it and add the document again."
                 | Some script ->
                     do! (platform ()).Restore(p.AudioDir(paper.Id, key))
                     let durations = Synth.cachedDurations (fun i -> p.Audio(paper.Id, key, i)) script.Segments.Length

@@ -46,9 +46,9 @@ let private principles =
 - One idea per card. A question with one short answer (usually one sentence, at most about 30 words). Split
   anything longer or any list into several cards.
 - The question is precise enough to have one right answer, and not answerable by yes or no.
-- Each card is reviewed months from now, shuffled with cards from other papers, without the paper at hand: the
-  question must make sense alone. Name the method, model or idea it is about ("In the Transformer, ...") instead
-  of "this paper", "the authors" or "the equation above".
+- Each card is reviewed months from now, shuffled with cards from other papers and documents, without the paper
+  at hand: the question must make sense alone. Name the method, model, idea, book or person it is about ("In the
+  Transformer, ...") instead of "this paper", "the authors" or "the equation above".
 - Ask for understanding, not wording: what something is, why it is done, what it prevents, how it compares,
   what a symbol or term stands for, what a result shows (with its key number when the number matters).
 - Use the paper's notation and numbers. Never invent anything the paper doesn't say.
@@ -115,9 +115,11 @@ let userPrompt (script: Script) (position: int) (existing: Card list) (request: 
     | Request.Paper count ->
         sprintf "TASK: this time don't answer a question. Make a deck of about %d flashcards that covers the whole paper, for \
                  learning it with spaced repetition. Ignore the length rules and the REPLY FORMAT above.\n\n\
-                 Cover, in the paper's order: the problem and why it matters, the key idea and how it differs from earlier \
-                 work, the method's parts and the important equations (what they compute and why they have that form), the \
-                 main results with their numbers, and the limitations. Prefer what an expert would want remembered a year \
+                 For a research paper, cover in the paper's order: the problem and why it matters, the key idea and how it \
+                 differs from earlier work, the method's parts and the important equations (what they compute and why they \
+                 have that form), the main results with their numbers, and the limitations. For any other document (a book, \
+                 an article, a report, slides, notes), cover in its order its main ideas and arguments, key facts, terms, \
+                 people and events, and the important examples. Prefer what an expert would want remembered a year \
                  from now over details. Skip related work, experimental setup trivia and acknowledgements.\n\n%s\n%s\n%s%s"
             count principles (sectionsBlock script) (format true) (existingBlock existing)
 

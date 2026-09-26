@@ -1,4 +1,5 @@
-/// The equation images: page regions cut out of the PDF, cleaned up, and checked to be whole.
+/// The images shown with the narration: for PDFs, page regions cut out, cleaned up, and checked to be whole;
+/// for other documents, their pictures, formulas, tables and listings drawn once at import.
 module PaperReader.Crops
 
 open System
@@ -137,7 +138,8 @@ let render (pdf: IPdfPages) (sizes: (float * float)[]) (crops: (Visual * string)
         let mutable doneCount = 0
         for (v, output) in crops do
             ct.ThrowIfCancellationRequested()
-            if not (File.Exists output) && v.Page < sizes.Length then
+            // visuals without regions (from OCR'd pages) were drawn at import
+            if not (File.Exists output) && v.Parts.Length > 0 && v.Page < sizes.Length then
                 let widest = v.Parts |> Array.map (fun r -> r.W) |> Array.max
                 let scale = min 3.0 (2400.0 / max 1.0 widest)
                 let dropNumber = v.Kind = VisualKind.Equation && v.EqNumber.IsSome
@@ -186,3 +188,131 @@ let render (pdf: IPdfPages) (sizes: (float * float)[]) (crops: (Visual * string)
             progress doneCount
         return List.ofSeq outcomes
     }
+
+// ---------------------------------------------------------------------------------------------
+// Pictures of documents that aren't PDFs
+// ---------------------------------------------------------------------------------------------
+
+/// Pictures wider than this are scaled down: the screen never shows more, and narration sends them to the model.
+let private maxPictureWidth = 2000
+
+let private typeface (bold: bool) =
+    lazy
+        (try
+            use s = Avalonia.Platform.AssetLoader.Open(Uri(sprintf "avares://Avalonia.Fonts.Inter/Assets/Inter-%s.ttf" (if bold then "SemiBold" else "Regular")))
+            match SKTypeface.FromStream s with
+            | null -> SKTypeface.Default
+            | t -> t
+         with _ -> SKTypeface.Default)
+let private regular = typeface false
+let private semiBold = typeface true
+
+/// An image in any format Skia reads, on white (transparent pictures would vanish on a dark screen), no wider
+/// than the screen needs.
+let private drawBitmap (bytes: byte[]) =
+    match SKBitmap.Decode bytes with
+    | null -> None
+    | src ->
+        use src = src
+        let scale = min 1.0 (float maxPictureWidth / float src.Width)
+        let w, h = max 1 (int (float src.Width * scale)), max 1 (int (float src.Height * scale))
+        let bmp = new SKBitmap(w, h)
+        use c = new SKCanvas(bmp)
+        c.Clear SKColors.White
+        use paint = new SKPaint(IsAntialias = true)
+        c.DrawBitmap(src, SKRect(0.0f, 0.0f, float32 w, float32 h), paint)
+        Some bmp
+
+/// Lines of text wrapped to a width, for table cells.
+let private wrap (font: SKFont) (text: string) (width: float32) =
+    let words = text.Split(' ', StringSplitOptions.RemoveEmptyEntries)
+    let lines = Collections.Generic.List<string>()
+    let cur = Text.StringBuilder()
+    for w in words do
+        let trial = if cur.Length = 0 then w else cur.ToString() + " " + w
+        if cur.Length > 0 && font.MeasureText trial > width then
+            lines.Add(cur.ToString())
+            cur.Clear().Append(w) |> ignore
+        else cur.Clear().Append(trial) |> ignore
+    if cur.Length > 0 then lines.Add(cur.ToString())
+    if lines.Count = 0 then lines.Add ""
+    List.ofSeq lines
+
+/// A table drawn as a grid: the header row bold on grey, cells wrapped, columns as wide as their text needs
+/// (a long column is capped and wraps).
+let private drawGrid (rows: string list list) =
+    let rows = rows |> List.truncate 60
+    let cols = rows |> List.map List.length |> List.max
+    if cols = 0 then None
+    else
+        let size, pad, maxCol = 28.0f, 14.0f, 520.0f
+        use font = new SKFont(regular.Force(), size)
+        use bold = new SKFont(semiBold.Force(), size)
+        let cell (r: string list) k = if k < r.Length then r.[k] else ""
+        let widths =
+            [| for k in 0 .. cols - 1 ->
+                   rows |> List.mapi (fun i r -> (if i = 0 then bold else font).MeasureText(cell r k)) |> List.max |> min maxCol |> max 40.0f |]
+        let lineH = size * 1.3f
+        let layout =
+            rows |> List.mapi (fun i r -> [| for k in 0 .. cols - 1 -> wrap (if i = 0 then bold else font) (cell r k) widths.[k] |])
+        let heights = layout |> List.map (fun cs -> float32 (cs |> Array.map List.length |> Array.max) * lineH + 2.0f * pad)
+        let w = int (Array.sum widths + float32 cols * 2.0f * pad) + 2
+        let h = int (List.sum heights) + 2
+        let bmp = new SKBitmap(w, h)
+        use c = new SKCanvas(bmp)
+        c.Clear SKColors.White
+        use line = new SKPaint(Color = SKColor(200uy, 204uy, 212uy), StrokeWidth = 2.0f)
+        use headerFill = new SKPaint(Color = SKColor(238uy, 240uy, 244uy))
+        use ink = new SKPaint(Color = SKColors.Black, IsAntialias = true)
+        let mutable y = 1.0f
+        layout |> List.iteri (fun i cs ->
+            let rowH = heights.[i]
+            if i = 0 then c.DrawRect(0.0f, y, float32 w, rowH, headerFill)
+            let mutable x = 1.0f
+            cs |> Array.iteri (fun k lines ->
+                lines |> List.iteri (fun j l -> c.DrawText(l, x + pad, y + pad + float32 (j + 1) * lineH - size * 0.3f, SKTextAlign.Left, (if i = 0 then bold else font), ink))
+                x <- x + widths.[k] + 2.0f * pad)
+            y <- y + rowH
+            c.DrawLine(0.0f, y, float32 w, y, line))
+        // column lines
+        let mutable x = 1.0f
+        for k in 0 .. cols do
+            c.DrawLine(x, 0.0f, x, float32 h, line)
+            if k < cols then x <- x + widths.[k] + 2.0f * pad
+        c.DrawLine(0.0f, 1.0f, float32 w, 1.0f, line)
+        Some bmp
+
+/// A code listing (or formula source that couldn't be typeset) as text on a light panel.
+let private drawListing (text: string) =
+    let lines = text.Replace("\t", "    ").Replace("\r", "").Split('\n') |> Array.truncate 80
+    let lines = if lines.Length = 0 then [| "" |] else lines
+    let size, pad = 26.0f, 24.0f
+    use font = new SKFont(regular.Force(), size)
+    let lineH = size * 1.35f
+    let w = lines |> Array.map (fun l -> font.MeasureText l) |> Array.max |> min 2400.0f
+    let bmp = new SKBitmap(int (w + 2.0f * pad) + 1, int (float32 lines.Length * lineH + 2.0f * pad) + 1)
+    use c = new SKCanvas(bmp)
+    c.Clear(SKColor(246uy, 247uy, 249uy))
+    use ink = new SKPaint(Color = SKColor(30uy, 32uy, 38uy), IsAntialias = true)
+    lines |> Array.iteri (fun i l -> c.DrawText(l, pad, pad + float32 (i + 1) * lineH - size * 0.3f, SKTextAlign.Left, font, ink))
+    Some bmp
+
+/// Draws a visual of a document that isn't a PDF and writes it as PNG. False when it can't be drawn (an image
+/// format Skia doesn't read): the visual then has no image, and the narration goes on without it.
+let drawPicture (picture: Blocks.Picture) (output: string) : bool =
+    let bmp =
+        try
+            match picture with
+            | Blocks.Bitmap bytes -> drawBitmap bytes
+            | Blocks.Formula latex -> renderLatex latex |> Option.orElse (drawListing latex)
+            | Blocks.Grid rows -> drawGrid rows
+            | Blocks.Listing text -> drawListing text
+        with _ -> None
+    match bmp with
+    | Some bmp ->
+        use bmp = bmp
+        let tmp = output + ".tmp"
+        File.WriteAllBytes(tmp, encode bmp)
+        File.Move(tmp, output, true)
+        true
+    | None -> false

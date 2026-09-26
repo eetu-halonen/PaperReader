@@ -26,13 +26,20 @@ let private snapshots () =
             | _ -> ()
         snapshotTimer <- new Threading.Timer((fun _ -> Dispatcher.UIThread.Post save), null, 2000, 2000)
 
-/// paper-reader [paper.pdf]
+/// paper-reader [document or web address]
 [<EntryPoint; STAThread>]
 let main argv =
     let platform = DesktopPlatform()
     Services.platform <- Some(platform :> IPlatform)
     for arg in argv do
         if IO.File.Exists arg then platform.Open(IO.Path.GetFullPath arg)
+        elif arg.StartsWith "http://" || arg.StartsWith "https://" then
+            // a web address: kept as a small file the importer downloads from
+            let incoming = IO.Path.Combine((platform :> IPlatform).DataDir, "incoming")
+            IO.Directory.CreateDirectory incoming |> ignore
+            let path = IO.Path.Combine(incoming, Guid.NewGuid().ToString("N") + ".txt")
+            IO.File.WriteAllText(path, arg)
+            platform.Open path
     snapshots ()
     let code =
         AppBuilder

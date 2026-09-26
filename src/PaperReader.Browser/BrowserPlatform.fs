@@ -184,7 +184,7 @@ type BrowserPlatform(storage: BrowserStorage) =
                 Dispatcher.UIThread.Post(fun () -> h item)
         | None -> ()
 
-    /// A PDF to open once the app is ready (from the page's ?pdf= address).
+    /// A document to open once the app is ready (from the page's ?url= address).
     member _.Open(path: string, name: string) =
         pending.Enqueue((path, name))
         flush ()
@@ -199,7 +199,7 @@ type BrowserPlatform(storage: BrowserStorage) =
         member _.SetPlayback(title, detail, playing) = Js.SetPlayback(title, detail, playing)
         member _.EndPlayback() = Js.EndPlayback()
         member _.SetRemoteHandler(h) = Js.SetRemote(Action<bool>(fun play -> Dispatcher.UIThread.Post(fun () -> h play)))
-        member _.SetIncomingPdfHandler(h) =
+        member _.SetIncomingFileHandler(h) =
             handler <- Some h
             flush ()
         member _.Restore(folder) = storage.Restore folder

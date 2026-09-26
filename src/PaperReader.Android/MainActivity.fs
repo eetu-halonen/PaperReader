@@ -16,14 +16,45 @@ open PaperReader
            Exported = true,
            LaunchMode = LaunchMode.SingleTask,
            ConfigurationChanges = (ConfigChanges.Orientation ||| ConfigChanges.ScreenSize ||| ConfigChanges.UiMode ||| ConfigChanges.ScreenLayout ||| ConfigChanges.SmallestScreenSize))>]
-[<IntentFilter([| Intent.ActionView |], Categories = [| Intent.CategoryDefault; Intent.CategoryBrowsable |], DataMimeType = "application/pdf")>]
-[<IntentFilter([| Intent.ActionSend |], Categories = [| Intent.CategoryDefault |], DataMimeType = "application/pdf")>]
+// the kinds of document Formats reads (Formats.mimeTypes; attributes need the list written out)
+[<IntentFilter([| Intent.ActionView |], Categories = [| Intent.CategoryDefault; Intent.CategoryBrowsable |],
+               DataMimeTypes = [| "application/pdf"; "application/epub+zip"
+                                  "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                  "application/vnd.oasis.opendocument.text"
+                                  "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                                  "text/html"; "application/xhtml+xml"; "text/markdown"; "text/x-markdown"; "text/plain"
+                                  "image/png"; "image/jpeg"; "image/webp" |])>]
+// Share: the same files, and shared text or links (a link shared from the browser opens that page or PDF)
+[<IntentFilter([| Intent.ActionSend |], Categories = [| Intent.CategoryDefault |],
+               DataMimeTypes = [| "application/pdf"; "application/epub+zip"
+                                  "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                                  "application/vnd.oasis.opendocument.text"
+                                  "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                                  "text/html"; "application/xhtml+xml"; "text/markdown"; "text/x-markdown"; "text/plain"
+                                  "image/png"; "image/jpeg"; "image/webp" |])>]
 type MainActivity() =
     inherit AvaloniaMainActivity()
 
-    /// Copies a shared/opened PDF into app storage so it outlives the sender's permission grant.
+    /// Copies a shared/opened document into app storage so it outlives the sender's permission grant. Shared
+    /// text (or a link) is kept as a text file: the importer reads the text, or downloads what the link points to.
     member private this.Receive(intent: Intent) =
         if not (isNull intent) then
+            let sharedText =
+                if intent.Action = Intent.ActionSend && isNull (intent.GetParcelableExtra(Intent.ExtraStream)) then
+                    intent.GetStringExtra(Intent.ExtraText) |> Option.ofObj |> Option.filter (fun t -> t.Trim() <> "")
+                else None
+            match sharedText with
+            | Some text ->
+                try
+                    let incoming = Path.Combine(this.FilesDir.AbsolutePath, "incoming")
+                    Directory.CreateDirectory incoming |> ignore
+                    let dest = Path.Combine(incoming, Guid.NewGuid().ToString("N") + ".txt")
+                    File.WriteAllText(dest, text)
+                    let subject = intent.GetStringExtra(Intent.ExtraSubject) |> Option.ofObj |> Option.defaultValue "Shared text"
+                    Incoming.deliver (dest, subject + ".txt")
+                with e -> Android.Util.Log.Warn("PaperReader", "could not keep shared text: " + e.Message) |> ignore
+                intent.SetAction(Intent.ActionMain) |> ignore
+            | None -> ()
             let uri =
                 if intent.Action = Intent.ActionView then intent.Data
                 elif intent.Action = Intent.ActionSend then
@@ -36,18 +67,24 @@ type MainActivity() =
                 let name =
                     try
                         use cursor = resolver.Query(uri, [| OpenableColumns.DisplayName |], null, null, null)
-                        if not (isNull cursor) && cursor.MoveToFirst() then cursor.GetString 0 else "paper.pdf"
-                    with _ -> "paper.pdf"
+                        if not (isNull cursor) && cursor.MoveToFirst() then cursor.GetString 0 else "document"
+                    with _ -> "document"
+                // without an extension in the name, the media type gives one (the content decides in the end)
+                let name =
+                    if Path.HasExtension name then name
+                    else
+                        let ext = Android.Webkit.MimeTypeMap.Singleton.GetExtensionFromMimeType(resolver.GetType uri)
+                        if String.IsNullOrEmpty ext then name else name + "." + ext
                 try
                     let incoming = Path.Combine(this.FilesDir.AbsolutePath, "incoming")
                     Directory.CreateDirectory incoming |> ignore
-                    let dest = Path.Combine(incoming, Guid.NewGuid().ToString("N") + ".pdf")
+                    let dest = Path.Combine(incoming, Guid.NewGuid().ToString("N") + Path.GetExtension(name).ToLowerInvariant())
                     do
                         use input = resolver.OpenInputStream uri
                         use output = File.Create dest
                         input.CopyTo output
                     Incoming.deliver (dest, name)
-                with e -> Android.Util.Log.Warn("PaperReader", "could not read shared PDF: " + e.Message) |> ignore
+                with e -> Android.Util.Log.Warn("PaperReader", "could not read shared document: " + e.Message) |> ignore
                 // handled: don't re-import on configuration changes
                 intent.SetAction(Intent.ActionMain) |> ignore
 

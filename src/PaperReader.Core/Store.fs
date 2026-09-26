@@ -1,4 +1,4 @@
-/// On-disk cache: one folder per paper (PDF, script, equation images, audio clips per voice).
+/// On-disk cache: one folder per paper (the document, script, images, audio clips per voice).
 /// JSON is read and written by hand so nothing depends on reflection (safe under Android trimming).
 module PaperReader.Core.Store
 
@@ -45,13 +45,16 @@ type Paths(root: string) =
     member _.Settings = Path.Combine(root, "settings.json")
     member this.Paper(id: string) = Path.Combine(this.Papers, id)
     member this.Pdf(id) = Path.Combine(this.Paper id, "paper.pdf")
+    /// The imported document when it isn't a PDF, with its own extension ("document.epub").
+    member this.Document(id, extension: string) = Path.Combine(this.Paper id, "document" + extension)
     member this.Script(id) = Path.Combine(this.Paper id, "script.json")
     member this.Meta(id) = Path.Combine(this.Paper id, "meta.json")
     member this.Images(id) = Path.Combine(this.Paper id, "img")
     member this.Image(id, visualId: string) = Path.Combine(this.Images id, visualId + ".png")
     member this.AudioDir(id, voiceKey: string) = Path.Combine(this.Paper id, "audio", voiceKey)
     member this.Audio(id, voiceKey, index: int) = Path.Combine(this.AudioDir(id, voiceKey), sprintf "%05d.wav" index)
-    /// The paper's full text as Mistral OCR read it (markdown with LaTeX), the source for answering questions.
+    /// The paper's full text as markdown with LaTeX (read by Mistral OCR from a PDF, or written from the
+    /// document at import), the source for answering questions.
     member this.PaperText(id) = Path.Combine(this.Paper id, "paper.md")
     member this.HelpDir(id) = Path.Combine(this.Paper id, "help")
     /// Questions asked about the paper and their answers.
@@ -118,6 +121,7 @@ let saveMeta (p: Paths) (m: PaperInfo) =
         w.WriteStartObject()
         w.WriteString("id", m.Id)
         w.WriteString("title", m.Title)
+        w.WriteString("format", m.Format)
         w.WriteNumber("pageCount", m.PageCount)
         w.WriteString("addedUtc", m.AddedUtc.ToString("o"))
         w.WriteNumber("segmentCount", m.SegmentCount)
@@ -131,6 +135,7 @@ let loadMeta (p: Paths) (id: string) : PaperInfo option =
         Some
             { Id = str e "id" id
               Title = str e "title" "Untitled"
+              Format = str e "format" "pdf"
               PageCount = int (num e "pageCount" 0.0)
               AddedUtc = (match DateTime.TryParse(str e "addedUtc" "") with | true, t -> t.ToUniversalTime() | _ -> DateTime.UtcNow)
               SegmentCount = int (num e "segmentCount" 0.0)
@@ -205,6 +210,7 @@ let saveScript (p: Paths) (id: string) (s: Script) =
                                    | VisualKind.Figure -> "figure"
                                    | VisualKind.Table -> "table"
                                    | VisualKind.Inline -> "inline"))
+            w.WriteNumber("page", v.Page)
             w.WriteStartArray "parts"
             for r in v.Parts do
                 w.WriteStartObject()
@@ -257,6 +263,9 @@ let loadScript (p: Paths) (id: string) : Script option =
                            { Title = str x "title" ""; FirstSegment = int (num x "first" 0.0) } |]
                   Visuals =
                     [| for v in e.GetProperty("visuals").EnumerateArray() ->
+                           let parts =
+                               [| for r in v.GetProperty("parts").EnumerateArray() ->
+                                      { Page = int (num r "page" 0.0); X = num r "x" 0.0; Y = num r "y" 0.0; W = num r "w" 0.0; H = num r "h" 0.0 } |]
                            { Id = str v "id" ""
                              Kind = (match str v "kind" "" with
                                      | "equation" -> VisualKind.Equation
@@ -264,9 +273,9 @@ let loadScript (p: Paths) (id: string) : Script option =
                                      | "figure" -> VisualKind.Figure
                                      | "table" -> VisualKind.Table
                                      | _ -> VisualKind.Inline)
-                             Parts =
-                               [| for r in v.GetProperty("parts").EnumerateArray() ->
-                                      { Page = int (num r "page" 0.0); X = num r "x" 0.0; Y = num r "y" 0.0; W = num r "w" 0.0; H = num r "h" 0.0 } |]
+                             // scripts from before visuals had their own page: the page of the first region
+                             Page = int (num v "page" (if parts.Length > 0 then float parts.[0].Page else 0.0))
+                             Parts = parts
                              EqNumber = optStr v "number"
                              RawText = str v "raw" ""
                              Latex = optStr v "latex" } |]

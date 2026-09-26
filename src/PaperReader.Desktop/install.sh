@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Builds the Linux desktop app and adds it to the application menu (and "Open with" for PDFs).
+# Builds the Linux desktop app and adds it to the application menu (and "Open with" for the documents it reads).
 # Usage: src/PaperReader.Desktop/install.sh     (from the repository root)
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
@@ -18,12 +18,12 @@ cat > "$apps/paper-reader.desktop" <<DESKTOP
 [Desktop Entry]
 Type=Application
 Name=Paper Reader
-Comment=Listen to research papers; the math appears on screen
+Comment=Listen to research papers and other documents; the math appears on screen
 Exec="$out/paper-reader" %f
 Icon=paper-reader
 Terminal=false
 Categories=Education;
-MimeType=application/pdf;
+MimeType=application/pdf;application/epub+zip;application/vnd.openxmlformats-officedocument.wordprocessingml.document;application/vnd.oasis.opendocument.text;application/vnd.openxmlformats-officedocument.presentationml.presentation;text/html;application/xhtml+xml;text/markdown;text/plain;image/png;image/jpeg;image/webp;
 StartupWMClass=paper-reader
 DESKTOP
 update-desktop-database "$apps" 2>/dev/null || true

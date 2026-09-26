@@ -1,5 +1,7 @@
 /// Development tool: runs the paper analysis and narration on a desktop and prints the result.
-/// Usage: ScriptDump <paper.pdf> [--crops <dir>] [--ocr] [--mistral <model>]   (API key from MISTRAL_API_KEY)
+/// Usage: ScriptDump <paper.pdf | document | https://address> [--crops <dir>] [--ocr] [--mistral <model>]
+/// (API key from MISTRAL_API_KEY). Documents that aren't PDFs go through Formats and Blocks, as the app's import
+/// does (their pictures aren't drawn here: --mistral narrates them without images).
 open System
 open System.IO
 open System.Diagnostics
@@ -79,7 +81,20 @@ let main argv =
     let opt name = argv |> Array.tryFindIndex ((=) name) |> Option.map (fun i -> argv.[i + 1])
     if argv |> Array.contains "--lines" then Layout.trace <- Some(fun s -> printfn "%s" s)
     let sw = Stopwatch.StartNew()
-    let a = Layout.analyze pdf (fun _ _ -> ())
+    let bytes, name =
+        if pdf.StartsWith "http" then (Formats.fetchDocument pdf Threading.CancellationToken.None).Result
+        else File.ReadAllBytes pdf, Path.GetFileName pdf
+    let format = Formats.detect name bytes
+    eprintfn "format: %A" format
+    let a =
+        match format with
+        | Some Formats.Format.Pdf | None -> Layout.analyze pdf (fun _ _ -> ())
+        | Some f ->
+            let doc = Formats.read f bytes (Path.GetFileNameWithoutExtension name)
+            let doc = (Blocks.resolveImages (Formats.fetchImage Threading.CancellationToken.None) doc).Result
+            if argv |> Array.contains "--blocks" then
+                for b in doc.Blocks do printfn "BLOCK %s" (match b with Blocks.Block.Image (Blocks.Data d, alt, c) -> sprintf "Image %d bytes %A alt=%s caption=%s" d.Length (Blocks.imageSize d) alt c | b -> sprintf "%A" b)
+            fst (Blocks.analyze doc)
     // --ocr: Mistral OCR checks the equations and finds figures and tables, as the app's import does
     let a =
         if not (argv |> Array.contains "--ocr") then a

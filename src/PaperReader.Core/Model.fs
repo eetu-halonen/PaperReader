@@ -21,11 +21,15 @@ type VisualKind =
     /// A table with its caption, found by Mistral OCR.
     | Table
 
-/// An image cut out of the PDF and shown while the related narration plays.
+/// An image shown while the related narration plays: cut out of a PDF page, or (for other documents)
+/// drawn once at import from the picture, formula, table or listing the document holds.
 type Visual =
     { Id: string
       Kind: VisualKind
-      /// Regions of one page, shown stacked top to bottom (inline math is cut into its fragments).
+      /// Page (slide, chapter) the visual is on.
+      Page: int
+      /// Regions of one PDF page, shown stacked top to bottom (inline math is cut into its fragments).
+      /// Empty for documents that aren't PDFs: their images are drawn at import.
       Parts: PageRect[]
       /// Number as printed in the paper (equation, algorithm, figure or table), e.g. "3" or "A.2".
       EqNumber: string option
@@ -33,8 +37,6 @@ type Visual =
       RawText: string
       /// The formula as LaTeX, read by Mistral OCR (when a key is set).
       Latex: string option }
-
-    member v.Page = v.Parts.[0].Page
 
 [<RequireQualifiedAccess>]
 type UnitKind =
@@ -95,9 +97,11 @@ type Script =
 module Script =
     let currentVersion = 1
 
-/// What the layout analysis produced for a PDF.
+/// What the analysis of a document produced: its units in reading order and its visuals.
 type Analysis =
     { Title: string
+      /// What kind of document this is and how its text was read, for the narrator ("a web page", "slides").
+      Source: string
       PageCount: int
       Sections: string[]
       Units: SourceUnit[]
@@ -106,6 +110,8 @@ type Analysis =
 type PaperInfo =
     { Id: string
       Title: string
+      /// What the document was imported from ("pdf", "epub", "html", ...; see Formats).
+      Format: string
       PageCount: int
       AddedUtc: System.DateTime
       SegmentCount: int

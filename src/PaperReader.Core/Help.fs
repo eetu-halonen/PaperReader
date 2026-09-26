@@ -1,7 +1,8 @@
 /// Questions while listening ("Ask"): what the answering model is told, the one-tap questions, and its replies.
 ///
 /// The model gets everything it needs to answer about *this* moment without the listener typing it:
-/// - the whole paper as Mistral OCR read it (markdown, formulas in LaTeX, tables as tables), so answers are
+/// - the whole paper as markdown (read by Mistral OCR from a PDF, or written from the document at import;
+///   formulas in LaTeX, tables as tables), so answers are
 ///   grounded in the paper and "equation 3" or "table 2" mean what they mean in it;
 /// - every equation, figure and table by id with its LaTeX or caption, and for figures a detailed description
 ///   made once by a vision model (the answering model can't see images);
@@ -86,7 +87,7 @@ let effort (ask: Ask) =
 
 /// Per paper, prepared once (see `prepare`).
 type Knowledge =
-    { /// The paper as Mistral OCR read it, page by page.
+    { /// The paper as markdown, page by page.
       PaperText: string
       /// Figure id -> detailed description of the image.
       FigureNotes: Map<string, string> }
@@ -141,8 +142,9 @@ let systemPrompt (settings: Settings) (script: Script) (k: Knowledge) =
         if String.IsNullOrWhiteSpace settings.AboutMe then
             "Unknown. Assume a curious reader with undergraduate maths who may not know this field: define jargon briefly the first time."
         else settings.AboutMe.Trim()
-    $$"""You are the study companion inside Paper Reader, an app that reads research papers aloud. The listener is
-hearing a narrated version of the paper below. They cannot see its text, only the current equation, figure or
+    $$"""You are the study companion inside Paper Reader, an app that reads research papers and other documents
+(articles, web pages, books, reports, slides, notes) aloud. These instructions call the document "the paper"
+whatever kind it is. The listener is hearing a narrated version of the paper below. They cannot see its text, only the current equation, figure or
 table image. They paused to ask you something about what they just heard.
 
 HOW TO ANSWER
@@ -381,7 +383,7 @@ let suggestions (script: Script) (position: int) (about: Visual option) : Ask li
 let describeFigures (key: string) (model: string) (figures: (Visual * byte[]) list) (ct: CancellationToken) : Task<Map<string, string>> =
     task {
         let system =
-            """You describe figures from a research paper for someone who cannot see them but will ask questions about them.
+            """You describe figures from a research paper or other document for someone who cannot see them but will ask questions about them.
 For each image write a factual description of 80 to 200 words: the kind of figure (plot, diagram, photo grid...),
 axes with their labels and units, legend entries and series, notable values, trends and comparisons, the parts
 of a diagram and how they connect, and what the caption says it demonstrates. Don't guess numbers you can't read.
@@ -407,6 +409,9 @@ let prepare (settings: Settings) (paths: Store.Paths) (id: string) (script: Scri
         let! text =
             task {
                 if File.Exists(paths.PaperText id) then return File.ReadAllText(paths.PaperText id)
+                elif not (File.Exists(paths.Pdf id)) then
+                    // documents that aren't PDFs have their text written at import; failing that, what is narrated
+                    return String.Join("\n", script.Segments |> Array.map (fun s -> s.Say))
                 else
                     step "Reading the paper for your questions"
                     let! pages = Mistral.ocr key "application/pdf" (File.ReadAllBytes(paths.Pdf id)) ct

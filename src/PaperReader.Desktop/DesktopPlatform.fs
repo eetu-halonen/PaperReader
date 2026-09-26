@@ -284,7 +284,7 @@ type DesktopPlatform() =
 
     do Directory.CreateDirectory dataDir |> ignore
 
-    /// A PDF given on the command line.
+    /// A document given on the command line.
     member _.Open(path: string) =
         pending.Enqueue((path, Path.GetFileName path))
         flush ()
@@ -302,7 +302,7 @@ type DesktopPlatform() =
         member _.EndPlayback() = ()
         member _.SetRemoteHandler(_) = ()
 
-        member _.SetIncomingPdfHandler(h) =
+        member _.SetIncomingFileHandler(h) =
             handler <- Some h
             flush ()
 

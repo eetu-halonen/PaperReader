@@ -193,7 +193,7 @@ type AndroidPdf(path: string) =
 // Platform
 // ---------------------------------------------------------------------------------------------
 
-/// PDFs opened with or shared to the app, delivered once the app is ready for them.
+/// Documents opened with or shared to the app, delivered once the app is ready for them.
 module Incoming =
     let private queue = ConcurrentQueue<string * string>()
     let mutable private handler: (string * string -> unit) option = None
@@ -310,7 +310,7 @@ type AndroidPlatform(context: Context) =
                     if on then a.Window.AddFlags WindowManagerFlags.KeepScreenOn
                     else a.Window.ClearFlags WindowManagerFlags.KeepScreenOn)
 
-        member _.SetIncomingPdfHandler(h) = Incoming.setHandler h
+        member _.SetIncomingFileHandler(h) = Incoming.setHandler h
 
         member _.SetPlayback(title, detail, playing) =
             Android.App.Application.SynchronizationContext.Post((fun _ -> PlaybackService.Update(context, title, detail, playing)), null)

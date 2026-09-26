@@ -2,28 +2,26 @@ module PaperReader.Browser.Program
 
 open System
 open System.IO
-open System.Net.Http
 open System.Runtime.InteropServices.JavaScript
 open Avalonia
 open Avalonia.Browser
 open PaperReader
 
-/// `?pdf=<address>` opens that PDF (on this site, or any site that allows it) as if picked.
+/// `?url=<address>` (or `?pdf=`) opens the document there (on this site, or any site that allows it) as if picked:
+/// a PDF, a web page, an EPUB, ...
 let private openFromAddress (page: Uri) (platform: BrowserPlatform) (dataDir: string) =
     task {
         let query = page.Query.TrimStart('?').Split('&', StringSplitOptions.RemoveEmptyEntries)
-        match query |> Array.tryFind (fun p -> p.StartsWith "pdf=") with
+        match query |> Array.tryFind (fun p -> p.StartsWith "pdf=" || p.StartsWith "url=") with
         | Some p ->
             try
                 let address = Uri(page, Uri.UnescapeDataString(p.Substring 4))
-                use http = new HttpClient()
-                let! bytes = http.GetByteArrayAsync address
+                let! bytes, name = PaperReader.Core.Formats.fetchDocument address.AbsoluteUri Threading.CancellationToken.None
                 let incoming = Path.Combine(dataDir, "incoming")
                 Directory.CreateDirectory incoming |> ignore
-                let path = Path.Combine(incoming, Guid.NewGuid().ToString("N") + ".pdf")
+                let path = Path.Combine(incoming, Guid.NewGuid().ToString("N") + Path.GetExtension name)
                 File.WriteAllBytes(path, bytes)
-                let name = Path.GetFileName address.LocalPath
-                platform.Open(path, (if String.IsNullOrWhiteSpace name then "paper.pdf" else name))
+                platform.Open(path, name)
             with e -> eprintfn "could not open %s: %s" p e.Message
         | None -> ()
     }

@@ -182,6 +182,7 @@ let figures (pages: Mistral.OcrPage list) (sizes: (float * float)[]) : Visual li
                           yield
                               { Id = id
                                 Kind = kind
+                                Page = page.Index
                                 Parts = [| { r with X = x0; Y = y0; W = x1 - x0; H = y1 - y0 } |]
                                 EqNumber = Some number
                                 RawText = cb.Content

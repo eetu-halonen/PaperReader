@@ -1,4 +1,4 @@
-/// Turning a PDF into a cached, narrated paper.
+/// Turning a document (a PDF, or any other format Formats reads) into a cached, narrated paper.
 module PaperReader.Import
 
 open System
@@ -93,8 +93,9 @@ let refreshCrops (platform: IPlatform) (settings: Settings) (paths: Store.Paths)
                         | Error _ -> return script // tried again next time
                 }
             if redraw && Directory.Exists(paths.Images id) then
-                for f in Directory.GetFiles(paths.Images id, "*.png") do
-                    File.Delete f
+                // only crops are redrawn; pictures OCR cut out of a scanned PDF are kept
+                for v in script.Visuals do
+                    if v.Parts.Length > 0 && File.Exists(paths.Image(id, v.Id)) then File.Delete(paths.Image(id, v.Id))
             let total = max 1 script.Visuals.Length
             let! _ =
                 renderCrops platform settings paths id script.Visuals (fun k ->
@@ -103,50 +104,145 @@ let refreshCrops (platform: IPlatform) (settings: Settings) (paths: Store.Paths)
             return script
     }
 
-/// Analyses, crops the math, narrates and caches a PDF. A paper imported before is returned from the cache.
+/// Leaves out visuals that couldn't be drawn, and the units' links to them.
+let private withoutVisuals (missing: Set<string>) (a: Analysis) =
+    if missing.IsEmpty then a
+    else
+        { a with
+            Visuals = a.Visuals |> Array.filter (fun v -> not (missing.Contains v.Id))
+            Units = a.Units |> Array.map (fun u -> match u.Visual with Some v when missing.Contains v -> { u with Visual = None } | _ -> u) }
+
+/// A document read into blocks: its pictures fetched and drawn, its text kept for questions. Returns the
+/// analysis, ready to narrate.
+let private fromBlocks (paths: Store.Paths) (id: string) (doc: Blocks.Document) (progress: Progress) (ct: CancellationToken) : Task<Analysis> =
+    task {
+        let links = doc.Blocks |> List.filter (function Blocks.Block.Image (Blocks.Link _, _, _) -> true | _ -> false) |> List.length
+        if links > 0 then progress (sprintf "Downloading the pictures (%d)" links) (Some 0.1)
+        let! doc = Blocks.resolveImages (Formats.fetchImage ct) doc
+        ct.ThrowIfCancellationRequested()
+        let analysis, pictures = Blocks.analyze doc
+        if analysis.Units |> Array.forall (fun u -> u.Kind = UnitKind.Title) then
+            failwith "No readable text was found in this document."
+        Directory.CreateDirectory(paths.Images id) |> ignore
+        let total = max 1 pictures.Length
+        let failed = Collections.Generic.HashSet<string>()
+        pictures |> List.iteri (fun k (vid, picture) ->
+            ct.ThrowIfCancellationRequested()
+            progress (sprintf "Drawing the pictures, equations and tables (%d of %d)" (k + 1) total) (Some(0.15 + 0.3 * float (k + 1) / float total))
+            let output = paths.Image(id, vid)
+            if not (File.Exists output) && not (Crops.drawPicture picture output) then failed.Add vid |> ignore)
+        File.WriteAllText(cropsMarker paths id, "")
+        let analysis = withoutVisuals (set failed) analysis
+        // the text Ask and the card maker read
+        File.WriteAllText(paths.PaperText id, Blocks.toMarkdown doc analysis)
+        return analysis
+    }
+
+/// Reads pages with Mistral OCR, pictures included (a photo of pages, or a scanned PDF without text).
+let private ocrPages (settings: Settings) (paths: Store.Paths) (id: string) (mime: string) (bytes: byte[]) (fallbackTitle: string)
+                     (progress: Progress) (ct: CancellationToken) =
+    task {
+        progress "Reading the pages with Mistral OCR" (Some 0.05)
+        let! pages = Mistral.ocrDocument settings.MistralApiKey mime bytes true ct
+        File.WriteAllText(ocrMarker paths id, "")
+        let doc = Formats.fromOcr pages fallbackTitle "photos or scans of pages, read by OCR (headers, footers and page numbers may be mixed in)"
+        return { doc with Blocks = doc.Blocks |> Markup.dropReferences |> Blocks.attachCaptions }
+    }
+
+/// Analyses, draws the visuals, narrates and caches a document: a PDF (layout analysis and math crops; OCR when
+/// it is a scan), a photo of pages (OCR), or any other format Formats reads. A document imported before is
+/// returned from the cache.
 let run (platform: IPlatform) (settings: Settings) (source: string) (displayName: string) (progress: Progress) (ct: CancellationToken)
     : Task<PaperInfo * Script * string option> =
     task {
         let paths = Store.Paths platform.DataDir
+        let bytes = File.ReadAllBytes source
+        // a link (shared from a browser, or a file holding just an address) stands for the document it points to
+        let original = source
+        let! source, displayName, bytes =
+            task {
+                match Formats.addressIn bytes with
+                | Some url ->
+                    progress (sprintf "Downloading %s" (Uri url).Host) None
+                    let! downloaded, name = Formats.fetchDocument url ct
+                    let incoming = Path.Combine(platform.DataDir, "incoming")
+                    Directory.CreateDirectory incoming |> ignore
+                    let path = Path.Combine(incoming, Guid.NewGuid().ToString("N") + Path.GetExtension name)
+                    File.WriteAllBytes(path, downloaded)
+                    return path, name, downloaded
+                | None -> return source, displayName, bytes
+            }
+        let format =
+            match Formats.detect displayName bytes with
+            | Some f -> f
+            | None -> failwith (Formats.unsupported displayName)
         let id = Store.paperId source
         Directory.CreateDirectory(paths.Paper id) |> ignore
-        let pdf = paths.Pdf id
-        if not (File.Exists pdf) then File.Copy(source, pdf)
+        let stored = match format with Formats.Format.Pdf -> paths.Pdf id | f -> paths.Document(id, Formats.extension f)
+        if not (File.Exists stored) then File.Copy(source, stored)
+        if source <> original then try File.Delete source with _ -> () // the download's temporary copy
+        let fallbackTitle = Path.GetFileNameWithoutExtension displayName
         match Store.loadScript paths id, Store.loadMeta paths id with
         | Some script, Some meta -> return meta, script, None
         | _ ->
-            progress "Reading the paper" (Some 0.02)
-            let! analysis =
-                Task.Run(fun () ->
-                    Layout.analyze pdf (fun page pages ->
-                        progress (sprintf "Reading page %d of %d" page pages) (Some(0.02 + 0.3 * float page / float pages))))
-            if sentenceCount analysis < 3 then
-                failwith "No readable text was found in this PDF. Scanned papers (pictures of pages) aren't supported."
-            ct.ThrowIfCancellationRequested()
-
             let! analysis, ocrWarning =
                 task {
-                    if not (Settings.hasKey settings) then return analysis, None
-                    else
-                        progress "Checking the equations and figures with Mistral OCR" (Some 0.3)
-                        match! runOcr settings pdf analysis.Visuals ct with
-                        | Ok (visuals, figures) ->
-                            File.WriteAllText(ocrMarker paths id, "")
-                            return
-                                { analysis with Visuals = Array.append visuals (Array.ofList figures); Units = Ocr.linkCaptions figures analysis.Units },
-                                None
-                        | Error m -> return analysis, Some("the equation and figure check with Mistral OCR failed: " + m)
+                    match format with
+                    | Formats.Format.Pdf ->
+                        let pdf = stored
+                        progress "Reading the paper" (Some 0.02)
+                        let! analysis =
+                            Task.Run(fun () ->
+                                Layout.analyze pdf (fun page pages ->
+                                    progress (sprintf "Reading page %d of %d" page pages) (Some(0.02 + 0.3 * float page / float pages))))
+                        ct.ThrowIfCancellationRequested()
+                        if sentenceCount analysis < 3 then
+                            // a scan: pictures of pages, no text to extract
+                            if not (Settings.hasKey settings) then
+                                return failwith "No readable text was found in this PDF: it looks like a scan (pictures of pages). Add a Mistral API key in Settings to read scans with OCR."
+                            else
+                                let! doc = ocrPages settings paths id "application/pdf" bytes fallbackTitle progress ct
+                                let! a = fromBlocks paths id doc progress ct
+                                return { a with PageCount = max a.PageCount analysis.PageCount }, None
+                        else
+                            let! analysis, ocrWarning =
+                                task {
+                                    if not (Settings.hasKey settings) then return analysis, None
+                                    else
+                                        progress "Checking the equations and figures with Mistral OCR" (Some 0.3)
+                                        match! runOcr settings pdf analysis.Visuals ct with
+                                        | Ok (visuals, figures) ->
+                                            File.WriteAllText(ocrMarker paths id, "")
+                                            return
+                                                { analysis with Visuals = Array.append visuals (Array.ofList figures); Units = Ocr.linkCaptions figures analysis.Units },
+                                                None
+                                        | Error m -> return analysis, Some("the equation and figure check with Mistral OCR failed: " + m)
+                                }
+                            ct.ThrowIfCancellationRequested()
+
+                            let total = max 1 analysis.Visuals.Length
+                            progress "Cutting out the equations" (Some 0.33)
+                            let! _ =
+                                renderCrops platform settings paths id analysis.Visuals (fun k ->
+                                    progress (sprintf "Cutting out the math (%d of %d)" k total) (Some(0.33 + 0.12 * float k / float total))) ct
+                            return analysis, ocrWarning
+                    | Formats.Format.Image mime ->
+                        if not (Settings.hasKey settings) then
+                            return failwith "Reading a photo of pages needs Mistral OCR: add a Mistral API key in Settings."
+                        else
+                            let! doc = ocrPages settings paths id mime bytes fallbackTitle progress ct
+                            let! a = fromBlocks paths id doc progress ct
+                            return a, None
+                    | f ->
+                        progress (sprintf "Reading the %s" ((Formats.describe (Formats.key f)).ToLowerInvariant())) (Some 0.02)
+                        let! doc = Task.Run(fun () -> Formats.read f bytes fallbackTitle)
+                        let! a = fromBlocks paths id doc progress ct
+                        return a, None
                 }
             ct.ThrowIfCancellationRequested()
 
-            let total = max 1 analysis.Visuals.Length
-            progress "Cutting out the equations" (Some 0.33)
-            let! _ =
-                renderCrops platform settings paths id analysis.Visuals (fun k ->
-                    progress (sprintf "Cutting out the math (%d of %d)" k total) (Some(0.33 + 0.12 * float k / float total))) ct
-
             let title =
-                if String.IsNullOrWhiteSpace analysis.Title || analysis.Title = "paper" then Path.GetFileNameWithoutExtension displayName
+                if String.IsNullOrWhiteSpace analysis.Title || analysis.Title = "paper" then fallbackTitle
                 else analysis.Title
             let analysis = { analysis with Title = title }
             let! script, warning =
@@ -169,6 +265,7 @@ let run (platform: IPlatform) (settings: Settings) (source: string) (displayName
             let meta =
                 { Id = id
                   Title = title
+                  Format = Formats.key format
                   PageCount = analysis.PageCount
                   AddedUtc = DateTime.UtcNow
                   SegmentCount = script.Segments.Length

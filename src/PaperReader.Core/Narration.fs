@@ -136,29 +136,32 @@ let buildLocal (a: Analysis) = finalize a "offline" (localDrafts a.Units)
 // Mistral narration
 // ---------------------------------------------------------------------------------------------
 
-let systemPrompt = """You write the narration script for a phone app that reads scientific papers aloud. A text-to-speech voice speaks your text while the listener watches the phone, where images of the paper's equations, figures and tables appear.
+let systemPrompt = """You write the narration script for a phone app that reads documents aloud: mostly scientific papers, but also articles and web pages, book chapters, reports, lecture slides and notes. A text-to-speech voice speaks your text while the listener watches the phone, where images of the document's equations, figures and tables appear.
 
-You receive the text of part of a paper, extracted from a PDF, as numbered source units in reading order:
-- [T#] the title, [H#] a section heading,
-- [S#] a sentence. Extraction garbles inline math: subscripts appear as x_{i}, superscripts as x^{2}, symbols may be missing or odd.
-- [E#] a display equation. Its image is attached right after it; the extracted text is only a rough hint, the OCR LaTeX (when given) is usually exact.
-- [S#] marked CAPTION of Figure N or Table N: the figure's or table's image is attached right after it.
+You receive the text of part of a document as numbered source units in reading order. DOCUMENT TYPE says what kind of document it is and how its text was read; fit the narration to it (a paper, a novel, a slide deck and a how-to guide are read differently, but always faithfully).
+- [T#] the title, [H#] a section heading (in slides, a slide title; in a book, a chapter title),
+- [S#] a sentence. Text extracted from a PDF garbles inline math: subscripts appear as x_{i}, superscripts as x^{2}, symbols may be missing or odd. Other documents give inline math as $LaTeX$.
+- [E#] a display equation. Its image is attached right after it; the extracted text is only a rough hint, LaTeX (when given) is usually exact.
+- [S#] marked CAPTION of Figure N or Table N, or PICTURE / TABLE without a number: the image is attached right after it.
 
 Write segments that narrate every unit, in order. Rules:
 1. Be faithful. Narrate every sentence; do not summarise, skip, reorder, or add claims. Rephrase only as much as needed for listening; keep the authors' wording otherwise.
 2. Read inline math the way a lecturer says it aloud: "x sub i", "theta transpose x", "the norm of w, squared", "the sum over i from 1 to n of ...". Use the context to repair garbled extraction.
 3. For each [E#] write one segment (or a few) with "src" and "show" set to that id. Start with "Equation N." if it is numbered (never read the number in brackets); for an unnumbered one just say what it states. Then say what it states: read it fully in words when it is short; when it is long, walk through it clearly, left side then right side, without skipping terms. Use the image; trust it over the extracted text.
    For an ALGORITHM unit: read its caption, then walk through the steps in order, briefly, reading the math in words.
+   For a CODE LISTING: say in a sentence what the code does, then walk through its main steps in words; never read out punctuation or symbols one by one.
 4. When a sentence explains or refers to an equation (for example "where x is ..." right after it, or "as in Equation 3"), set "show" to that equation's id so the listener can look at it. Likewise, when a sentence refers to a figure or table ("Figure 2 shows", "see Table 3"), set "show" to its id (Fig2, Tab3). Earlier ones are listed under KNOWN EQUATIONS AND FIGURES.
-   For a CAPTION: read the caption, then add one to three sentences saying what the image shows, with "show" set to its id: for a chart, what is plotted against what and the main trend; for a diagram, its main parts and how they connect; for a table, what is compared and the headline result (do not read out every number).
+   For a CAPTION: read the caption, then add one to three sentences saying what the image shows, with "show" set to its id: for a chart, what is plotted against what and the main trend; for a diagram, its main parts and how they connect; for a table, what is compared and the headline result (do not read out every number); for a photo or illustration, what it depicts.
+   For a PICTURE or TABLE without a caption: in one or two sentences say what it shows, with "show" set to its id. If it is decoration (a logo, an icon, a portrait of the author, a divider), output it with "say": "" so it is skipped.
    If an [E#] is not a real equation (a table cell, a figure label), output it with "say": "" so it is skipped.
 5. Drop citation markers like [12] or (Smith et al., 2020) unless the authors are the subject of the sentence; drop footnote marks, and say "a link" for URLs. Skip stray text from inside figures or tables.
-6. Headings: say them as "Section 3. Method." or "Appendix A. Proofs." A title is read as is.
+6. Headings: a numbered one as "Section 3. Method." or "Appendix A. Proofs."; a chapter or slide title as it is written. A title is read as is.
+   Slides and lists are terse: turn bullet fragments into short spoken sentences without adding claims.
 7. Expand abbreviations: e.g. -> for example, i.e. -> that is, et al. -> and colleagues, Fig. -> Figure, Eq. -> Equation, w.r.t. -> with respect to.
 8. Each segment is one sentence, or two short ones; at most 60 words. Plain spoken English: no markdown, no LaTeX, no symbols a voice cannot pronounce.
 
 Answer with JSON only: {"segments":[{"src":"S12","say":"...","show":null}]}
-"src" is the id of the unit narrated; "show" is an E, Fig or Tab id, or null."""
+"src" is the id of the unit narrated; "show" is the id of an equation, figure, picture or table (E, Fig, Tab, Pic or Grid ids), or null."""
 
 type private Chunk = { Units: SourceUnit list }
 
@@ -189,8 +192,23 @@ let private label (u: SourceUnit) (visuals: Collections.Generic.IDictionary<stri
     | UnitKind.Sentence ->
         match u.Visual |> Option.bind (fun v -> match visuals.TryGetValue v with | true, x -> Some x | _ -> None) with
         | Some v when v.Kind = VisualKind.Figure || v.Kind = VisualKind.Table ->
-            sprintf "[%s] CAPTION of %s %s: %s\n(image of %s follows)" u.Id (if v.Kind = VisualKind.Table then "Table" else "Figure") (defaultArg v.EqNumber "") u.Text v.Id
+            let name = if v.Kind = VisualKind.Table then "Table" else "Figure"
+            // a table taken from the document's text also comes as text: numbers are read more reliably from it
+            let contents =
+                if v.Kind = VisualKind.Table && v.Parts.Length = 0 && v.RawText.Contains "|" then
+                    let t = v.RawText.Substring(v.RawText.IndexOf '|')
+                    "\nTable contents:\n" + (if t.Length > 3000 then t.Substring(0, 3000) + " …" else t)
+                else ""
+            match v.EqNumber with
+            | Some n -> sprintf "[%s] CAPTION of %s %s: %s%s\n(image of %s follows)" u.Id name n u.Text contents v.Id
+            | None when u.Text = "Picture." || u.Text = "Table." ->
+                sprintf "[%s] %s %s without a caption%s\n(image of %s follows)" u.Id (if v.Kind = VisualKind.Table then "TABLE" else "PICTURE") v.Id contents v.Id
+            | None -> sprintf "[%s] CAPTION of %s %s (unnumbered): %s%s\n(image of %s follows)" u.Id (name.ToLowerInvariant()) v.Id u.Text contents v.Id
         | _ -> sprintf "[%s] %s" u.Id u.Text
+    | UnitKind.Equation when (u.Visual |> Option.exists (fun v -> visuals.ContainsKey v && visuals.[v].Kind = VisualKind.Algorithm && visuals.[v].Parts.Length = 0)) ->
+        // a listing taken from the document's text: code, or pseudo-code
+        let code = if u.Text.Length > 4000 then u.Text.Substring(0, 4000) + "\n…" else u.Text
+        sprintf "[%s] CODE LISTING:\n%s\n(image of %s follows)" u.Id code u.Id
     | UnitKind.Equation when (u.Visual |> Option.exists (fun v -> visuals.ContainsKey v && visuals.[v].Kind = VisualKind.Algorithm)) ->
         sprintf "[%s] ALGORITHM (pseudo-code listing with its caption). Extracted text: %s\n(image of %s follows)" u.Id (u.Text.Replace("\n", " / ")) u.Id
     | UnitKind.Equation ->
@@ -200,7 +218,7 @@ let private label (u: SourceUnit) (visuals: Collections.Generic.IDictionary<stri
             | None -> " unnumbered"
         match u.Visual |> Option.bind (fun v -> match visuals.TryGetValue v with | true, x -> x.Latex | _ -> None) with
         | Some latex ->
-            sprintf "[%s] EQUATION%s. LaTeX (read by OCR): %s\n(image of %s follows)" u.Id num (latex.Replace("\n", @" \\ ")) u.Id
+            sprintf "[%s] EQUATION%s. LaTeX: %s\n(image of %s follows)" u.Id num (latex.Replace("\n", @" \\ ")) u.Id
         | None -> sprintf "[%s] EQUATION%s. Extracted text: %s\n(image of %s follows)" u.Id num (u.Text.Replace("\n", " ")) u.Id
 
 let private cleanSay (s: string) =
@@ -300,8 +318,8 @@ let buildWithMistral
                     let header =
                         let k = knownBefore c
                         let sectionTitle = a.Sections.[min (a.Sections.Length - 1) c.Units.Head.Section]
-                        sprintf "PAPER: %s\nCURRENT SECTION: %s\nKNOWN EQUATIONS AND FIGURES: %s\n\nSOURCE UNITS:\n"
-                            a.Title sectionTitle (if k.Length = 0 then "none" else String.Join("; ", k))
+                        sprintf "DOCUMENT: %s\nDOCUMENT TYPE: %s\nCURRENT SECTION: %s\nKNOWN EQUATIONS AND FIGURES: %s\n\nSOURCE UNITS:\n"
+                            a.Title a.Source sectionTitle (if k.Length = 0 then "none" else String.Join("; ", k))
                     let text = Text.StringBuilder(header)
                     for u in c.Units do
                         text.AppendLine(label u visuals) |> ignore

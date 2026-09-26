@@ -105,7 +105,7 @@ let ``script survives a save and load`` () =
     let root = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString "N")
     let paths = Store.Paths root
     Directory.CreateDirectory(paths.Paper "abc") |> ignore
-    let visual = { Id = "E3"; Kind = VisualKind.Algorithm; Parts = [| { Page = 1; X = 1.5; Y = 2.0; W = 30.0; H = 4.0 }; { Page = 1; X = 5.0; Y = 9.0; W = 10.0; H = 3.0 } |]; EqNumber = Some "1"; RawText = "x_{i}"; Latex = Some @"x_{i}" }
+    let visual = { Id = "E3"; Kind = VisualKind.Algorithm; Page = 1; Parts = [| { Page = 1; X = 1.5; Y = 2.0; W = 30.0; H = 4.0 }; { Page = 1; X = 5.0; Y = 9.0; W = 10.0; H = 3.0 } |]; EqNumber = Some "1"; RawText = "x_{i}"; Latex = Some @"x_{i}" }
     let script =
         { Version = Script.currentVersion; Title = "T"; PageCount = 2; Narrator = "offline"
           Sections = [| { Title = "T"; FirstSegment = 0 } |]
@@ -122,9 +122,9 @@ let ``script survives a save and load`` () =
 [<Fact>]
 let ``an equation stays on screen for the sentences that explain it`` () =
     let unit id kind vis = { Id = id; Kind = kind; Text = id; Spoken = "say " + id; Visual = vis; Page = 0; Section = 1; ParagraphEnd = false }
-    let v = { Id = "E1"; Kind = VisualKind.Equation; Parts = [| { Page = 0; X = 0.0; Y = 0.0; W = 1.0; H = 1.0 } |]; EqNumber = Some "4"; RawText = ""; Latex = None }
+    let v = { Id = "E1"; Kind = VisualKind.Equation; Page = 0; Parts = [| { Page = 0; X = 0.0; Y = 0.0; W = 1.0; H = 1.0 } |]; EqNumber = Some "4"; RawText = ""; Latex = None }
     let a =
-        { Title = "T"; PageCount = 1; Sections = [| "T"; "S" |]; Visuals = [| v |]
+        { Title = "T"; Source = "test"; PageCount = 1; Sections = [| "T"; "S" |]; Visuals = [| v |]
           Units = [| unit "E1" UnitKind.Equation (Some "E1"); unit "S1" UnitKind.Sentence None; unit "S2" UnitKind.Sentence None
                      unit "S3" UnitKind.Sentence None; unit "S4" UnitKind.Sentence None; { unit "S5" UnitKind.Sentence None with Spoken = "As Equation 4 shows." } |] }
     let s = Narration.buildLocal a
@@ -143,7 +143,7 @@ let private scriptWith (segments: Segment[]) (visuals: Visual[]) =
     { Version = Script.currentVersion; Title = "T"; PageCount = 1; Narrator = "offline"
       Sections = [| { Title = "T"; FirstSegment = 0 } |]; Segments = segments; Visuals = visuals }
 
-let private eq id = { Id = id; Kind = VisualKind.Equation; Parts = [| { Page = 0; X = 0.0; Y = 0.0; W = 10.0; H = 10.0 } |]; EqNumber = None; RawText = ""; Latex = None }
+let private eq id = { Id = id; Kind = VisualKind.Equation; Page = 0; Parts = [| { Page = 0; X = 0.0; Y = 0.0; W = 10.0; H = 10.0 } |]; EqNumber = None; RawText = ""; Latex = None }
 
 [<Fact>]
 let ``the reader stops after the last sentence that explains an equation, not after the ones that only keep it up`` () =
@@ -183,7 +183,7 @@ let ``OCR grows a display equation that was cut short and records its LaTeX`` ()
     // page 600 x 800 pt, OCR image 1200 x 1600 px (2 px per point)
     let v = { eq "E1" with Parts = [| { Page = 0; X = 100.0; Y = 200.0; W = 150.0; H = 20.0 } |] }
     let block = { Mistral.X0 = 190.0; Mistral.Y0 = 396.0; Mistral.X1 = 560.0; Mistral.Y1 = 444.0; Mistral.Kind = "equation"; Mistral.Content = "$$y = f(x) + g(x)$$" }
-    let page = { Mistral.Index = 0; Mistral.Width = 1200.0; Mistral.Height = 1600.0; Mistral.Markdown = ""; Mistral.Blocks = [ block ] }
+    let page = { Mistral.Index = 0; Mistral.Width = 1200.0; Mistral.Height = 1600.0; Mistral.Markdown = ""; Mistral.Blocks = [ block ]; Mistral.Images = [] }
     let refined = (Ocr.refine [ page ] [| 600.0, 800.0 |] [| v |]).[0]
     let r = refined.Parts.[0]
     Assert.Equal(95.0, r.X, 3)
@@ -196,7 +196,7 @@ let ``OCR grows a display equation that was cut short and records its LaTeX`` ()
 let ``an OCR block elsewhere on the page leaves the equation alone`` () =
     let v = { eq "E1" with Parts = [| { Page = 0; X = 100.0; Y = 200.0; W = 150.0; H = 20.0 } |] }
     let block = { Mistral.X0 = 100.0; Mistral.Y0 = 1000.0; Mistral.X1 = 400.0; Mistral.Y1 = 1040.0; Mistral.Kind = "equation"; Mistral.Content = "$$z$$" }
-    let page = { Mistral.Index = 0; Mistral.Width = 1200.0; Mistral.Height = 1600.0; Mistral.Markdown = ""; Mistral.Blocks = [ block ] }
+    let page = { Mistral.Index = 0; Mistral.Width = 1200.0; Mistral.Height = 1600.0; Mistral.Markdown = ""; Mistral.Blocks = [ block ]; Mistral.Images = [] }
     let refined = (Ocr.refine [ page ] [| 600.0, 800.0 |] [| v |]).[0]
     Assert.Equal<PageRect[]>(v.Parts, refined.Parts)
     Assert.Equal(None, refined.Latex)
@@ -222,7 +222,7 @@ let private block kind x0 y0 x1 y1 content =
 let ``OCR images, sub-captions and tables are paired with their numbered captions`` () =
     // page image 600 x 800 px for a 600 x 800 pt page: 1 px per point
     let page =
-        { Mistral.Index = 0; Mistral.Width = 600.0; Mistral.Height = 800.0; Mistral.Markdown = ""
+        { Mistral.Index = 0; Mistral.Width = 600.0; Mistral.Height = 800.0; Mistral.Markdown = ""; Mistral.Images = []
           Mistral.Blocks =
             [ block "caption" 100.0 40.0 200.0 50.0 "(a) Left panel"
               block "image" 100.0 55.0 280.0 200.0 "![img-0](img-0)"
@@ -268,7 +268,7 @@ let ``"Figure 1" and "Equation 1" point at different images`` () =
     let e1 = { eq "E1" with EqNumber = Some "1" }
     let f1 = { eq "Fig1" with Kind = VisualKind.Figure; EqNumber = Some "1" }
     let a =
-        { Title = "T"; PageCount = 1; Sections = [| "T"; "S" |]; Visuals = [| e1; f1 |]
+        { Title = "T"; Source = "test"; PageCount = 1; Sections = [| "T"; "S" |]; Visuals = [| e1; f1 |]
           Units = [| unit "S1" "See Figure 1 for the model." None; unit "S2" "Heading break." None
                      { unit "H1" "2 Method" None with Kind = UnitKind.Heading }; unit "S3" "By Equation 1 we get it." None |] }
     let s = Narration.buildLocal a
@@ -366,7 +366,7 @@ let ``typed queries are recognised as arXiv ids, DOIs, PDF addresses or words`` 
     Assert.Equal(Discover.Query.Arxiv "2006.11239", Discover.parseQuery "https://arxiv.org/abs/2006.11239v3")
     Assert.Equal(Discover.Query.Arxiv "2006.11239", Discover.parseQuery "https://arxiv.org/pdf/2006.11239.pdf")
     Assert.Equal(Discover.Query.Doi "10.1038/s41586-021-03819-2", Discover.parseQuery "https://doi.org/10.1038/s41586-021-03819-2")
-    Assert.Equal(Discover.Query.PdfUrl "https://example.org/paper.pdf", Discover.parseQuery "https://example.org/paper.pdf")
+    Assert.Equal(Discover.Query.Url "https://example.org/paper.pdf", Discover.parseQuery "https://example.org/paper.pdf")
     Assert.Equal(Discover.Query.Words "attention is all you need", Discover.parseQuery "  attention is all you need ")
 
 [<Fact>]

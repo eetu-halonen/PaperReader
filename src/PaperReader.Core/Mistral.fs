@@ -257,22 +257,25 @@ let transcribe (key: string) (audio: byte[]) (fileName: string) (ct: Cancellatio
 /// A region Mistral OCR recognised, in pixels of its page image.
 type OcrBlock = { X0: float; Y0: float; X1: float; Y1: float; Kind: string; Content: string }
 
-/// One page of Mistral OCR output. Width and Height are the page image's size in pixels.
-type OcrPage = { Index: int; Width: float; Height: float; Markdown: string; Blocks: OcrBlock list }
+/// One page of Mistral OCR output. Width and Height are the page image's size in pixels. Images are the
+/// pictures found on the page (their id as the markdown names them, and the encoded image), when asked for.
+type OcrPage = { Index: int; Width: float; Height: float; Markdown: string; Blocks: OcrBlock list; Images: (string * byte[]) list }
 
 let ocrModel = "mistral-ocr-latest"
 
-/// Mistral OCR on a PDF ("application/pdf") or an image ("image/png"); returns markdown with LaTeX math.
-let ocr (key: string) (mime: string) (bytes: byte[]) (ct: CancellationToken) : Task<OcrPage list> =
+/// Mistral OCR on a document (a PDF, "application/pdf") or an image ("image/png", "image/jpeg", ...); returns
+/// markdown with LaTeX math, page by page. With `withImages`, the pictures on each page come back too.
+let ocrDocument (key: string) (mime: string) (bytes: byte[]) (withImages: bool) (ct: CancellationToken) : Task<OcrPage list> =
     task {
         let uri = sprintf "data:%s;base64,%s" mime (Convert.ToBase64String bytes)
-        let kind, field = if mime = "application/pdf" then "document_url", "document_url" else "image_url", "image_url"
+        let kind, field = if mime.StartsWith "image/" then "image_url", "image_url" else "document_url", "document_url"
         let doc =
             JsonObject([ Collections.Generic.KeyValuePair("type", JsonValue.Create kind :> JsonNode)
                          Collections.Generic.KeyValuePair(field, JsonValue.Create uri :> JsonNode) ])
         let payload =
             JsonObject([ Collections.Generic.KeyValuePair("model", JsonValue.Create ocrModel :> JsonNode)
                          Collections.Generic.KeyValuePair("document", doc :> JsonNode) ])
+        if withImages then payload.["include_image_base64"] <- JsonValue.Create true
         let! body =
             send key (fun () -> new HttpRequestMessage(HttpMethod.Post, baseUrl + "/v1/ocr", Content = jsonContent payload)) ct
         use d = JsonDocument.Parse body
@@ -294,10 +297,26 @@ let ocr (key: string) (mime: string) (bytes: byte[]) (ct: CancellationToken) : T
                                 { X0 = num b "top_left_x"; Y0 = num b "top_left_y"; X1 = num b "bottom_right_x"; Y1 = num b "bottom_right_y"
                                   Kind = str b "type"; Content = str b "content" } ]
                       | _ -> []
+                  let images =
+                      match p.TryGetProperty "images" with
+                      | true, xs when xs.ValueKind = JsonValueKind.Array ->
+                          [ for x in xs.EnumerateArray() do
+                                let data = str x "image_base64"
+                                let data = match data.IndexOf "base64," with -1 -> data | k -> data.Substring(k + 7)
+                                if data <> "" then
+                                    match (try Some(Convert.FromBase64String data) with _ -> None) with
+                                    | Some bytes -> yield str x "id", bytes
+                                    | None -> () ]
+                      | _ -> []
                   yield
                       { Index = int (num p "index")
                         Width = dims |> Option.map (fun x -> num x "width") |> Option.defaultValue 0.0
                         Height = dims |> Option.map (fun x -> num x "height") |> Option.defaultValue 0.0
                         Markdown = str p "markdown"
-                        Blocks = blocks } ]
+                        Blocks = blocks
+                        Images = images } ]
     }
+
+/// Mistral OCR without the pictures: the text and the layout blocks.
+let ocr (key: string) (mime: string) (bytes: byte[]) (ct: CancellationToken) : Task<OcrPage list> =
+    ocrDocument key mime bytes false ct

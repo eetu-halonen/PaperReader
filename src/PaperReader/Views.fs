@@ -166,6 +166,14 @@ let private textLink (text: string) (onClick: unit -> unit) (key: obj) : IView =
         Button.onClick ((fun _ -> onClick ()), SubPatchOptions.OnChangeOf key)
     ]
 
+let private capitalize (s: string) = if s = "" then s else string (Char.ToUpperInvariant s.[0]) + s.Substring 1
+
+/// "12 pages" for a PDF, "EPUB book · 9 chapters" for other documents.
+let private sizeLabel (p: PaperInfo) =
+    let noun = Formats.pageNoun p.Format
+    let count = sprintf "%d %s%s" p.PageCount noun (if p.PageCount = 1 then "" else "s")
+    if p.Format = "pdf" then count else sprintf "%s · %s" (Formats.describe p.Format) count
+
 let private formatMinutes (ms: int) =
     let minutes = int (Math.Round(float ms / 60000.0))
     if ms <= 0 then "done"
@@ -211,7 +219,7 @@ let private paperCard (model: Model) (p: PaperInfo) (dispatch: Msg -> unit) : IV
                                 TextBlock.maxLines 3
                                 TextBlock.textTrimming TextTrimming.CharacterEllipsis
                             ]
-                            label (sprintf "%d pages%s" p.PageCount progress) 13.0 Palette.muted
+                            label (sizeLabel p + progress) 13.0 Palette.muted
                         ]
                     ]
                 )
@@ -338,7 +346,7 @@ let private libraryView (model: Model) (dispatch: Msg -> unit) : IView =
                                 TextBlock.fontWeight FontWeight.Bold
                                 TextBlock.foreground Palette.text
                             ]
-                            label "Listen to papers. The math appears on screen." 14.0 Palette.muted
+                            label "Listen to papers, books, articles and notes. The math appears on screen." 14.0 Palette.muted
                         ]
                     ]
                     StackPanel.create [
@@ -358,7 +366,7 @@ let private libraryView (model: Model) (dispatch: Msg -> unit) : IView =
                 Grid.margin (Thickness(16.0, 8.0, 16.0, 16.0))
                 Grid.children [
                     bigButton 0 Icons.search "Find papers" false (fun () -> dispatch OpenDiscover)
-                    bigButton 2 Icons.plus "Open a PDF" true (fun () -> dispatch OpenPdf)
+                    bigButton 2 Icons.plus "Open a document" true (fun () -> dispatch OpenDocument)
                 ]
             ]
             ScrollViewer.create [
@@ -380,7 +388,7 @@ let private libraryView (model: Model) (dispatch: Msg -> unit) : IView =
                                             TextBlock.horizontalAlignment HorizontalAlignment.Center
                                         ]
                                         TextBlock.create [
-                                            TextBlock.text "Find a paper to listen to, open a PDF, or share one to Paper Reader from another app. Each paper is prepared once and kept on this device, so it opens instantly afterwards."
+                                            TextBlock.text "Find a paper to listen to, open a document (PDF, EPUB, Word, slides, web page, Markdown, text, or a photo of pages), or share one to Paper Reader from another app. Each one is prepared once and kept on this device, so it opens instantly afterwards."
                                             TextBlock.fontSize 14.0
                                             TextBlock.foreground Palette.muted
                                             TextBlock.textWrapping TextWrapping.Wrap
@@ -536,8 +544,8 @@ let private findCard (model: Model) (f: Discover.Found) (dispatch: Msg -> unit) 
                             StackPanel.children [
                                 label e 13.0 Palette.danger
                                 label
-                                    (if f.Page.IsSome then "Open the web page, download the PDF there, and share it to Paper Reader (or open it with Open a PDF)."
-                                     else "Download it in a browser and open it with Open a PDF.")
+                                    (if f.Page.IsSome then "Open the web page, download the PDF there, and share it to Paper Reader (or open it with Open a document)."
+                                     else "Download it in a browser and open it with Open a document.")
                                     12.0 Palette.muted
                             ]
                         ]
@@ -611,7 +619,7 @@ let private discoverView (model: Model) (dispatch: Msg -> unit) : IView =
                     TextBox.create [
                         Grid.column 0
                         TextBox.text d.Input
-                        TextBox.watermark "Search topics, titles, authors, or paste an arXiv id or DOI"
+                        TextBox.watermark "Search topics, titles, authors, or paste an arXiv id, DOI or web address"
                         TextBox.fontSize 15.0
                         TextBox.cornerRadius 22.0
                         TextBox.padding (Thickness(16.0, 11.0))
@@ -1008,7 +1016,7 @@ let private controls (model: Model) (r: ReaderState) (dispatch: Msg -> unit) : I
                                 Grid.column 0
                                 TextBlock.text (
                                     if r.Finished then "Finished"
-                                    else sprintf "Section %d of %d · page %d of %d" (max 1 seg.Section) sectionCount (seg.Page + 1) r.Script.PageCount)
+                                    else sprintf "Section %d of %d · %s %d of %d" (max 1 seg.Section) sectionCount (Formats.pageNoun r.Paper.Format) (seg.Page + 1) r.Script.PageCount)
                                 TextBlock.fontSize 12.0
                                 TextBlock.foreground Palette.muted
                             ]
@@ -2485,7 +2493,7 @@ let private walkingOverlay (model: Model) (r: ReaderState) (dispatch: Msg -> uni
                                     TextBlock.create [
                                         TextBlock.text (
                                             if r.Finished then "Finished"
-                                            else sprintf "Page %d of %d · %s" (seg.Page + 1) r.Script.PageCount (formatMinutes (remainingMs r model.Settings.Speed)))
+                                            else sprintf "%s %d of %d · %s" (capitalize (Formats.pageNoun r.Paper.Format)) (seg.Page + 1) r.Script.PageCount (formatMinutes (remainingMs r model.Settings.Speed)))
                                         TextBlock.fontSize 13.0
                                         TextBlock.foreground Palette.muted
                                         TextBlock.textTrimming TextTrimming.CharacterEllipsis

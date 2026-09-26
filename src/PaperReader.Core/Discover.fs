@@ -78,12 +78,13 @@ let doiOf (text: string) : string option =
         let m = doiRx.Match text
         if m.Success then Some(m.Groups.[1].Value.TrimEnd('.', ',', ';', ')')) else None
 
-/// What a typed query is: an arXiv id or address, a DOI, a PDF address, or words to search for.
+/// What a typed query is: an arXiv id or address, a DOI, a web address (of a PDF, a web page or any other
+/// document), or words to search for.
 [<RequireQualifiedAccess>]
 type Query =
     | Arxiv of string
     | Doi of string
-    | PdfUrl of string
+    | Url of string
     | Words of string
 
 let parseQuery (text: string) : Query =
@@ -96,7 +97,7 @@ let parseQuery (text: string) : Query =
     | _ ->
         match doiOf t with
         | Some d when not (t.Contains ' ') -> Query.Doi d
-        | _ when isUrl && not (t.Contains ' ') -> Query.PdfUrl t
+        | _ when isUrl && not (t.Contains ' ') -> Query.Url t
         | _ -> Query.Words t
 
 /// Lower-case letters and digits only, for comparing titles.
@@ -350,7 +351,7 @@ let lookup (key: string) (query: Query) (ct: CancellationToken) : Task<Found opt
                             { Key = "arXiv:" + id; Title = "arXiv:" + id; Authors = []; Year = None; Venue = Some "arXiv"; Abstract = None
                               Citations = 0; Pdfs = [ pdf ]; Page = Some("https://arxiv.org/abs/" + id); Doi = None; Arxiv = Some id; OpenAlex = None }
         | Query.Doi doi -> return! byDoi key doi ct
-        | Query.PdfUrl url ->
+        | Query.Url url ->
             let name = try Uri.UnescapeDataString(Path.GetFileNameWithoutExtension(Uri(url).AbsolutePath)) with _ -> url
             return
                 Some
@@ -589,7 +590,8 @@ let isPdf (bytes: byte[]) =
 
 let private maxBytes = 150L * 1024L * 1024L
 
-/// Downloads the paper's PDF into `folder`, trying each address in turn. Returns the file and a display name.
+/// Downloads the paper's PDF into `folder`, trying each address in turn (for an address typed in, whatever
+/// document is there). Returns the file and a display name.
 let download (f: Found) (folder: string) (progress: string -> unit) (ct: CancellationToken) : Task<string * string> =
     task {
         Directory.CreateDirectory folder |> ignore
@@ -616,6 +618,14 @@ let download (f: Found) (folder: string) (progress: string -> unit) (ct: Cancell
                                 let safe = Regex.Replace(f.Title, @"[^\p{L}\p{N} \-_.,]", "").Trim()
                                 (if safe.Length > 80 then safe.Substring(0, 80) else safe) + ".pdf"
                             result <- Some(path, name)
+                        elif f.Key = url then
+                            // an address typed or pasted (see lookup): any document the app reads, a web page too
+                            match Formats.downloaded url bytes with
+                            | Some (b, name) ->
+                                let path = Path.Combine(folder, Guid.NewGuid().ToString("N") + Path.GetExtension name)
+                                File.WriteAllBytes(path, b)
+                                result <- Some(path, name)
+                            | None -> failures <- sprintf "%s sent something Paper Reader can't read" (host url) :: failures
                         else failures <- sprintf "%s sent a web page, not the PDF" (host url) :: failures
                 with
                 | :? OperationCanceledException when ct.IsCancellationRequested -> raise (OperationCanceledException())

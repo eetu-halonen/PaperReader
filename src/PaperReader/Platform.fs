@@ -44,8 +44,9 @@ type IPlatform =
     abstract EndPlayback: unit -> unit
     /// Play (true) or pause (false) requests from outside the app: notification, headset, calls.
     abstract SetRemoteHandler: (bool -> unit) -> unit
-    /// PDFs shared to or opened with the app arrive here (a local copy of the file, and its display name).
-    abstract SetIncomingPdfHandler: (string * string -> unit) -> unit
+    /// Documents shared to or opened with the app arrive here (a local copy of the file, and its display name,
+    /// whose extension helps tell the format).
+    abstract SetIncomingFileHandler: (string * string -> unit) -> unit
     /// Makes a folder of the data directory available before it is read. Only the browser keeps some
     /// files (a paper's audio) outside the file system until they are needed; elsewhere this does nothing.
     abstract Restore: folder: string -> Task
