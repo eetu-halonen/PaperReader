@@ -83,6 +83,7 @@ let saveSettings (p: Paths) (s: Settings) =
         w.WriteBoolean("stopAtFigures", s.StopAtFigures)
         w.WriteString("helpModel", s.HelpModel)
         w.WriteString("aboutMe", s.AboutMe)
+        w.WriteString("openAlexKey", s.OpenAlexKey)
         w.WriteEndObject())
 
 let loadSettings (p: Paths) : Settings =
@@ -100,7 +101,8 @@ let loadSettings (p: Paths) : Settings =
           StopAtEquations = boolean e "stopAtEquations" def.StopAtEquations
           StopAtFigures = boolean e "stopAtFigures" def.StopAtFigures
           HelpModel = str e "helpModel" def.HelpModel
-          AboutMe = str e "aboutMe" def.AboutMe }
+          AboutMe = str e "aboutMe" def.AboutMe
+          OpenAlexKey = str e "openAlexKey" def.OpenAlexKey }
     with _ -> Settings.defaults
 
 // ---- paper metadata (library entry + listening position)

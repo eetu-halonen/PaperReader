@@ -77,6 +77,8 @@ module Icons =
     let send = "M5 12 H19 M13 6 L19 12 L13 18"
     let speaker = "M4 9.5 H7.5 L12 5.5 V18.5 L7.5 14.5 H4 Z M15.5 9 A4 4 0 0 1 15.5 15 M18 6.5 A7.5 7.5 0 0 1 18 17.5"
     let stop = "M7 7 H17 V17 H7 Z"
+    let search = "M10.5 4 A6.5 6.5 0 1 1 10.5 17 A6.5 6.5 0 1 1 10.5 4 Z M15.3 15.3 L20 20"
+    let refresh = "M19 12 A7 7 0 1 1 16.95 7.05 M17.5 3.5 V7.5 H13.5"
 
 let icon (data: string) (color: string) (size: float) (filled: bool) : IView =
     Viewbox.create [
@@ -137,6 +139,29 @@ let private pill (text: string) (onClick: unit -> unit) (primary: bool) : IView 
         Button.background (if primary then Palette.accent else Palette.surfaceHigh)
         Button.foreground (if primary then Palette.onAccent else Palette.text)
         Button.onClick ((fun _ -> onClick ()), SubPatchOptions.OnChangeOf text)
+    ]
+
+let private chip (text: string) (onClick: unit -> unit) : IView =
+    Button.create [
+        Button.content text
+        Button.fontSize 14.0
+        Button.padding (Thickness(14.0, 8.0))
+        Button.margin (Thickness(0.0, 0.0, 8.0, 8.0))
+        Button.cornerRadius 18.0
+        Button.background Palette.surfaceHigh
+        Button.foreground Palette.text
+        Button.borderBrush Palette.line
+        Button.borderThickness 1.0
+        Button.onClick ((fun _ -> onClick ()), SubPatchOptions.OnChangeOf text)
+    ]
+
+let private textLink (text: string) (onClick: unit -> unit) (key: obj) : IView =
+    plainButton "Transparent" [
+        Button.padding (Thickness(0.0, 4.0, 16.0, 4.0))
+        Button.foreground Palette.accent
+        Button.fontSize 14.0
+        Button.content text
+        Button.onClick ((fun _ -> onClick ()), SubPatchOptions.OnChangeOf key)
     ]
 
 let private formatMinutes (ms: int) =
@@ -228,6 +253,36 @@ let private keyHint (dispatch: Msg -> unit) : IView =
         )
     ]
 
+/// One of the two large buttons at the bottom of the library.
+let private bigButton (column: int) (data: string) (text: string) (primary: bool) (onClick: unit -> unit) : IView =
+    let fg = if primary then Palette.onAccent else Palette.text
+    Button.create [
+        Grid.column column
+        Button.height 58.0
+        Button.cornerRadius 29.0
+        Button.horizontalAlignment HorizontalAlignment.Stretch
+        Button.horizontalContentAlignment HorizontalAlignment.Center
+        Button.verticalContentAlignment VerticalAlignment.Center
+        Button.background (if primary then Palette.accent else Palette.surfaceHigh)
+        Button.onClick ((fun _ -> onClick ()), SubPatchOptions.OnChangeOf text)
+        Button.content (
+            StackPanel.create [
+                StackPanel.orientation Orientation.Horizontal
+                StackPanel.spacing 10.0
+                StackPanel.children [
+                    icon data (if primary then fg else Palette.accent) 20.0 false
+                    TextBlock.create [
+                        TextBlock.text text
+                        TextBlock.fontSize 17.0
+                        TextBlock.fontWeight FontWeight.SemiBold
+                        TextBlock.foreground fg
+                        TextBlock.verticalAlignment VerticalAlignment.Center
+                    ]
+                ]
+            ]
+        )
+    ]
+
 let private libraryView (model: Model) (dispatch: Msg -> unit) : IView =
     DockPanel.create [
         DockPanel.children [
@@ -256,32 +311,14 @@ let private libraryView (model: Model) (dispatch: Msg -> unit) : IView =
                     ]
                 ]
             ]
-            Button.create [
+            Grid.create [
                 DockPanel.dock Dock.Bottom
-                Button.margin (Thickness(16.0, 8.0, 16.0, 16.0))
-                Button.height 58.0
-                Button.cornerRadius 29.0
-                Button.horizontalAlignment HorizontalAlignment.Stretch
-                Button.horizontalContentAlignment HorizontalAlignment.Center
-                Button.verticalContentAlignment VerticalAlignment.Center
-                Button.background Palette.accent
-                Button.onClick (fun _ -> dispatch OpenPdf)
-                Button.content (
-                    StackPanel.create [
-                        StackPanel.orientation Orientation.Horizontal
-                        StackPanel.spacing 10.0
-                        StackPanel.children [
-                            icon Icons.plus Palette.onAccent 20.0 false
-                            TextBlock.create [
-                                TextBlock.text "Open a PDF"
-                                TextBlock.fontSize 17.0
-                                TextBlock.fontWeight FontWeight.SemiBold
-                                TextBlock.foreground Palette.onAccent
-                                TextBlock.verticalAlignment VerticalAlignment.Center
-                            ]
-                        ]
-                    ]
-                )
+                Grid.columnDefinitions "*,12,*"
+                Grid.margin (Thickness(16.0, 8.0, 16.0, 16.0))
+                Grid.children [
+                    bigButton 0 Icons.search "Find papers" false (fun () -> dispatch OpenDiscover)
+                    bigButton 2 Icons.plus "Open a PDF" true (fun () -> dispatch OpenPdf)
+                ]
             ]
             ScrollViewer.create [
                 ScrollViewer.content (
@@ -301,7 +338,7 @@ let private libraryView (model: Model) (dispatch: Msg -> unit) : IView =
                                             TextBlock.horizontalAlignment HorizontalAlignment.Center
                                         ]
                                         TextBlock.create [
-                                            TextBlock.text "Open a PDF, or share one to Paper Reader from another app. It is prepared once and kept on this device, so it opens instantly afterwards."
+                                            TextBlock.text "Find a paper to listen to, open a PDF, or share one to Paper Reader from another app. Each paper is prepared once and kept on this device, so it opens instantly afterwards."
                                             TextBlock.fontSize 14.0
                                             TextBlock.foreground Palette.muted
                                             TextBlock.textWrapping TextWrapping.Wrap
@@ -312,6 +349,302 @@ let private libraryView (model: Model) (dispatch: Msg -> unit) : IView =
                             else
                                 for p in model.Papers do
                                     paperCard model p dispatch
+                        ]
+                    ]
+                )
+            ]
+        ]
+    ]
+
+// ---------------------------------------------------------------------------------------------
+// Find papers
+// ---------------------------------------------------------------------------------------------
+
+/// Topics offered before anything is searched, to show what is there.
+let private topics =
+    [ "large language models"; "diffusion models"; "reinforcement learning"; "protein structure prediction"; "CRISPR"
+      "quantum error correction"; "dark matter"; "climate models"; "graph neural networks"; "causal inference"; "sleep and memory" ]
+
+let private authorsLine (f: Discover.Found) =
+    let names =
+        match f.Authors with
+        | [] -> None
+        | [ a ] -> Some a
+        | [ a; b ] -> Some(a + ", " + b)
+        | a :: b :: _ :: [] -> Some(sprintf "%s, %s, %s" a b f.Authors.[2])
+        | a :: _ -> Some(a + " et al.")
+    [ names; f.Year |> Option.map string; f.Venue ] |> List.choose id |> String.concat " · "
+
+let private findCard (model: Model) (f: Discover.Found) (dispatch: Msg -> unit) : IView =
+    let d = model.Discover
+    let expanded = d.Expanded = Some f.Key
+    let fetching = d.Fetching |> Option.filter (fun (k, _, _) -> k = f.Key)
+    let busyElsewhere = d.Fetching.IsSome && fetching.IsNone
+    let owned = d.Known |> List.tryFind (fun (p, s) -> Discover.inLibrary [ p.Title, s ] f) |> Option.map fst
+    let failure = d.Failed |> Option.filter (fun (k, _) -> k = f.Key) |> Option.map snd
+    Border.create [
+        Border.margin (Thickness(16.0, 0.0, 16.0, 10.0))
+        Border.padding (Thickness(18.0, 16.0, 18.0, 10.0))
+        Border.cornerRadius 16.0
+        Border.background Palette.surface
+        Border.child (
+            StackPanel.create [
+                StackPanel.spacing 8.0
+                StackPanel.children [
+                    // tapping the text shows the whole abstract
+                    StackPanel.create [
+                        StackPanel.spacing 6.0
+                        StackPanel.background "Transparent"
+                        StackPanel.onTapped ((fun _ -> dispatch (ToggleAbstract f.Key)), SubPatchOptions.OnChangeOf f.Key)
+                        StackPanel.children [
+                            TextBlock.create [
+                                TextBlock.text f.Title
+                                TextBlock.fontSize 16.0
+                                TextBlock.fontWeight FontWeight.SemiBold
+                                TextBlock.foreground Palette.text
+                                TextBlock.textWrapping TextWrapping.Wrap
+                            ]
+                            match authorsLine f with
+                            | "" -> ()
+                            | line -> label line 13.0 Palette.muted
+                            match f.Abstract with
+                            | Some a ->
+                                TextBlock.create [
+                                    TextBlock.text a
+                                    TextBlock.fontSize 13.0
+                                    TextBlock.lineHeight 19.0
+                                    TextBlock.foreground Palette.faint
+                                    TextBlock.textWrapping TextWrapping.Wrap
+                                    TextBlock.maxLines (if expanded then 0 else 3)
+                                    TextBlock.textTrimming (if expanded then TextTrimming.None else TextTrimming.WordEllipsis)
+                                ]
+                            | None -> ()
+                        ]
+                    ]
+                    Grid.create [
+                        Grid.columnDefinitions "Auto,*,Auto"
+                        Grid.margin (Thickness(0.0, 4.0, 0.0, 0.0))
+                        Grid.children [
+                            StackPanel.create [
+                                Grid.column 0
+                                StackPanel.orientation Orientation.Horizontal
+                                StackPanel.spacing 4.0
+                                StackPanel.children [
+                                    match owned, fetching with
+                                    | Some p, _ -> pill "In your library · Play" (fun () -> dispatch (OpenPaper p)) false
+                                    | None, Some (_, step, _) ->
+                                        StackPanel.create [
+                                            StackPanel.orientation Orientation.Horizontal
+                                            StackPanel.spacing 10.0
+                                            StackPanel.children [
+                                                ProgressBar.create [
+                                                    ProgressBar.isIndeterminate true
+                                                    ProgressBar.width 28.0
+                                                    ProgressBar.minWidth 28.0
+                                                    ProgressBar.height 4.0
+                                                    ProgressBar.minHeight 4.0
+                                                    ProgressBar.foreground Palette.accent
+                                                    ProgressBar.background Palette.surfaceHigh
+                                                    ProgressBar.verticalAlignment VerticalAlignment.Center
+                                                ]
+                                                TextBlock.create [
+                                                    TextBlock.text step
+                                                    TextBlock.fontSize 13.0
+                                                    TextBlock.foreground Palette.muted
+                                                    TextBlock.verticalAlignment VerticalAlignment.Center
+                                                ]
+                                                textLink "Cancel" (fun () -> dispatch CancelFetch) "cancel-fetch"
+                                            ]
+                                        ]
+                                    | None, None ->
+                                        Button.create [
+                                            Button.content "Listen"
+                                            Button.fontSize 15.0
+                                            Button.fontWeight FontWeight.SemiBold
+                                            Button.padding (Thickness(18.0, 8.0))
+                                            Button.cornerRadius 20.0
+                                            Button.background Palette.accent
+                                            Button.foreground Palette.onAccent
+                                            Button.isEnabled (not busyElsewhere)
+                                            Button.onClick ((fun _ -> dispatch (FetchPaper f)), SubPatchOptions.OnChangeOf f.Key)
+                                        ]
+                                    match f.Page, fetching with
+                                    | Some page, None -> textLink "  Web page" (fun () -> dispatch (OpenLink page)) ("page", f.Key)
+                                    | _ -> ()
+                                ]
+                            ]
+                            TextBlock.create [
+                                Grid.column 2
+                                TextBlock.verticalAlignment VerticalAlignment.Center
+                                TextBlock.fontSize 12.0
+                                TextBlock.foreground Palette.faint
+                                TextBlock.text (
+                                    match f.Citations, Discover.pdfHost f with
+                                    | c, _ when c > 0 -> sprintf "%s citation%s" (c.ToString("N0", Globalization.CultureInfo.InvariantCulture)) (if c = 1 then "" else "s")
+                                    | _, Some h when fetching.IsNone -> h
+                                    | _ -> "")
+                            ]
+                        ]
+                    ]
+                    match failure with
+                    | Some e ->
+                        StackPanel.create [
+                            StackPanel.spacing 4.0
+                            StackPanel.margin (Thickness(0.0, 0.0, 0.0, 6.0))
+                            StackPanel.children [
+                                label e 13.0 Palette.danger
+                                label
+                                    (if f.Page.IsSome then "Open the web page, download the PDF there, and share it to Paper Reader (or open it with Open a PDF)."
+                                     else "Download it in a browser and open it with Open a PDF.")
+                                    12.0 Palette.muted
+                            ]
+                        ]
+                    | None -> ()
+                ]
+            ]
+        )
+    ]
+
+let private discoverStatus (text: string) (spinning: bool) : IView =
+    StackPanel.create [
+        StackPanel.margin (Thickness(20.0, 8.0, 20.0, 16.0))
+        StackPanel.spacing 10.0
+        StackPanel.children [
+            if spinning then
+                ProgressBar.create [
+                    ProgressBar.isIndeterminate true
+                    ProgressBar.height 4.0
+                    ProgressBar.minHeight 4.0
+                    ProgressBar.foreground Palette.accent
+                    ProgressBar.background Palette.surfaceHigh
+                ]
+            label text 14.0 Palette.muted
+        ]
+    ]
+
+let private discoverHeading (text: string) (action: IView option) : IView =
+    Grid.create [
+        Grid.columnDefinitions "*,Auto"
+        Grid.margin (Thickness(20.0, 14.0, 8.0, 8.0))
+        Grid.children [
+            TextBlock.create [
+                Grid.column 0
+                TextBlock.text text
+                TextBlock.fontSize 13.0
+                TextBlock.fontWeight FontWeight.Bold
+                TextBlock.foreground Palette.accent
+                TextBlock.verticalAlignment VerticalAlignment.Center
+            ]
+            match action with
+            | Some a -> Border.create [ Grid.column 1; Border.child a ]
+            | None -> ()
+        ]
+    ]
+
+let private discoverView (model: Model) (dispatch: Msg -> unit) : IView =
+    let d = model.Discover
+    DockPanel.create [
+        DockPanel.children [
+            Grid.create [
+                DockPanel.dock Dock.Top
+                Grid.columnDefinitions "Auto,*"
+                Grid.margin (Thickness(4.0, 6.0, 16.0, 0.0))
+                Grid.children [
+                    Border.create [ Grid.column 0; Border.child (iconButton Icons.chevronLeft 24.0 (fun () -> dispatch CloseDiscover) "close-discover") ]
+                    TextBlock.create [
+                        Grid.column 1
+                        TextBlock.text "Find papers"
+                        TextBlock.fontSize 24.0
+                        TextBlock.fontWeight FontWeight.Bold
+                        TextBlock.foreground Palette.text
+                        TextBlock.verticalAlignment VerticalAlignment.Center
+                    ]
+                ]
+            ]
+            Grid.create [
+                DockPanel.dock Dock.Top
+                Grid.columnDefinitions "*,Auto"
+                Grid.margin (Thickness(16.0, 8.0, 16.0, 8.0))
+                Grid.children [
+                    TextBox.create [
+                        Grid.column 0
+                        TextBox.text d.Input
+                        TextBox.watermark "Search topics, titles, authors, or paste an arXiv id or DOI"
+                        TextBox.fontSize 15.0
+                        TextBox.cornerRadius 22.0
+                        TextBox.padding (Thickness(16.0, 11.0))
+                        TextBox.verticalContentAlignment VerticalAlignment.Center
+                        TextBox.onTextChanged ((fun t -> if t <> model.Discover.Input then dispatch (SetDiscoverInput t)), SubPatchOptions.OnChangeOf d.Input)
+                        TextBox.onKeyDown ((fun e -> if e.Key = Input.Key.Enter then e.Handled <- true; dispatch RunSearch), SubPatchOptions.Never)
+                    ]
+                    Button.create [
+                        Grid.column 1
+                        Button.width 46.0
+                        Button.height 46.0
+                        Button.margin (Thickness(8.0, 0.0, 0.0, 0.0))
+                        Button.cornerRadius 23.0
+                        Button.background Palette.accent
+                        Button.borderThickness 0.0
+                        Button.horizontalContentAlignment HorizontalAlignment.Center
+                        Button.verticalContentAlignment VerticalAlignment.Center
+                        Button.onClick ((fun _ -> dispatch RunSearch), SubPatchOptions.Never)
+                        Button.content (icon Icons.search Palette.onAccent 20.0 false)
+                    ]
+                ]
+            ]
+            ScrollViewer.create [
+                ScrollViewer.content (
+                    StackPanel.create [
+                        StackPanel.margin (Thickness(0.0, 0.0, 0.0, 24.0))
+                        StackPanel.children [
+                            match d.Search with
+                            | Some s ->
+                                discoverHeading
+                                    (if s.Loading && s.Results.IsEmpty then "SEARCHING"
+                                     elif s.Total > s.Results.Length then sprintf "%s FREE PAPERS" (s.Total.ToString("N0", Globalization.CultureInfo.InvariantCulture))
+                                     elif s.Results.Length = 1 then "1 PAPER"
+                                     else sprintf "%d PAPERS" s.Results.Length)
+                                    (Some(textLink "Clear" (fun () -> dispatch ClearSearch) "clear-search"))
+                                for f in s.Results do
+                                    findCard model f dispatch
+                                match s.Error with
+                                | Some e -> discoverStatus e false
+                                | None when s.Loading -> discoverStatus "Searching OpenAlex" true
+                                | None when s.Results.IsEmpty ->
+                                    discoverStatus "Nothing with a free PDF matched. Try other words, or paste an arXiv id or DOI." false
+                                | None when s.Results.Length < s.Total ->
+                                    StackPanel.create [
+                                        StackPanel.horizontalAlignment HorizontalAlignment.Center
+                                        StackPanel.margin (Thickness(0.0, 6.0))
+                                        StackPanel.children [ pill "Show more" (fun () -> dispatch SearchMore) false ]
+                                    ]
+                                | None -> ()
+                            | None ->
+                                discoverHeading "RECOMMENDED FOR YOU"
+                                    (match d.Recs with
+                                     | Recs.Ready (_, _ :: _) | Recs.Failed _ -> Some(iconButton Icons.refresh 18.0 (fun () -> dispatch (LoadRecs true)) "refresh-recs")
+                                     | _ -> None)
+                                match d.Recs with
+                                | Recs.NotLoaded -> ()
+                                | Recs.Loading step -> discoverStatus step true
+                                | Recs.Failed e -> discoverStatus ("Couldn't get recommendations: " + e) false
+                                | Recs.Ready ([], []) ->
+                                    discoverStatus "Once you have listened to a few papers, papers like them show up here. Search, or pick a topic below to start." false
+                                | Recs.Ready ([], _) ->
+                                    discoverStatus "No recommendations yet: the papers in your library weren't found in the paper databases. Search instead, or pick a topic below." false
+                                | Recs.Ready (recs, seeds) ->
+                                    label (sprintf "New and related papers with a free PDF, based on the %s in your library." (if seeds.Length = 1 then "paper" else sprintf "%d papers" seeds.Length)) 13.0 Palette.muted
+                                    |> fun l -> Border.create [ Border.margin (Thickness(20.0, 0.0, 20.0, 12.0)); Border.child l ]
+                                    for f in recs |> List.truncate 30 do
+                                        findCard model f dispatch
+                                discoverHeading "BROWSE A TOPIC" None
+                                WrapPanel.create [
+                                    WrapPanel.margin (Thickness(16.0, 0.0, 16.0, 0.0))
+                                    WrapPanel.children [ for t in topics -> chip t (fun () -> dispatch (SearchTopic t)) ]
+                                ]
+                            label "Search by OpenAlex, recommendations by Semantic Scholar. Only papers with a free PDF are listed; some publishers only let a browser download them."
+                                12.0 Palette.faint
+                            |> fun l -> Border.create [ Border.margin (Thickness(20.0, 16.0, 20.0, 0.0)); Border.child l ]
                         ]
                     ]
                 )
@@ -1000,20 +1333,6 @@ let private answerBody (answer: string) : IView =
         ]
     ]
 
-let private chip (text: string) (onClick: unit -> unit) : IView =
-    Button.create [
-        Button.content text
-        Button.fontSize 14.0
-        Button.padding (Thickness(14.0, 8.0))
-        Button.margin (Thickness(0.0, 0.0, 8.0, 8.0))
-        Button.cornerRadius 18.0
-        Button.background Palette.surfaceHigh
-        Button.foreground Palette.text
-        Button.borderBrush Palette.line
-        Button.borderThickness 1.0
-        Button.onClick ((fun _ -> onClick ()), SubPatchOptions.OnChangeOf text)
-    ]
-
 /// A small image of an equation or figure, tapped to see it full size.
 let private visualThumb (r: ReaderState) (id: string) (maxHeight: float) (dispatch: Msg -> unit) : IView =
     let paths = Store.Paths((Services.get ()).DataDir)
@@ -1046,15 +1365,6 @@ let private visualThumb (r: ReaderState) (id: string) (maxHeight: float) (dispat
             )
         ]
     | _ -> Border.create []
-
-let private textLink (text: string) (onClick: unit -> unit) (key: obj) : IView =
-    plainButton "Transparent" [
-        Button.padding (Thickness(0.0, 4.0, 16.0, 4.0))
-        Button.foreground Palette.accent
-        Button.fontSize 14.0
-        Button.content text
-        Button.onClick ((fun _ -> onClick ()), SubPatchOptions.OnChangeOf key)
-    ]
 
 /// One question and its answer.
 let private turnView (r: ReaderState) (h: HelpState) (t: HelpTurn) (earlier: bool) (dispatch: Msg -> unit) : IView =
@@ -1481,6 +1791,16 @@ let private settingsView (model: Model) (dispatch: Msg -> unit) : IView =
                                         TextBox.onTextChanged ((fun t -> if t <> model.Settings.HelpModel then dispatch (SetHelpModel t)), SubPatchOptions.OnChangeOf s.HelpModel)
                                     ]
                                     label "zai-glm-5-3 (GLM 5.3, hosted by Mistral) reads the whole paper for every answer." 12.0 Palette.faint
+                                    sectionTitle "FIND PAPERS"
+                                    label "OpenAlex key" 16.0 Palette.text
+                                    TextBox.create [
+                                        TextBox.text s.OpenAlexKey
+                                        TextBox.passwordChar '•'
+                                        TextBox.watermark "Optional, free from openalex.org"
+                                        TextBox.fontSize 15.0
+                                        TextBox.onTextChanged ((fun t -> if t <> model.Settings.OpenAlexKey then dispatch (SetOpenAlexKey t)), SubPatchOptions.OnChangeOf s.OpenAlexKey)
+                                    ]
+                                    label "Searching works without a key for about 100 searches a day. A free key raises that. Stored only on this device and sent only to api.openalex.org." 12.0 Palette.faint
                                     sectionTitle "MISTRAL AI"
                                     label "API key" 16.0 Palette.text
                                     TextBox.create [
@@ -1574,6 +1894,7 @@ let view (model: Model) (dispatch: Msg -> unit) : IView =
         Grid.children [
             match model.Screen with
             | Screen.Library -> libraryView model dispatch
+            | Screen.Discover -> discoverView model dispatch
             | Screen.Importing s -> importingView s dispatch
             | Screen.Reader r -> readerView model r dispatch
             if model.ShowSettings then settingsView model dispatch

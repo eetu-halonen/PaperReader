@@ -356,3 +356,92 @@ let ``an answer is read in clips, the first one short so it starts quickly`` () 
 let ``the hand-made fold matches FormKC for the characters papers use`` () =
     for sample in [ "𝑥ᵢ + 𝜃 ﬁnd ﬂow"; "𝐖₁𝐱 + 𝒃²"; "𝛼𝛽𝛾 ∇𝑓 𝜕𝑦"; "ℎ ℓ ℝⁿ … x₁₂"; "𝐖ᵀ𝑥⁻¹ Σₖ₌₁" ] do
         Assert.Equal(sample.Normalize(Text.NormalizationForm.FormKC), MathText.fold sample)
+
+// ---- Find papers
+
+[<Fact>]
+let ``typed queries are recognised as arXiv ids, DOIs, PDF addresses or words`` () =
+    Assert.Equal(Discover.Query.Arxiv "2006.11239", Discover.parseQuery "2006.11239")
+    Assert.Equal(Discover.Query.Arxiv "2006.11239", Discover.parseQuery "arXiv:2006.11239v2")
+    Assert.Equal(Discover.Query.Arxiv "2006.11239", Discover.parseQuery "https://arxiv.org/abs/2006.11239v3")
+    Assert.Equal(Discover.Query.Arxiv "2006.11239", Discover.parseQuery "https://arxiv.org/pdf/2006.11239.pdf")
+    Assert.Equal(Discover.Query.Doi "10.1038/s41586-021-03819-2", Discover.parseQuery "https://doi.org/10.1038/s41586-021-03819-2")
+    Assert.Equal(Discover.Query.PdfUrl "https://example.org/paper.pdf", Discover.parseQuery "https://example.org/paper.pdf")
+    Assert.Equal(Discover.Query.Words "attention is all you need", Discover.parseQuery "  attention is all you need ")
+
+[<Fact>]
+let ``arXiv ids come out of arXiv DOIs and addresses`` () =
+    Assert.Equal(Some "2006.11239", Discover.arxivOf "10.48550/arXiv.2006.11239")
+    Assert.Equal(Some "hep-th/9901001", Discover.arxivOf "http://arxiv.org/abs/hep-th/9901001v1")
+    Assert.Equal(None, Discover.arxivOf "https://www.nature.com/articles/s41586-021-03819-2")
+
+[<Fact>]
+let ``PDF addresses that usually work are tried first`` () =
+    let order =
+        Discover.orderPdfs
+            [ "https://pmc.ncbi.nlm.nih.gov/articles/PMC1/"; "https://publisher.com/article"; "https://publisher.com/a.pdf"
+              "http://arxiv.org/abs/2006.11239v2"; "https://publisher.com/a.pdf" ]
+    Assert.Equal<string list>(
+        [ "https://arxiv.org/pdf/2006.11239"; "https://publisher.com/a.pdf"; "https://publisher.com/article"; "https://pmc.ncbi.nlm.nih.gov/articles/PMC1/" ],
+        order)
+
+let private json (text: string) = (Text.Json.JsonDocument.Parse text).RootElement
+
+[<Fact>]
+let ``an OpenAlex work is read with its abstract, authors and PDFs`` () =
+    let w =
+        json """{"id":"https://openalex.org/W1","doi":"https://doi.org/10.48550/arxiv.2006.11239","title":"Denoising <i>Diffusion</i>\n Probabilistic Models",
+                 "publication_year":2020,"cited_by_count":5697,
+                 "authorships":[{"author":{"display_name":"Jonathan Ho"}},{"author":{"display_name":"Ajay Jain"}}],
+                 "primary_location":{"source":{"display_name":"arXiv"},"landing_page_url":"https://arxiv.org/abs/2006.11239"},
+                 "best_oa_location":{"pdf_url":null,"landing_page_url":"https://arxiv.org/abs/2006.11239"},
+                 "locations":[{"pdf_url":"https://publisher.com/x.pdf"}],
+                 "abstract_inverted_index":{"Abstract":[0],"We":[1],"present":[2],"results":[4],"diffusion":[3]}}"""
+    let f = (Discover.parseWork w).Value
+    Assert.Equal("W1", f.Key)
+    Assert.Equal("Denoising Diffusion Probabilistic Models", f.Title)
+    Assert.Equal(Some "We present diffusion results", f.Abstract)
+    Assert.Equal(Some "2006.11239", f.Arxiv)
+    Assert.Equal<string list>([ "https://arxiv.org/pdf/2006.11239"; "https://publisher.com/x.pdf" ], f.Pdfs)
+    Assert.Equal<string list>([ "Jonathan Ho"; "Ajay Jain" ], f.Authors)
+    Assert.Equal(Some "arXiv", f.Venue)
+
+[<Fact>]
+let ``works without any free PDF are left out`` () =
+    Assert.True((Discover.parseWork (json """{"id":"W2","title":"Closed","locations":[{"pdf_url":null}]}""")).IsNone)
+    // Semantic Scholar's "open access" links to doi.org are publisher pages
+    Assert.True((Discover.parseS2Paper (json """{"paperId":"a","title":"T","externalIds":{"DOI":"10.1/x"},"openAccessPdf":{"url":"https://doi.org/10.1/x"}}""")).IsNone)
+    let s2 = (Discover.parseS2Paper (json """{"paperId":"b","title":"T","externalIds":{"ArXiv":"2608.1"},"openAccessPdf":{"url":""}}""")).Value
+    Assert.Equal<string list>([ "https://arxiv.org/pdf/2608.1" ], s2.Pdfs)
+
+[<Fact>]
+let ``results already in the library are recognised by id or title`` () =
+    let known: (string * Discover.Source) list =
+        [ "Attention Is All You Need", { Doi = None; Arxiv = Some "1706.03762"; OpenAlex = None }
+          "Highly accurate protein structure prediction with AlphaFold", { Doi = None; Arxiv = None; OpenAlex = None } ]
+    let found (title: string) (arxiv: string option) : Discover.Found =
+        { Key = title; Title = title; Authors = []; Year = None; Venue = None; Abstract = None; Citations = 0
+          Pdfs = []; Page = None; Doi = None; Arxiv = arxiv; OpenAlex = None }
+    Assert.True(Discover.inLibrary known (found "Something else" (Some "1706.03762")))
+    Assert.True(Discover.inLibrary known (found "Highly Accurate Protein Structure Prediction with AlphaFold." None))
+    Assert.False(Discover.inLibrary known (found "Accurate prediction of protein structures" None))
+    Assert.True(Discover.titleSimilarity "Attention is all you need" "Attention Is All You Need." > 0.99)
+
+[<Fact>]
+let ``only real PDFs are accepted as downloads`` () =
+    Assert.True(Discover.isPdf (Text.Encoding.ASCII.GetBytes "%PDF-1.7\n..."))
+    Assert.False(Discover.isPdf (Text.Encoding.ASCII.GetBytes "<!DOCTYPE html><html>"))
+
+[<Fact>]
+let ``an arXiv entry is read when OpenAlex doesn't have the paper`` () =
+    let xml =
+        """<feed xmlns="http://www.w3.org/2005/Atom"><entry><id>http://arxiv.org/abs/1706.03762v7</id>
+           <title>Attention Is All
+             You Need</title><summary> The dominant models. </summary><published>2017-06-12T17:57:34Z</published>
+           <author><name>Ashish Vaswani</name></author><author><name>Noam Shazeer</name></author></entry></feed>"""
+    let f = (Discover.parseArxivEntry "1706.03762" xml).Value
+    Assert.Equal("Attention Is All You Need", f.Title)
+    Assert.Equal(Some 2017, f.Year)
+    Assert.Equal(Some "The dominant models.", f.Abstract)
+    Assert.Equal<string list>([ "Ashish Vaswani"; "Noam Shazeer" ], f.Authors)
+    Assert.Equal<string list>([ "https://arxiv.org/pdf/1706.03762" ], f.Pdfs)

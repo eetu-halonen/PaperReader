@@ -28,6 +28,13 @@ It runs on Android, on the Linux desktop and in the browser (WebAssembly).
   offers three follow-ups, so typing is rarely needed; you can also type, or tap the microphone and ask
   out loud. Answers can be read to you, show the equation or figure they talk about, and are kept per paper.
   *Ask about it* on any item in the Σ list asks about that one. See [How Ask answers](#how-ask-answers).
+- **Find papers**: search about 270 million works on [OpenAlex](https://openalex.org) (only those with a free
+  PDF are listed), or paste an arXiv id or address, a DOI, or a PDF address. *Recommended for you* lists new and
+  related papers from [Semantic Scholar](https://www.semanticscholar.org)'s recommender, based on the papers in
+  your library (each is identified once by its title on OpenAlex). *Listen* downloads the PDF (arXiv and the
+  preprint servers first, since some publishers only serve their PDFs to a browser) and prepares it like an
+  opened file; if no copy can be downloaded, *Web page* opens it in the browser. Both services are free and need
+  no key; OpenAlex allows about 100 searches a day without one, and a free OpenAlex key (Settings) raises that.
 - Controls: play/pause, back and forward 15 s, speed, contents list. Playback continues in the
   background, with a media notification, lock-screen and headset controls; it pauses for calls
   and when headphones are unplugged.
@@ -38,7 +45,7 @@ Written in F# with Avalonia, FuncUI and Elmish, for .NET 10.
 
 | Path | What it is |
 | --- | --- |
-| `src/PaperReader.Core` | Everything without UI: PDF layout analysis (PdfPig), math verbalisation, narration, Mistral client, WAV cache |
+| `src/PaperReader.Core` | Everything without UI: PDF layout analysis (PdfPig), math verbalisation, narration, Mistral client, WAV cache, paper search and recommendations (`Discover.fs`) |
 | `src/PaperReader` | The shared Elmish UI |
 | `src/PaperReader.Android` | Android head: audio player, phone TTS, PDF crops, playback service, microphone |
 | `src/PaperReader.Desktop` | Linux desktop head: ffplay audio, pdftoppm crops, optional espeak-ng, ffmpeg microphone |

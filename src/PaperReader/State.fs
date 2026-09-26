@@ -82,9 +82,46 @@ type ReaderState =
       /// The Ask panel, when open.
       Help: HelpState option }
 
+/// A search on the Find papers screen.
+type SearchState =
+    { /// Words searched for, as sent.
+      Query: string
+      Results: Discover.Found list
+      /// Matching papers in all, and how many pages are shown.
+      Total: int
+      Page: int
+      Loading: bool
+      Error: string option
+      /// Identifies the latest request, so answers to older ones are dropped.
+      Id: Guid }
+
+[<RequireQualifiedAccess>]
+type Recs =
+    | NotLoaded
+    | Loading of step: string
+    /// The recommendations, and the library they were made for (paper ids).
+    | Ready of Discover.Found list * seeds: string list
+    | Failed of string
+
+/// Find papers: search, recommendations, downloading.
+type DiscoverState =
+    { Input: string
+      /// The search shown; None shows the recommendations.
+      Search: SearchState option
+      Recs: Recs
+      /// The result whose abstract is shown in full.
+      Expanded: string option
+      /// The result being downloaded, what is happening, and how to stop it.
+      Fetching: (string * string * CancellationTokenSource) option
+      /// A download that failed: the result's key and why.
+      Failed: (string * string) option
+      /// Library papers' titles and where they came from, to mark results already in the library.
+      Known: (PaperInfo * Discover.Source) list }
+
 [<RequireQualifiedAccess>]
 type Screen =
     | Library
+    | Discover
     | Importing of ImportState
     | Reader of ReaderState
 
@@ -97,7 +134,9 @@ type Model =
       VoicesStatus: string option
       Notice: string option
       /// A paper whose remove button was tapped once (a second tap removes it).
-      ConfirmDelete: string option }
+      ConfirmDelete: string option
+      /// Find papers, kept while the app runs so going back to it shows the same results.
+      Discover: DiscoverState }
 
 type Msg =
     | OpenPdf
@@ -164,6 +203,27 @@ type Msg =
     | StopSpeaking
     | SetAboutMe of string
     | SetHelpModel of string
+    // ----- Find papers
+    | OpenDiscover
+    | CloseDiscover
+    | SetDiscoverInput of string
+    | RunSearch
+    /// Searches for a suggested topic.
+    | SearchTopic of string
+    | SearchMore
+    | SearchDone of searchId: Guid * Result<Discover.Results, string>
+    | ClearSearch
+    | LoadRecs of force: bool
+    | RecsStep of string
+    | RecsDone of seeds: string list * Result<Discover.Found list, string>
+    | ToggleAbstract of key: string
+    | FetchPaper of Discover.Found
+    | FetchStep of key: string * step: string
+    | FetchDone of key: string * Result<string * string, string>
+    | CancelFetch
+    /// Opens a web page in the system browser.
+    | OpenLink of string
+    | SetOpenAlexKey of string
 
 let speeds = [| 0.8; 1.0; 1.15; 1.3; 1.5; 1.75; 2.0 |]
 let jumpMs = 15000
@@ -251,6 +311,7 @@ let private errorText (e: exn) =
     match e with
     | :? OperationCanceledException -> "Cancelled."
     | Mistral.MistralError(_, m) -> m
+    | Discover.DiscoverError m -> m
     | :? Net.Http.HttpRequestException -> "Couldn't reach Mistral. Check the internet connection."
     | e -> e.Message
 
@@ -315,7 +376,15 @@ let init () : Model * Cmd<Msg> =
       Voices = []
       VoicesStatus = None
       Notice = None
-      ConfirmDelete = None },
+      ConfirmDelete = None
+      Discover =
+        { Input = ""
+          Search = None
+          Recs = Recs.NotLoaded
+          Expanded = None
+          Fetching = None
+          Failed = None
+          Known = [] } },
     Cmd.ofEffect (fun dispatch ->
         (platform ()).SetIncomingPdfHandler(fun (path, name) -> dispatch (ImportFile(path, name)))
         (platform ()).SetRemoteHandler(fun play -> dispatch (Remote play)))
@@ -415,6 +484,42 @@ let private withHelp (model: Model) (f: ReaderState -> HelpState -> HelpState * 
         let h, cmd = f r h
         { model with Screen = Screen.Reader { r with Help = Some h } }, cmd
     | _ -> model, Cmd.none
+
+// ---------------------------------------------------------------------------------------------
+// Find papers
+// ---------------------------------------------------------------------------------------------
+
+let private withDiscover (model: Model) (f: DiscoverState -> DiscoverState * Cmd<Msg>) : Model * Cmd<Msg> =
+    let d, cmd = f model.Discover
+    { model with Discover = d }, cmd
+
+/// Titles and sources of the library papers, for marking results already there.
+let private knownPapers (papers: PaperInfo list) =
+    let p = paths ()
+    papers
+    |> List.map (fun x ->
+        x,
+        (match Discover.loadSource p x.Id with
+         | Some (Some s) -> s
+         | _ -> { Doi = None; Arxiv = None; OpenAlex = None }: Discover.Source))
+
+let private startSearch (settings: Settings) (d: DiscoverState) (query: string) (page: int) : DiscoverState * Cmd<Msg> =
+    let id = Guid.NewGuid()
+    let key = settings.OpenAlexKey
+    let work () =
+        task {
+            match Discover.parseQuery query with
+            | Discover.Query.Words words -> return! Discover.search key words page CancellationToken.None
+            | q ->
+                let! found = Discover.lookup key q CancellationToken.None
+                return { Items = Option.toList found; Total = (if found.IsSome then 1 else 0) }: Discover.Results
+        }
+    let search =
+        match d.Search with
+        | Some s when page > 1 -> { s with Loading = true; Error = None; Id = id; Page = page }
+        | _ -> { Query = query; Results = []; Total = 0; Page = 1; Loading = true; Error = None; Id = id }
+    { d with Search = Some search; Failed = None; Expanded = None },
+    runTask work (fun r -> SearchDone(id, Ok r)) (fun e -> SearchDone(id, Error(errorText e)))
 
 let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
     match msg with
@@ -834,6 +939,133 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         let settings = { model.Settings with HelpModel = (if String.IsNullOrWhiteSpace m then Settings.defaults.HelpModel else m.Trim()) }
         { model with Settings = settings }, saveSettings settings
 
+    // ----- Find papers
+    | OpenDiscover ->
+        let model = { model with Screen = Screen.Discover; Notice = None; ConfirmDelete = None }
+        let model = { model with Discover = { model.Discover with Known = knownPapers model.Papers } }
+        let seeds = model.Papers |> List.map (fun p -> p.Id)
+        match model.Discover.Recs with
+        | Recs.Ready (_, s) when s = seeds -> model, Cmd.none
+        | Recs.Loading _ -> model, Cmd.none
+        | _ -> update (LoadRecs false) model
+    | CloseDiscover ->
+        withDiscover { model with Screen = Screen.Library } (fun d ->
+            d.Fetching |> Option.iter (fun (_, _, cts) -> cts.Cancel())
+            { d with Fetching = None }, Cmd.none)
+    | SetDiscoverInput text ->
+        withDiscover model (fun d ->
+            // clearing the box goes back to the recommendations
+            let d = { d with Input = text }
+            if String.IsNullOrWhiteSpace text then { d with Search = None; Failed = None }, Cmd.none else d, Cmd.none)
+    | RunSearch ->
+        let q = model.Discover.Input.Trim()
+        if q.Length < 2 then model, Cmd.none
+        else withDiscover model (fun d -> startSearch model.Settings d q 1)
+    | SearchTopic topic -> withDiscover model (fun d -> startSearch model.Settings { d with Input = topic } topic 1)
+    | SearchMore ->
+        withDiscover model (fun d ->
+            match d.Search with
+            | Some s when not s.Loading && s.Results.Length < s.Total -> startSearch model.Settings d s.Query (s.Page + 1)
+            | _ -> d, Cmd.none)
+    | SearchDone (id, result) ->
+        withDiscover model (fun d ->
+            match d.Search with
+            | Some s when s.Id = id ->
+                let s =
+                    match result with
+                    | Ok r ->
+                        let results = s.Results @ r.Items |> List.distinctBy (fun f -> f.Key)
+                        // a page can come back short (results without a usable PDF are left out)
+                        { s with Results = results; Total = (if r.Items.IsEmpty then results.Length else r.Total); Loading = false }
+                    | Error e -> { s with Loading = false; Error = Some e }
+                { d with Search = Some s }, Cmd.none
+            | _ -> d, Cmd.none)
+    | ClearSearch -> withDiscover model (fun d -> { d with Input = ""; Search = None; Failed = None; Expanded = None }, Cmd.none)
+    | LoadRecs force ->
+        let papers = model.Papers
+        let seeds = papers |> List.map (fun p -> p.Id)
+        if papers.IsEmpty then withDiscover model (fun d -> { d with Recs = Recs.Ready([], seeds) }, Cmd.none)
+        else
+            match model.Discover.Recs with
+            | Recs.Loading _ when not force -> model, Cmd.none
+            | _ ->
+                let key = model.Settings.OpenAlexKey
+                let p = paths ()
+                let work =
+                    Cmd.ofEffect (fun dispatch ->
+                        Task.Run(fun () ->
+                            task {
+                                try
+                                    let! recs = Discover.forLibrary key p papers (RecsStep >> dispatch) CancellationToken.None
+                                    dispatch (RecsDone(seeds, Ok recs))
+                                with e ->
+                                    let e = match e with :? AggregateException as a when not (isNull a.InnerException) -> a.InnerException | e -> e
+                                    dispatch (RecsDone(seeds, Error(errorText e)))
+                            }
+                            :> Task)
+                        |> ignore)
+                withDiscover model (fun d -> { d with Recs = Recs.Loading "Getting recommendations" }, work)
+    | RecsStep step ->
+        withDiscover model (fun d -> (match d.Recs with Recs.Loading _ -> { d with Recs = Recs.Loading step } | _ -> d), Cmd.none)
+    | RecsDone (seeds, result) ->
+        withDiscover model (fun d ->
+            let d = { d with Known = knownPapers model.Papers }
+            match result with
+            | Ok recs -> { d with Recs = Recs.Ready(recs, seeds) }, Cmd.none
+            | Error e -> { d with Recs = Recs.Failed e }, Cmd.none)
+    | ToggleAbstract key -> withDiscover model (fun d -> { d with Expanded = (if d.Expanded = Some key then None else Some key) }, Cmd.none)
+    | FetchPaper f ->
+        match model.Screen with
+        | Screen.Importing _ -> { model with Notice = Some "Wait for the current paper to finish first." }, Cmd.none
+        | _ when model.Discover.Fetching.IsSome -> model, Cmd.none
+        | _ ->
+            let cts = new CancellationTokenSource()
+            let folder = Path.Combine((platform ()).DataDir, "incoming")
+            let p = paths ()
+            let work =
+                Cmd.ofEffect (fun dispatch ->
+                    Task.Run(fun () ->
+                        task {
+                            try
+                                let! path, name = Discover.download f folder (fun step -> dispatch (FetchStep(f.Key, step))) cts.Token
+                                Discover.rememberSource p path f
+                                dispatch (FetchDone(f.Key, Ok(path, name)))
+                            with e ->
+                                let e = match e with :? AggregateException as a when not (isNull a.InnerException) -> a.InnerException | e -> e
+                                dispatch (FetchDone(f.Key, Error(errorText e)))
+                        }
+                        :> Task)
+                    |> ignore)
+            withDiscover model (fun d -> { d with Fetching = Some(f.Key, "Downloading", cts); Failed = None }, work)
+    | FetchStep (key, step) ->
+        withDiscover model (fun d ->
+            match d.Fetching with
+            | Some (k, _, cts) when k = key -> { d with Fetching = Some(k, step, cts) }, Cmd.none
+            | _ -> d, Cmd.none)
+    | FetchDone (key, result) ->
+        match model.Discover.Fetching, result with
+        | Some (k, _, _), Ok (path, name) when k = key ->
+            let model = { model with Discover = { model.Discover with Fetching = None } }
+            match model.Screen with
+            | Screen.Discover -> update (ImportFile(path, name)) model
+            | _ -> model, Cmd.none
+        | Some (k, _, _), Error e when k = key ->
+            withDiscover model (fun d -> { d with Fetching = None; Failed = (if e = "Cancelled." then None else Some(key, e)) }, Cmd.none)
+        | _ -> model, Cmd.none
+    | CancelFetch ->
+        withDiscover model (fun d ->
+            d.Fetching |> Option.iter (fun (_, _, cts) -> cts.Cancel())
+            { d with Fetching = None }, Cmd.none)
+    | OpenLink url ->
+        model,
+        Cmd.ofEffect (fun _ ->
+            match Services.topLevel, Uri.TryCreate(url, UriKind.Absolute) with
+            | Some top, (true, uri) -> top.Launcher.LaunchUriAsync uri |> ignore
+            | _ -> ())
+    | SetOpenAlexKey key ->
+        let settings = { model.Settings with OpenAlexKey = key.Trim() }
+        { model with Settings = settings }, saveSettings settings
+
     // ----- settings
     | SetShowSettings show ->
         let model = { model with ShowSettings = show }
@@ -898,6 +1130,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             | Screen.Reader r when r.ShowEquations -> update ToggleEquations model
             | Screen.Reader _ -> update CloseReader model
             | Screen.Importing _ -> update CancelImport model
+            | Screen.Discover -> update CloseDiscover model
             | Screen.Library -> model, Cmd.none
 
 /// True when the back button has something to close inside the app.

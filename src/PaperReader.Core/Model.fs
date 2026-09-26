@@ -143,7 +143,9 @@ type Settings =
       /// Model that answers the listener's questions (Ask).
       HelpModel: string
       /// A line about the listener ("biology PhD student, rusty on linear algebra"), so answers fit them.
-      AboutMe: string }
+      AboutMe: string
+      /// Optional free OpenAlex key, for more than the ~100 searches a day allowed without one (Find papers).
+      OpenAlexKey: string }
 
 module Settings =
     let defaults =
@@ -157,7 +159,8 @@ module Settings =
           StopAtEquations = false
           StopAtFigures = false
           HelpModel = "zai-glm-5-3"
-          AboutMe = "" }
+          AboutMe = ""
+          OpenAlexKey = "" }
 
     let hasKey (s: Settings) = not (System.String.IsNullOrWhiteSpace s.MistralApiKey)
 
