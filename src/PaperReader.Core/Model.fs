@@ -126,6 +126,46 @@ type HelpTurn =
       Followups: string list
       AskedUtc: System.DateTime }
 
+/// Where a card is in learning (as in FSRS and Anki).
+[<RequireQualifiedAccess>]
+type CardStage =
+    /// Never reviewed.
+    | New
+    /// Being learned: seen again within minutes until it is known.
+    | Learning
+    /// Known: seen again after days, when it is about to be forgotten.
+    | Review
+    /// Forgotten in a review: relearned within minutes, then back to days.
+    | Relearning
+
+/// A card's memory state, updated by every review (see Fsrs).
+type Memory =
+    { Stage: CardStage
+      Due: System.DateTime
+      /// Days until recall drops to 90%; 0 for a new card.
+      Stability: float
+      /// 1 (easy) to 10 (hard); 0 for a new card.
+      Difficulty: float
+      Reps: int
+      Lapses: int
+      LastReview: System.DateTime option }
+
+/// A flashcard about a paper. Its text may have inline $LaTeX$ and **bold**.
+type Card =
+    { Id: string
+      Front: string
+      Back: string
+      /// An equation, figure or table of the paper shown with the card.
+      Visual: string option
+      /// The visual is part of the question (otherwise it is shown with the answer).
+      VisualOnFront: bool
+      /// Where in the narration the card's subject is, for listening to it again.
+      Segment: int
+      /// What was asked for: "paper" (made from the whole paper), or the listener's request.
+      Origin: string
+      CreatedUtc: System.DateTime
+      Memory: Memory }
+
 type Settings =
     { MistralApiKey: string
       /// Narrate with a Mistral chat model (explains equations, fixes extraction errors).
@@ -145,7 +185,10 @@ type Settings =
       /// A line about the listener ("biology PhD student, rusty on linear algebra"), so answers fit them.
       AboutMe: string
       /// Optional free OpenAlex key, for more than the ~100 searches a day allowed without one (Find papers).
-      OpenAlexKey: string }
+      OpenAlexKey: string
+      /// Share of cards to still remember when they come up for review (FSRS's desired retention).
+      /// Higher means more reviews.
+      Retention: float }
 
 module Settings =
     let defaults =
@@ -160,7 +203,8 @@ module Settings =
           StopAtFigures = false
           HelpModel = "zai-glm-5-3"
           AboutMe = ""
-          OpenAlexKey = "" }
+          OpenAlexKey = ""
+          Retention = 0.9 }
 
     let hasKey (s: Settings) = not (System.String.IsNullOrWhiteSpace s.MistralApiKey)
 

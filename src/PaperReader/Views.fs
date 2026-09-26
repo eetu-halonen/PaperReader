@@ -79,6 +79,7 @@ module Icons =
     let stop = "M7 7 H17 V17 H7 Z"
     let search = "M10.5 4 A6.5 6.5 0 1 1 10.5 17 A6.5 6.5 0 1 1 10.5 4 Z M15.3 15.3 L20 20"
     let refresh = "M19 12 A7 7 0 1 1 16.95 7.05 M17.5 3.5 V7.5 H13.5"
+    let cards = "M8 4.5 H19 A1.5 1.5 0 0 1 20.5 6 V15.5 M4.5 8 H15 A1.5 1.5 0 0 1 16.5 9.5 V18.5 A1.5 1.5 0 0 1 15 20 H4.5 A1.5 1.5 0 0 1 3 18.5 V9.5 A1.5 1.5 0 0 1 4.5 8 Z"
 
 let icon (data: string) (color: string) (size: float) (filled: bool) : IView =
     Viewbox.create [
@@ -178,6 +179,11 @@ let private formatMinutes (ms: int) =
 let private paperCard (model: Model) (p: PaperInfo) (dispatch: Msg -> unit) : IView =
     let progress =
         if p.SegmentCount > 0 && p.LastSegment > 0 then sprintf " · %d%% listened" (100 * p.LastSegment / p.SegmentCount) else ""
+    let progress =
+        match Cards.dueCount DateTime.UtcNow (deckOf model p.Id) with
+        | 0 -> progress
+        | 1 -> progress + " · 1 card due"
+        | n -> progress + sprintf " · %d cards due" n
     let confirming = model.ConfirmDelete = Some p.Id
     Grid.create [
         Grid.columnDefinitions "*,Auto"
@@ -283,6 +289,36 @@ let private bigButton (column: int) (data: string) (text: string) (primary: bool
         )
     ]
 
+/// Cards due across the library, with a way to review them.
+let private dueBanner (model: Model) (dispatch: Msg -> unit) : IView =
+    let due = Cards.dueQueue DateTime.UtcNow (Map.toList model.Decks) |> List.length
+    if due = 0 then Border.create [ Border.isVisible false ]
+    else
+        Border.create [
+            Border.margin (Thickness(16.0, 0.0, 16.0, 12.0))
+            Border.padding (Thickness(18.0, 14.0, 14.0, 14.0))
+            Border.cornerRadius 16.0
+            Border.background "#1A2436"
+            Border.child (
+                Grid.create [
+                    Grid.columnDefinitions "Auto,*,Auto"
+                    Grid.children [
+                        Border.create [ Grid.column 0; Border.verticalAlignment VerticalAlignment.Center; Border.child (icon Icons.cards Palette.accent 22.0 false) ]
+                        StackPanel.create [
+                            Grid.column 1
+                            StackPanel.margin (Thickness(12.0, 0.0))
+                            StackPanel.verticalAlignment VerticalAlignment.Center
+                            StackPanel.children [
+                                label (if due = 1 then "1 card to review" else sprintf "%d cards to review" due) 16.0 Palette.text
+                                label "A few minutes now keeps them for months." 12.0 Palette.muted
+                            ]
+                        ]
+                        Border.create [ Grid.column 2; Border.verticalAlignment VerticalAlignment.Center; Border.child (pill "Review" (fun () -> dispatch (StartReview None)) true) ]
+                    ]
+                ]
+            )
+        ]
+
 let private libraryView (model: Model) (dispatch: Msg -> unit) : IView =
     DockPanel.create [
         DockPanel.children [
@@ -304,10 +340,14 @@ let private libraryView (model: Model) (dispatch: Msg -> unit) : IView =
                             label "Listen to papers. The math appears on screen." 14.0 Palette.muted
                         ]
                     ]
-                    Border.create [
+                    StackPanel.create [
                         Grid.column 1
-                        Border.verticalAlignment VerticalAlignment.Top
-                        Border.child (iconButton Icons.sliders 22.0 (fun () -> dispatch (SetShowSettings true)) "settings")
+                        StackPanel.orientation Orientation.Horizontal
+                        StackPanel.verticalAlignment VerticalAlignment.Top
+                        StackPanel.children [
+                            iconButton Icons.cards 22.0 (fun () -> dispatch OpenLearn) "learn"
+                            iconButton Icons.sliders 22.0 (fun () -> dispatch (SetShowSettings true)) "settings"
+                        ]
                     ]
                 ]
             ]
@@ -325,6 +365,7 @@ let private libraryView (model: Model) (dispatch: Msg -> unit) : IView =
                     StackPanel.create [
                         StackPanel.children [
                             if not (Settings.hasKey model.Settings) then keyHint dispatch
+                            dueBanner model dispatch
                             if model.Papers.IsEmpty then
                                 StackPanel.create [
                                     StackPanel.margin (Thickness(32.0, 48.0))
@@ -1130,6 +1171,13 @@ let private equationCard (r: ReaderState) (v: Visual) (firstSegment: int) (ahead
                         Button.content "Ask about it"
                         Button.onClick ((fun _ -> dispatch (OpenHelp(Some v.Id))), SubPatchOptions.OnChangeOf v.Id)
                     ]
+                    plainButton "Transparent" [
+                        Button.padding (Thickness(4.0, 2.0))
+                        Button.foreground Palette.accent
+                        Button.fontSize 14.0
+                        Button.content "Remember"
+                        Button.onClick ((fun _ -> dispatch (OpenCards(Some v.Id))), SubPatchOptions.OnChangeOf v.Id)
+                    ]
                 ]
             ]
         ]
@@ -1310,19 +1358,19 @@ let private richParagraph (text: string) (size: float) (color: string) : IView =
         ]
     ]
 
-/// An answer: paragraphs, bullet lists and formulas.
-let private answerBody (answer: string) : IView =
+/// Paragraphs, bullet lists and formulas.
+let private richText (text: string) (size: float) (color: string) : IView =
     StackPanel.create [
         StackPanel.spacing 10.0
         StackPanel.children [
-            for piece in Help.pieces answer do
+            for piece in Help.pieces text do
                 match piece with
                 | Help.Piece.Prose text ->
                     for para in Text.RegularExpressions.Regex.Split(text, @"\n\s*\n") do
                         let para = Text.RegularExpressions.Regex.Replace(para.Trim(), @"(?m)^\s*[-*]\s+", "• ")
-                        if para <> "" then richParagraph para 16.0 Palette.text
+                        if para <> "" then richParagraph para size color
                 | Help.Piece.Formula latex ->
-                    match mathImage latex true 17.0 with
+                    match mathImage latex true (size + 1.0) with
                     | Some (bmp, depth) ->
                         ScrollViewer.create [
                             ScrollViewer.horizontalScrollBarVisibility ScrollBarVisibility.Auto
@@ -1332,6 +1380,9 @@ let private answerBody (answer: string) : IView =
                     | None -> label latex 15.0 Palette.muted
         ]
     ]
+
+/// An answer in Ask.
+let private answerBody (answer: string) : IView = richText answer 16.0 Palette.text
 
 /// A small image of an equation or figure, tapped to see it full size.
 let private visualThumb (r: ReaderState) (id: string) (maxHeight: float) (dispatch: Msg -> unit) : IView =
@@ -1367,8 +1418,13 @@ let private visualThumb (r: ReaderState) (id: string) (maxHeight: float) (dispat
     | _ -> Border.create []
 
 /// One question and its answer.
-let private turnView (r: ReaderState) (h: HelpState) (t: HelpTurn) (earlier: bool) (dispatch: Msg -> unit) : IView =
+let private turnView (model: Model) (r: ReaderState) (h: HelpState) (t: HelpTurn) (earlier: bool) (dispatch: Msg -> unit) : IView =
     let speaking = h.Speaking = Some t.AskedUtc
+    let making = model.Making |> Option.exists (fun m -> m.PaperId = r.Paper.Id && m.What = t.Question)
+    let made =
+        match model.Made with
+        | Some (p, cards) when p = r.Paper.Id -> cards |> List.filter (fun c -> c.Origin = t.Question) |> List.length
+        | _ -> 0
     StackPanel.create [
         StackPanel.spacing 10.0
         StackPanel.children [
@@ -1382,6 +1438,9 @@ let private turnView (r: ReaderState) (h: HelpState) (t: HelpTurn) (earlier: boo
                 StackPanel.children [
                     textLink (if speaking then "Stop reading" else "Read it to me") (fun () -> dispatch (if speaking then StopSpeaking else SpeakAnswer t)) (t.AskedUtc, speaking)
                     if earlier then textLink "Listen from there" (fun () -> dispatch (JumpToSegment(max 0 (t.Segment - 1)))) t.AskedUtc
+                    if making then label "Making a card…" 14.0 Palette.muted
+                    elif made > 0 then label (if made = 1 then "Card added" else sprintf "%d cards added" made) 14.0 Palette.muted
+                    else textLink "Make a card" (fun () -> dispatch (MakeCards(r.Paper.Id, Cards.Request.Answer t))) ("card", t.AskedUtc)
                 ]
             ]
         ]
@@ -1607,13 +1666,13 @@ let private helpOverlay (model: Model) (r: ReaderState) (h: HelpState) (dispatch
                                             ]
                                         ]
                                     | None -> ()
-                                    for t in session do turnView r h t false dispatch
+                                    for t in session do turnView model r h t false dispatch
                                     if not earlier.IsEmpty then
                                         textLink
                                             (if h.ShowEarlier then "Hide earlier questions" else sprintf "Earlier questions about this paper (%d)" earlier.Length)
                                             (fun () -> dispatch ToggleEarlier) h.ShowEarlier
                                         if h.ShowEarlier then
-                                            for t in earlier do turnView r h t true dispatch
+                                            for t in earlier do turnView model r h t true dispatch
                                 ]
                             ]
                         )
@@ -1621,6 +1680,644 @@ let private helpOverlay (model: Model) (r: ReaderState) (h: HelpState) (dispatch
                 ]
             ]
         )
+    ]
+
+// ---------------------------------------------------------------------------------------------
+// Learn: flashcards, made by the model and scheduled with FSRS
+// ---------------------------------------------------------------------------------------------
+
+/// An equation or figure of a paper on a card.
+let private cardImage (paperId: string) (visual: string) (maxHeight: float) : IView =
+    let paths = Store.Paths((Services.get ()).DataDir)
+    match bitmap (paths.Image(paperId, visual)) with
+    | Some bmp ->
+        Border.create [
+            Border.background Palette.paper
+            Border.cornerRadius 12.0
+            Border.padding (Thickness(10.0, 8.0))
+            Border.horizontalAlignment HorizontalAlignment.Left
+            Border.child (
+                Image.create [
+                    Image.source bmp
+                    Image.stretch Stretch.Uniform
+                    Image.maxWidth (float bmp.PixelSize.Width * 0.6)
+                    Image.maxHeight (min maxHeight (float bmp.PixelSize.Height * 0.6))
+                    Image.horizontalAlignment HorizontalAlignment.Left
+                ]
+            )
+        ]
+    | None -> Border.create [ Border.isVisible false ]
+
+/// When a card comes back: "new", "due now", "in 4 d".
+let private dueText (c: Card) =
+    let now = DateTime.UtcNow
+    if c.Memory.Stage = CardStage.New then "new"
+    elif Fsrs.isDue now c.Memory then "due now"
+    else "again in " + Fsrs.formatInterval (c.Memory.Due - now)
+
+/// A card in a list: question, answer, and a way to remove it.
+let private cardRow (paperId: string) (c: Card) (remove: string) (dispatch: Msg -> unit) : IView =
+    Border.create [
+        Border.padding (Thickness(16.0, 12.0, 16.0, 6.0))
+        Border.cornerRadius 14.0
+        Border.background Palette.surface
+        Border.child (
+            StackPanel.create [
+                StackPanel.spacing 6.0
+                StackPanel.children [
+                    richText c.Front 15.0 Palette.text
+                    richText c.Back 14.0 Palette.muted
+                    match c.Visual with
+                    | Some v -> cardImage paperId v 90.0
+                    | None -> ()
+                    Grid.create [
+                        Grid.columnDefinitions "*,Auto"
+                        Grid.children [
+                            TextBlock.create [
+                                Grid.column 0
+                                TextBlock.text (dueText c)
+                                TextBlock.fontSize 12.0
+                                TextBlock.foreground Palette.faint
+                                TextBlock.verticalAlignment VerticalAlignment.Center
+                            ]
+                            Border.create [ Grid.column 1; Border.child (textLink remove (fun () -> dispatch (DeleteCard(paperId, c.Id))) ("remove", c.Id)) ]
+                        ]
+                    ]
+                ]
+            ]
+        )
+    ]
+
+let private spinnerLine (text: string) : IView =
+    StackPanel.create [
+        StackPanel.orientation Orientation.Horizontal
+        StackPanel.spacing 10.0
+        StackPanel.children [
+            ProgressBar.create [
+                ProgressBar.isIndeterminate true
+                ProgressBar.width 48.0
+                ProgressBar.minWidth 48.0
+                ProgressBar.height 4.0
+                ProgressBar.minHeight 4.0
+                ProgressBar.verticalAlignment VerticalAlignment.Center
+                ProgressBar.foreground Palette.accent
+            ]
+            TextBlock.create [
+                TextBlock.text text
+                TextBlock.fontSize 14.0
+                TextBlock.foreground Palette.muted
+                TextBlock.verticalAlignment VerticalAlignment.Center
+                TextBlock.textWrapping TextWrapping.Wrap
+            ]
+        ]
+    ]
+
+/// Cards being made for a paper: what, how far, and a way to stop.
+let private makingLine (m: MakingCards) (dispatch: Msg -> unit) : IView =
+    StackPanel.create [
+        StackPanel.spacing 4.0
+        StackPanel.children [
+            spinnerLine (
+                match m.Step with
+                | Some step -> step + "…"
+                | None when m.Count = 0 -> "Writing cards…"
+                | None when m.Count = 1 -> "Writing cards… 1 so far"
+                | None -> sprintf "Writing cards… %d so far" m.Count)
+            StackPanel.create [
+                StackPanel.orientation Orientation.Horizontal
+                StackPanel.children [
+                    label m.What 13.0 Palette.faint
+                    textLink "   Cancel" (fun () -> dispatch CancelMaking) "cancel-making"
+                ]
+            ]
+        ]
+    ]
+
+/// The Remember panel: cards about where the listener is, typed topics, or the whole paper.
+let private cardsOverlay (model: Model) (r: ReaderState) (panel: CardsPanel) (dispatch: Msg -> unit) : IView =
+    let about = panel.About |> Option.bind r.Script.Visual
+    let seg = r.Script.Segments.[max 0 (min panel.Position (r.Script.Segments.Length - 1))]
+    let hasKey = Settings.hasKey model.Settings
+    let deck = deckOf model r.Paper.Id
+    let due = Cards.dueCount DateTime.UtcNow deck
+    let making = model.Making |> Option.filter (fun m -> m.PaperId = r.Paper.Id)
+    let busy = model.Making.IsSome
+    let justMade = match model.Made with Some (p, cards) when p = r.Paper.Id -> cards | _ -> []
+    let justIds = justMade |> List.map (fun c -> c.Id) |> Set.ofList
+    let paperDeck = deck |> List.exists (fun c -> c.Origin = "paper")
+    let taps =
+        [ match about with
+          | Some v -> yield Cards.Request.Visual v.Id, sprintf "Cards on %s" (Help.spokenName v)
+          | None -> ()
+          yield Cards.Request.Moment, "What I just heard"
+          yield Cards.Request.Section, "This section's main points" ]
+    Border.create [
+        Border.background Palette.bg
+        Border.child (
+            DockPanel.create [
+                DockPanel.children [
+                    Grid.create [
+                        DockPanel.dock Dock.Top
+                        Grid.columnDefinitions "*,Auto"
+                        Grid.margin (Thickness(20.0, 12.0, 8.0, 4.0))
+                        Grid.children [
+                            StackPanel.create [
+                                Grid.column 0
+                                StackPanel.verticalAlignment VerticalAlignment.Center
+                                StackPanel.children [
+                                    TextBlock.create [
+                                        TextBlock.text "Remember"
+                                        TextBlock.fontSize 22.0
+                                        TextBlock.fontWeight FontWeight.Bold
+                                        TextBlock.foreground Palette.text
+                                    ]
+                                    label "Flashcards from the paper, brought back just before you'd forget them." 12.0 Palette.muted
+                                ]
+                            ]
+                            Border.create [ Grid.column 1; Border.child (iconButton Icons.close 22.0 (fun () -> dispatch (CloseCards false)) "close-cards") ]
+                        ]
+                    ]
+                    Border.create [
+                        DockPanel.dock Dock.Bottom
+                        Border.background Palette.surface
+                        Border.cornerRadius (24.0, 24.0, 0.0, 0.0)
+                        Border.padding (Thickness(16.0, 14.0, 16.0, 16.0))
+                        Border.child (
+                            StackPanel.create [
+                                StackPanel.spacing 10.0
+                                StackPanel.children [
+                                    match model.MakeError with
+                                    | Some e -> label e 14.0 Palette.danger
+                                    | None -> ()
+                                    if hasKey && not busy then
+                                        WrapPanel.create [
+                                            WrapPanel.children [ for req, text in taps -> chip text (fun () -> dispatch (MakeCards(r.Paper.Id, req))) ]
+                                        ]
+                                    if hasKey then
+                                        Grid.create [
+                                            Grid.columnDefinitions "*,Auto"
+                                            Grid.children [
+                                                TextBox.create [
+                                                    Grid.column 0
+                                                    TextBox.text panel.Input
+                                                    TextBox.watermark "What do you want to remember?"
+                                                    TextBox.fontSize 15.0
+                                                    TextBox.cornerRadius 20.0
+                                                    TextBox.padding (Thickness(14.0, 9.0))
+                                                    TextBox.verticalContentAlignment VerticalAlignment.Center
+                                                    TextBox.onTextChanged ((fun t -> if t <> panel.Input then dispatch (SetCardInput t)), SubPatchOptions.OnChangeOf panel.Input)
+                                                    TextBox.onKeyDown ((fun e -> if e.Key = Input.Key.Enter then e.Handled <- true; dispatch SendCardInput), SubPatchOptions.Never)
+                                                ]
+                                                if panel.Input.Trim() <> "" then
+                                                    Button.create [
+                                                        Grid.column 1
+                                                        Button.width 44.0
+                                                        Button.height 44.0
+                                                        Button.margin (Thickness(8.0, 0.0, 0.0, 0.0))
+                                                        Button.cornerRadius 22.0
+                                                        Button.padding 0.0
+                                                        Button.background Palette.accent
+                                                        Button.horizontalContentAlignment HorizontalAlignment.Center
+                                                        Button.verticalContentAlignment VerticalAlignment.Center
+                                                        Button.isEnabled (not busy)
+                                                        Button.onClick ((fun _ -> dispatch SendCardInput), SubPatchOptions.Never)
+                                                        Button.content (icon Icons.send Palette.onAccent 20.0 false)
+                                                    ]
+                                            ]
+                                        ]
+                                    Grid.create [
+                                        Grid.columnDefinitions "*,Auto"
+                                        Grid.children [
+                                            Button.create [
+                                                Grid.column 0
+                                                Button.height 48.0
+                                                Button.cornerRadius 24.0
+                                                Button.horizontalAlignment HorizontalAlignment.Stretch
+                                                Button.horizontalContentAlignment HorizontalAlignment.Center
+                                                Button.verticalContentAlignment VerticalAlignment.Center
+                                                Button.background Palette.accent
+                                                Button.foreground Palette.onAccent
+                                                Button.fontSize 16.0
+                                                Button.fontWeight FontWeight.SemiBold
+                                                Button.content "Continue listening"
+                                                Button.onClick ((fun _ -> dispatch (CloseCards true)), SubPatchOptions.Never)
+                                            ]
+                                            if due > 0 then
+                                                Border.create [
+                                                    Grid.column 1
+                                                    Border.margin (Thickness(8.0, 0.0, 0.0, 0.0))
+                                                    Border.child (pill (sprintf "Review %d" due) (fun () -> dispatch (StartReview(Some r.Paper.Id))) false)
+                                                ]
+                                        ]
+                                    ]
+                                ]
+                            ]
+                        )
+                    ]
+                    View.withKey (sprintf "cards-%d-%b" deck.Length making.IsSome) (
+                    ScrollViewer.create [
+                        ScrollViewer.content (
+                            StackPanel.create [
+                                StackPanel.margin (Thickness(20.0, 8.0, 20.0, 20.0))
+                                StackPanel.spacing 14.0
+                                StackPanel.children [
+                                    // what "this" is
+                                    StackPanel.create [
+                                        StackPanel.spacing 8.0
+                                        StackPanel.children [
+                                            sectionLabel "WHERE YOU ARE"
+                                            match about with
+                                            | Some v -> visualThumb r v.Id 150.0 dispatch
+                                            | None -> ()
+                                            TextBlock.create [
+                                                TextBlock.text ("“" + seg.Say + "”")
+                                                TextBlock.fontSize 14.0
+                                                TextBlock.lineHeight 20.0
+                                                TextBlock.fontStyle FontStyle.Italic
+                                                TextBlock.foreground Palette.muted
+                                                TextBlock.textWrapping TextWrapping.Wrap
+                                                TextBlock.maxLines 3
+                                                TextBlock.textTrimming TextTrimming.WordEllipsis
+                                            ]
+                                        ]
+                                    ]
+                                    if not hasKey then
+                                        StackPanel.create [
+                                            StackPanel.spacing 10.0
+                                            StackPanel.children [
+                                                label "Making cards needs a Mistral API key: a model that has read the whole paper writes them." 15.0 Palette.text
+                                                StackPanel.create [
+                                                    StackPanel.orientation Orientation.Horizontal
+                                                    StackPanel.children [ pill "Open settings" (fun () -> dispatch (SetShowSettings true)) false ]
+                                                ]
+                                            ]
+                                        ]
+                                    match making, model.Making with
+                                    | Some m, _ -> makingLine m dispatch
+                                    | None, Some _ -> label "Making cards for another paper…" 14.0 Palette.muted
+                                    | None, None -> ()
+                                    if not justMade.IsEmpty then
+                                        sectionLabel (if justMade.Length = 1 then "JUST MADE" else sprintf "JUST MADE · %d CARDS" justMade.Length)
+                                        label "Remove any you don't want to learn." 12.0 Palette.faint
+                                        for c in justMade do cardRow r.Paper.Id c "Remove" dispatch
+                                    if hasKey then
+                                        sectionLabel "THE WHOLE PAPER"
+                                        StackPanel.create [
+                                            StackPanel.spacing 8.0
+                                            StackPanel.children [
+                                                label
+                                                    (if paperDeck then "Add cards on what the deck doesn't cover yet."
+                                                     else "A deck on the problem, the key idea, the method and its equations, and the results. It takes a minute or two.")
+                                                    13.0 Palette.muted
+                                                StackPanel.create [
+                                                    StackPanel.orientation Orientation.Horizontal
+                                                    StackPanel.children [
+                                                        pill
+                                                            (if paperDeck then "Make more cards" else sprintf "Make a deck of about %d cards" (Cards.deckSize r.Script))
+                                                            (fun () -> dispatch (MakeCards(r.Paper.Id, Cards.Request.Paper(if paperDeck then 10 else Cards.deckSize r.Script))))
+                                                            false
+                                                    ]
+                                                ]
+                                            ]
+                                        ]
+                                    let rest = deck |> List.filter (fun c -> not (justIds.Contains c.Id)) |> List.rev
+                                    if not rest.IsEmpty then
+                                        sectionLabel (sprintf "CARDS FROM THIS PAPER · %d" deck.Length)
+                                        for c in rest do cardRow r.Paper.Id c "Delete" dispatch
+                                ]
+                            ]
+                        )
+                    ])
+                ]
+            ]
+        )
+    ]
+
+/// One answer button: the rating, and when the card would come back.
+let private rateButton (column: int) (text: string) (after: TimeSpan) (color: string) (background: string) (rating: Fsrs.Rating) (dispatch: Msg -> unit) : IView =
+    Button.create [
+        Grid.column column
+        Button.height 60.0
+        Button.margin (Thickness(3.0, 0.0))
+        Button.cornerRadius 16.0
+        Button.horizontalAlignment HorizontalAlignment.Stretch
+        Button.horizontalContentAlignment HorizontalAlignment.Center
+        Button.verticalContentAlignment VerticalAlignment.Center
+        Button.background background
+        Button.onClick ((fun _ -> dispatch (RateCard rating)), SubPatchOptions.OnChangeOf text)
+        Button.content (
+            StackPanel.create [
+                StackPanel.spacing 2.0
+                StackPanel.children [
+                    TextBlock.create [
+                        TextBlock.text text
+                        TextBlock.fontSize 15.0
+                        TextBlock.fontWeight FontWeight.SemiBold
+                        TextBlock.foreground color
+                        TextBlock.horizontalAlignment HorizontalAlignment.Center
+                    ]
+                    TextBlock.create [
+                        TextBlock.text (Fsrs.formatInterval after)
+                        TextBlock.fontSize 12.0
+                        TextBlock.foreground (if background = Palette.accent then Palette.onAccent else Palette.muted)
+                        TextBlock.horizontalAlignment HorizontalAlignment.Center
+                    ]
+                ]
+            ]
+        )
+    ]
+
+/// A review session: the question, then the answer and how well it was remembered.
+let private reviewOverlay (model: Model) (rv: ReviewState) (dispatch: Msg -> unit) : IView =
+    let left = rv.Queue.Length
+    Border.create [
+        Border.background Palette.bg
+        Border.child (
+            DockPanel.create [
+                DockPanel.children [
+                    Grid.create [
+                        DockPanel.dock Dock.Top
+                        Grid.columnDefinitions "Auto,*"
+                        Grid.margin (Thickness(4.0, 6.0, 20.0, 0.0))
+                        Grid.children [
+                            Border.create [ Grid.column 0; Border.child (iconButton Icons.close 22.0 (fun () -> dispatch CloseReview) "close-review") ]
+                            TextBlock.create [
+                                Grid.column 1
+                                TextBlock.text (if left = 0 then "Review" else sprintf "Review · %d left" left)
+                                TextBlock.fontSize 18.0
+                                TextBlock.fontWeight FontWeight.SemiBold
+                                TextBlock.foreground Palette.text
+                                TextBlock.verticalAlignment VerticalAlignment.Center
+                            ]
+                        ]
+                    ]
+                    ProgressBar.create [
+                        DockPanel.dock Dock.Top
+                        ProgressBar.margin (Thickness(20.0, 4.0, 20.0, 8.0))
+                        ProgressBar.minimum 0.0
+                        ProgressBar.maximum 1.0
+                        ProgressBar.value (float rv.Answered / float (max 1 (rv.Answered + left)))
+                        ProgressBar.height 4.0
+                        ProgressBar.minHeight 4.0
+                        ProgressBar.cornerRadius 2.0
+                        ProgressBar.foreground Palette.accent
+                        ProgressBar.background Palette.surfaceHigh
+                    ]
+                    match rv.Queue with
+                    | [] ->
+                        let now = DateTime.UtcNow
+                        let next =
+                            model.Decks
+                            |> Map.toSeq
+                            |> Seq.filter (fun (id, _) -> rv.Scope.IsNone || rv.Scope = Some id)
+                            |> Seq.collect snd
+                            |> Seq.map (fun c -> c.Memory.Due)
+                            |> Seq.sortBy id
+                            |> Seq.tryHead
+                        StackPanel.create [
+                            StackPanel.margin (Thickness(32.0, 0.0))
+                            StackPanel.verticalAlignment VerticalAlignment.Center
+                            StackPanel.spacing 12.0
+                            StackPanel.children [
+                                TextBlock.create [
+                                    TextBlock.text "Done for now"
+                                    TextBlock.fontSize 26.0
+                                    TextBlock.fontWeight FontWeight.Bold
+                                    TextBlock.foreground Palette.text
+                                ]
+                                label
+                                    (sprintf "%d answer%s, %d remembered." rv.Answered (if rv.Answered = 1 then "" else "s") rv.Remembered)
+                                    16.0 Palette.muted
+                                match next with
+                                | Some d when d > now -> label (sprintf "The next card comes back in %s." (Fsrs.formatInterval (d - now))) 14.0 Palette.faint
+                                | _ -> ()
+                                StackPanel.create [
+                                    StackPanel.orientation Orientation.Horizontal
+                                    StackPanel.children [ pill "Close" (fun () -> dispatch CloseReview) true ]
+                                ]
+                            ]
+                        ]
+                    | (paperId, c) :: _ ->
+                        let title = model.Papers |> List.tryFind (fun p -> p.Id = paperId) |> Option.map (fun p -> p.Title) |> Option.defaultValue ""
+                        let preview = Fsrs.preview model.Settings.Retention DateTime.UtcNow c.Id c.Memory |> Map.ofList
+                        Grid.create [
+                            Grid.rowDefinitions "*,Auto"
+                            Grid.children [
+                                View.withKey (sprintf "card-%s-%b" c.Id rv.Revealed) (
+                                ScrollViewer.create [
+                                    Grid.row 0
+                                    ScrollViewer.content (
+                                        StackPanel.create [
+                                            StackPanel.margin (Thickness(24.0, 16.0, 24.0, 16.0))
+                                            StackPanel.spacing 16.0
+                                            StackPanel.children [
+                                                TextBlock.create [
+                                                    TextBlock.text title
+                                                    TextBlock.fontSize 12.0
+                                                    TextBlock.foreground Palette.faint
+                                                    TextBlock.textTrimming TextTrimming.CharacterEllipsis
+                                                ]
+                                                richText c.Front 22.0 Palette.text
+                                                match c.Visual with
+                                                | Some v when c.VisualOnFront -> cardImage paperId v 260.0
+                                                | _ -> ()
+                                                if rv.Revealed then
+                                                    Border.create [ Border.height 1.0; Border.background Palette.line; Border.margin (Thickness(0.0, 6.0)) ]
+                                                    richText c.Back 19.0 Palette.text
+                                                    match c.Visual with
+                                                    | Some v when not c.VisualOnFront -> cardImage paperId v 260.0
+                                                    | _ -> ()
+                                                    StackPanel.create [
+                                                        StackPanel.orientation Orientation.Horizontal
+                                                        StackPanel.children [
+                                                            textLink "Listen to it in the paper" (fun () -> dispatch (ListenToCard(paperId, c.Segment))) ("listen", c.Id)
+                                                            textLink "Delete card" (fun () -> dispatch (DeleteCard(paperId, c.Id))) ("delete", c.Id)
+                                                        ]
+                                                    ]
+                                            ]
+                                        ]
+                                    )
+                                ])
+                                Border.create [
+                                    Grid.row 1
+                                    Border.background Palette.surface
+                                    Border.cornerRadius (24.0, 24.0, 0.0, 0.0)
+                                    Border.padding (Thickness(13.0, 16.0, 13.0, 18.0))
+                                    Border.child (
+                                        if not rv.Revealed then
+                                            Button.create [
+                                                Button.height 60.0
+                                                Button.margin (Thickness(3.0, 0.0))
+                                                Button.cornerRadius 16.0
+                                                Button.horizontalAlignment HorizontalAlignment.Stretch
+                                                Button.horizontalContentAlignment HorizontalAlignment.Center
+                                                Button.verticalContentAlignment VerticalAlignment.Center
+                                                Button.background Palette.accent
+                                                Button.foreground Palette.onAccent
+                                                Button.fontSize 17.0
+                                                Button.fontWeight FontWeight.SemiBold
+                                                Button.content "Show answer"
+                                                Button.onClick ((fun _ -> dispatch ShowAnswer), SubPatchOptions.Never)
+                                            ]
+                                            :> IView
+                                        else
+                                            Grid.create [
+                                                Grid.columnDefinitions "*,*,*,*"
+                                                Grid.children [
+                                                    rateButton 0 "Again" preview.[Fsrs.Rating.Again] Palette.danger Palette.surfaceHigh Fsrs.Rating.Again dispatch
+                                                    rateButton 1 "Hard" preview.[Fsrs.Rating.Hard] Palette.text Palette.surfaceHigh Fsrs.Rating.Hard dispatch
+                                                    rateButton 2 "Good" preview.[Fsrs.Rating.Good] Palette.onAccent Palette.accent Fsrs.Rating.Good dispatch
+                                                    rateButton 3 "Easy" preview.[Fsrs.Rating.Easy] Palette.text Palette.surfaceHigh Fsrs.Rating.Easy dispatch
+                                                ]
+                                            ]
+                                    )
+                                ]
+                            ]
+                        ]
+                ]
+            ]
+        )
+    ]
+
+/// The Learn screen: cards due across the library, and each paper's deck.
+let private learnView (model: Model) (dispatch: Msg -> unit) : IView =
+    let now = DateTime.UtcNow
+    let due = Cards.dueQueue now (Map.toList model.Decks) |> List.length
+    let all = model.Decks |> Map.toList |> List.collect snd
+    let learned = all |> List.filter (fun c -> c.Memory.Stage = CardStage.Review) |> List.length
+    let hasKey = Settings.hasKey model.Settings
+    DockPanel.create [
+        DockPanel.children [
+            Grid.create [
+                DockPanel.dock Dock.Top
+                Grid.columnDefinitions "Auto,*"
+                Grid.margin (Thickness(4.0, 6.0, 16.0, 0.0))
+                Grid.children [
+                    Border.create [ Grid.column 0; Border.child (iconButton Icons.chevronLeft 24.0 (fun () -> dispatch CloseLearn) "close-learn") ]
+                    TextBlock.create [
+                        Grid.column 1
+                        TextBlock.text "Learn"
+                        TextBlock.fontSize 24.0
+                        TextBlock.fontWeight FontWeight.Bold
+                        TextBlock.foreground Palette.text
+                        TextBlock.verticalAlignment VerticalAlignment.Center
+                    ]
+                ]
+            ]
+            ScrollViewer.create [
+                ScrollViewer.content (
+                    StackPanel.create [
+                        StackPanel.margin (Thickness(16.0, 8.0, 16.0, 24.0))
+                        StackPanel.spacing 10.0
+                        StackPanel.children [
+                            Border.create [
+                                Border.padding (Thickness(20.0, 18.0))
+                                Border.cornerRadius 18.0
+                                Border.background "#1A2436"
+                                Border.child (
+                                    StackPanel.create [
+                                        StackPanel.spacing 8.0
+                                        StackPanel.children [
+                                            TextBlock.create [
+                                                TextBlock.text (
+                                                    if all.IsEmpty then "No cards yet"
+                                                    elif due = 0 then "All caught up"
+                                                    elif due = 1 then "1 card to review"
+                                                    else sprintf "%d cards to review" due)
+                                                TextBlock.fontSize 22.0
+                                                TextBlock.fontWeight FontWeight.Bold
+                                                TextBlock.foreground Palette.text
+                                            ]
+                                            label
+                                                (if all.IsEmpty then
+                                                     "Make a deck from any paper below, or while listening: the cards button in the reader makes cards about what you just heard, an equation, or anything you type, and every answer in Ask can become a card."
+                                                 else
+                                                     let next = all |> List.map (fun c -> c.Memory.Due) |> List.filter (fun d -> d > now) |> List.sort |> List.tryHead
+                                                     let counts = sprintf "%d card%s, %d learned" all.Length (if all.Length = 1 then "" else "s") learned
+                                                     match next with
+                                                     | Some d when due = 0 -> sprintf "%s. The next one comes back in %s." counts (Fsrs.formatInterval (d - now))
+                                                     | _ -> counts + ".")
+                                                14.0 Palette.muted
+                                            if due > 0 then
+                                                StackPanel.create [
+                                                    StackPanel.orientation Orientation.Horizontal
+                                                    StackPanel.margin (Thickness(0.0, 4.0, 0.0, 0.0))
+                                                    StackPanel.children [ pill "Review now" (fun () -> dispatch (StartReview None)) true ]
+                                                ]
+                                        ]
+                                    ]
+                                )
+                            ]
+                            match model.MakeError with
+                            | Some e -> label e 14.0 Palette.danger
+                            | None -> ()
+                            if not hasKey then label "Making cards needs a Mistral API key (Settings). Reviewing works without one." 13.0 Palette.muted
+                            if not model.Papers.IsEmpty then sectionLabel "YOUR PAPERS"
+                            for p in model.Papers do
+                                let deck = deckOf model p.Id
+                                let paperDue = Cards.dueCount now deck
+                                let making = model.Making |> Option.filter (fun m -> m.PaperId = p.Id)
+                                let made = match model.Made with Some (id, cards) when id = p.Id -> cards.Length | _ -> 0
+                                let expanded = model.LearnOpen = Some p.Id
+                                Border.create [
+                                    Border.padding (Thickness(18.0, 14.0, 18.0, 8.0))
+                                    Border.cornerRadius 16.0
+                                    Border.background Palette.surface
+                                    Border.child (
+                                        StackPanel.create [
+                                            StackPanel.spacing 6.0
+                                            StackPanel.children [
+                                                TextBlock.create [
+                                                    TextBlock.text p.Title
+                                                    TextBlock.fontSize 16.0
+                                                    TextBlock.fontWeight FontWeight.SemiBold
+                                                    TextBlock.foreground Palette.text
+                                                    TextBlock.textWrapping TextWrapping.Wrap
+                                                    TextBlock.maxLines 2
+                                                    TextBlock.textTrimming TextTrimming.CharacterEllipsis
+                                                ]
+                                                label
+                                                    (match deck.Length, paperDue with
+                                                     | 0, _ -> "No cards yet"
+                                                     | n, 0 -> sprintf "%d card%s · nothing due" n (if n = 1 then "" else "s")
+                                                     | n, d -> sprintf "%d card%s · %d due" n (if n = 1 then "" else "s") d)
+                                                    13.0 Palette.muted
+                                                match making with
+                                                | Some m -> makingLine m dispatch
+                                                | None ->
+                                                    if made > 0 then label (sprintf "Added %d card%s." made (if made = 1 then "" else "s")) 13.0 Palette.accent
+                                                    WrapPanel.create [
+                                                        WrapPanel.children [
+                                                            if paperDue > 0 then textLink (sprintf "Review %d" paperDue) (fun () -> dispatch (StartReview(Some p.Id))) ("review", p.Id)
+                                                            if hasKey then
+                                                                textLink
+                                                                    (if deck |> List.exists (fun c -> c.Origin = "paper") then "Make more cards" else "Make a deck")
+                                                                    (fun () ->
+                                                                        let size = if deck |> List.exists (fun c -> c.Origin = "paper") then 10 else max 12 (min 30 p.PageCount)
+                                                                        dispatch (MakeCards(p.Id, Cards.Request.Paper size)))
+                                                                    ("make", p.Id)
+                                                            if not deck.IsEmpty then
+                                                                textLink (if expanded then "Hide cards" else "Show cards") (fun () -> dispatch (ToggleDeck p.Id)) ("show", p.Id, expanded)
+                                                        ]
+                                                    ]
+                                                if expanded then
+                                                    StackPanel.create [
+                                                        StackPanel.spacing 8.0
+                                                        StackPanel.margin (Thickness(-10.0, 0.0, -10.0, 10.0))
+                                                        StackPanel.children [ for c in deck -> cardRow p.Id c "Delete" dispatch ]
+                                                    ]
+                                            ]
+                                        ]
+                                    )
+                                ]
+                            label "Cards are scheduled with FSRS: each comes back just before you would forget it, so a few minutes a day keeps a paper for months. Answer honestly: Again if you forgot, Hard if it took real effort, Good if you knew it, Easy if it was instant."
+                                12.0 Palette.faint
+                            |> fun l -> Border.create [ Border.margin (Thickness(4.0, 12.0, 4.0, 0.0)); Border.child l ]
+                        ]
+                    ]
+                )
+            ]
+        ]
     ]
 
 let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) : IView =
@@ -1633,7 +2330,7 @@ let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) :
                 DockPanel.children [
                     Grid.create [
                         DockPanel.dock Dock.Top
-                        Grid.columnDefinitions "Auto,*,Auto,Auto,Auto"
+                        Grid.columnDefinitions "Auto,*,Auto,Auto,Auto,Auto"
                         Grid.margin (Thickness(4.0, 6.0, 4.0, 2.0))
                         Grid.children [
                             Border.create [ Grid.column 0; Border.child (iconButton Icons.chevronLeft 24.0 (fun () -> dispatch CloseReader) "close-reader") ]
@@ -1684,8 +2381,9 @@ let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) :
                                     ]
                                 )
                             ]
-                            Border.create [ Grid.column 3; Border.child (iconButton Icons.sigma 22.0 (fun () -> dispatch ToggleEquations) "equations") ]
-                            Border.create [ Grid.column 4; Border.child (iconButton Icons.sliders 22.0 (fun () -> dispatch (SetShowSettings true)) "reader-settings") ]
+                            Border.create [ Grid.column 3; Border.child (iconButton Icons.cards 22.0 (fun () -> dispatch (OpenCards None)) "cards") ]
+                            Border.create [ Grid.column 4; Border.child (iconButton Icons.sigma 22.0 (fun () -> dispatch ToggleEquations) "equations") ]
+                            Border.create [ Grid.column 5; Border.child (iconButton Icons.sliders 22.0 (fun () -> dispatch (SetShowSettings true)) "reader-settings") ]
                         ]
                     ]
                     Border.create [ DockPanel.dock Dock.Bottom; Border.child (controls model r dispatch) ]
@@ -1696,6 +2394,9 @@ let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) :
             if r.ShowEquations then equationsOverlay r dispatch
             match r.Help with
             | Some h -> helpOverlay model r h dispatch
+            | None -> ()
+            match r.Cards with
+            | Some c -> cardsOverlay model r c dispatch
             | None -> ()
             match r.Zoom with
             | Some v -> zoomOverlay r v dispatch
@@ -1791,6 +2492,25 @@ let private settingsView (model: Model) (dispatch: Msg -> unit) : IView =
                                         TextBox.onTextChanged ((fun t -> if t <> model.Settings.HelpModel then dispatch (SetHelpModel t)), SubPatchOptions.OnChangeOf s.HelpModel)
                                     ]
                                     label "zai-glm-5-3 (GLM 5.3, hosted by Mistral) reads the whole paper for every answer." 12.0 Palette.faint
+                                    sectionTitle "LEARN"
+                                    label "Remember" 16.0 Palette.text
+                                    WrapPanel.create [
+                                        WrapPanel.children [
+                                            for r, text in [ 0.85, "85% · fewer reviews"; 0.9, "90%"; 0.95, "95% · more reviews" ] ->
+                                                let selected = abs (s.Retention - r) < 0.001
+                                                Button.create [
+                                                    Button.content text
+                                                    Button.fontSize 14.0
+                                                    Button.padding (Thickness(14.0, 8.0))
+                                                    Button.margin (Thickness(0.0, 0.0, 8.0, 8.0))
+                                                    Button.cornerRadius 18.0
+                                                    Button.background (if selected then Palette.accent else Palette.surfaceHigh)
+                                                    Button.foreground (if selected then Palette.onAccent else Palette.text)
+                                                    Button.onClick ((fun _ -> dispatch (SetRetention r)), SubPatchOptions.OnChangeOf(r, selected))
+                                                ]
+                                        ]
+                                    ]
+                                    label "How much of your cards you want to still know when they come back. Cards are scheduled with FSRS, which shows each one again just before you would forget it." 12.0 Palette.faint
                                     sectionTitle "FIND PAPERS"
                                     label "OpenAlex key" 16.0 Palette.text
                                     TextBox.create [
@@ -1887,16 +2607,24 @@ let private notice (text: string) (dispatch: Msg -> unit) : IView =
 /// Set on every render so the Android back button knows whether the app handles it.
 let mutable canGoBack = false
 
+/// Set on every render: a review is open, so keys answer cards instead of controlling playback.
+let mutable reviewing = false
+
 let view (model: Model) (dispatch: Msg -> unit) : IView =
     canGoBack <- State.canGoBack model
+    reviewing <- model.Review.IsSome
     Grid.create [
         Grid.background Palette.bg
         Grid.children [
             match model.Screen with
             | Screen.Library -> libraryView model dispatch
             | Screen.Discover -> discoverView model dispatch
+            | Screen.Learn -> learnView model dispatch
             | Screen.Importing s -> importingView s dispatch
             | Screen.Reader r -> readerView model r dispatch
+            match model.Review with
+            | Some rv -> reviewOverlay model rv dispatch
+            | None -> ()
             if model.ShowSettings then settingsView model dispatch
             match model.Notice with
             | Some n -> notice n dispatch

@@ -47,9 +47,34 @@ let private askMode (argv: string[]) =
         (Help.messages settings script k [] position about turn.Question |> List.sumBy (fun (_, t) -> t.Length))
     0
 
+/// --cards <paper id> <segment> <moment|section|visual|paper|topic text>: makes flashcards as the Remember panel
+/// does, and prints them (nothing is saved).
+let private cardsMode (argv: string[]) =
+    let paths = Store.Paths(Path.Combine(Environment.GetFolderPath Environment.SpecialFolder.LocalApplicationData, "PaperReader"))
+    let settings = Store.loadSettings paths
+    let id, position, what = argv.[1], int argv.[2], argv.[3]
+    let script = (Store.loadScript paths id).Value
+    let k = (Help.prepare settings paths id script (eprintfn "%s") Threading.CancellationToken.None).Result
+    let request =
+        match what with
+        | "moment" -> Cards.Request.Moment
+        | "section" -> Cards.Request.Section
+        | "visual" -> Cards.Request.Visual(script.Segments.[position].Show |> Option.defaultValue "")
+        | "paper" -> Cards.Request.Paper(Cards.deckSize script)
+        | t -> Cards.Request.Topic t
+    printfn "AT [%d] %s
+REQUEST: %s" position script.Segments.[position].Say (Cards.describe script request)
+    let sw = Stopwatch.StartNew()
+    let cards = (Cards.make settings script k position (Store.loadCards paths id) request ignore Threading.CancellationToken.None).Result
+    for c in cards do
+        printfn "\nQ: %s\nA: %s\n   (show %A%s, segment %d)" c.Front c.Back c.Visual (if c.VisualOnFront then " on front" else "") c.Segment
+    printfn "\n%d cards in %d ms" cards.Length sw.ElapsedMilliseconds
+    0
+
 [<EntryPoint>]
 let main argv =
-    if argv.[0] = "--ask" then askMode argv else
+    if argv.[0] = "--ask" then askMode argv
+    elif argv.[0] = "--cards" then cardsMode argv else
     let pdf = argv.[0]
     let opt name = argv |> Array.tryFindIndex ((=) name) |> Option.map (fun i -> argv.[i + 1])
     if argv |> Array.contains "--lines" then Layout.trace <- Some(fun s -> printfn "%s" s)

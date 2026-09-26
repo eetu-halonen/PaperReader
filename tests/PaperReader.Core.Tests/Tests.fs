@@ -445,3 +445,111 @@ let ``an arXiv entry is read when OpenAlex doesn't have the paper`` () =
     Assert.Equal(Some "The dominant models.", f.Abstract)
     Assert.Equal<string list>([ "Ashish Vaswani"; "Noam Shazeer" ], f.Authors)
     Assert.Equal<string list>([ "https://arxiv.org/pdf/1706.03762" ], f.Pdfs)
+
+// ---- Learning (FSRS and cards)
+
+let private t0 = DateTime(2026, 9, 1, 9, 0, 0, DateTimeKind.Utc)
+
+let private answer (m: Memory) (at: DateTime) (r: Fsrs.Rating) = Fsrs.review 0.9 at "card" m r
+
+[<Fact>]
+let ``recall is 90 percent after as many days as the stability`` () =
+    Assert.Equal(0.9, Fsrs.recall 12.0 12.0, 6)
+    Assert.Equal(12.0, Fsrs.intervalDays 0.9 12.0, 6)
+    Assert.True(Fsrs.intervalDays 0.95 12.0 < 12.0)
+
+[<Fact>]
+let ``a new card goes through short steps before days`` () =
+    let m = Fsrs.fresh t0
+    let again = answer m t0 Fsrs.Rating.Again
+    Assert.Equal(CardStage.Learning, again.Stage)
+    Assert.Equal(TimeSpan.FromMinutes 1.0, again.Due - t0)
+    let good = answer m t0 Fsrs.Rating.Good
+    Assert.Equal(TimeSpan.FromMinutes 10.0, good.Due - t0)
+    let later = t0.AddMinutes 10.0
+    let graduated = answer good later Fsrs.Rating.Good
+    Assert.Equal(CardStage.Review, graduated.Stage)
+    Assert.True((graduated.Due - later).TotalDays >= 1.0)
+    let easy = answer m t0 Fsrs.Rating.Easy
+    Assert.Equal(CardStage.Review, easy.Stage)
+    Assert.True(easy.Due - t0 > graduated.Due - later)
+
+[<Fact>]
+let ``review intervals grow and keep Hard before Good before Easy`` () =
+    let m = answer (answer (Fsrs.fresh t0) t0 Fsrs.Rating.Good) (t0.AddMinutes 10.0) Fsrs.Rating.Good
+    let onTime = m.Due
+    let p = Fsrs.preview 0.9 onTime "card" m |> List.map snd
+    Assert.True(p.[0] < p.[1] && p.[1] < p.[2] && p.[2] < p.[3], sprintf "%A" p)
+    let next = answer m onTime Fsrs.Rating.Good
+    Assert.True(next.Stability > m.Stability)
+    Assert.True(next.Due - onTime > onTime - m.LastReview.Value)
+
+[<Fact>]
+let ``a card remembered late gains more than one reviewed early`` () =
+    let m = answer (answer (Fsrs.fresh t0) t0 Fsrs.Rating.Good) (t0.AddMinutes 10.0) Fsrs.Rating.Good
+    let early = answer m (m.LastReview.Value.AddDays 2.0) Fsrs.Rating.Good
+    let late = answer m (m.LastReview.Value.AddDays 8.0) Fsrs.Rating.Good
+    Assert.True(late.Stability > early.Stability)
+
+[<Fact>]
+let ``forgetting a review card relearns it and lowers stability`` () =
+    let m = answer (answer (Fsrs.fresh t0) t0 Fsrs.Rating.Good) (t0.AddMinutes 10.0) Fsrs.Rating.Good
+    let lapsed = answer m m.Due Fsrs.Rating.Again
+    Assert.Equal(CardStage.Relearning, lapsed.Stage)
+    Assert.Equal(1, lapsed.Lapses)
+    Assert.True(lapsed.Stability < m.Stability)
+    Assert.True(lapsed.Difficulty > m.Difficulty)
+    Assert.Equal(TimeSpan.FromMinutes 10.0, lapsed.Due - m.Due)
+    Assert.Equal(CardStage.Review, (answer lapsed lapsed.Due Fsrs.Rating.Good).Stage)
+
+[<Fact>]
+let ``intervals read shortly`` () =
+    Assert.Equal("10 min", Fsrs.formatInterval (TimeSpan.FromMinutes 10.0))
+    Assert.Equal("4 d", Fsrs.formatInterval (TimeSpan.FromDays 4.0))
+    Assert.Equal("2 mo", Fsrs.formatInterval (TimeSpan.FromDays 61.0))
+    Assert.Equal("1.5 y", Fsrs.formatInterval (TimeSpan.FromDays 548.0))
+
+let private card (front: string) (m: Memory) =
+    { Id = front; Front = front; Back = "b"; Visual = None; VisualOnFront = false; Segment = 0; Origin = "paper"; CreatedUtc = t0; Memory = m }
+
+[<Fact>]
+let ``the model's cards are read and checked`` () =
+    let s = { helpScript () with Sections = [| { Title = "T"; FirstSegment = 0 }; { Title = "1 Method"; FirstSegment = 1 } |] }
+    let reply =
+        "```json\n{\"cards\": [\n"
+        + "{\"front\": \"What does the residual block add to $F(x)$?\", \"back\": \"Its input $x$.\", \"show\": \"E1\", \"showOn\": \"front\", \"section\": 1},\n"
+        + "{\"front\": \"What does ResNet train with?\", \"back\": \"SGD\", \"show\": \"Fig9\"},\n"
+        + "{\"front\": \"Already known\", \"back\": \"x\"},\n"
+        + "{\"front\": \"\", \"back\": \"no question\"}\n]}\n```"
+    let cards = Cards.parse s 0 "paper" [ card "Already known?" (Fsrs.fresh t0) ] t0 reply
+    Assert.Equal(2, cards.Length)
+    Assert.Equal(Some "E1", cards.[0].Visual)
+    Assert.True(cards.[0].VisualOnFront)
+    Assert.Equal(1, cards.[0].Segment)
+    Assert.Equal(None, cards.[1].Visual) // not a visual of this paper
+    Assert.Equal(CardStage.New, cards.[1].Memory.Stage)
+    Assert.Equal(4, Cards.countSoFar reply)
+
+[<Fact>]
+let ``cards are saved and read back`` () =
+    let dir = Path.Combine(Path.GetTempPath(), "pr-test-" + Guid.NewGuid().ToString("N"))
+    let p = Store.Paths dir
+    Directory.CreateDirectory(p.Paper "abc") |> ignore
+    let m = answer (Fsrs.fresh t0) t0 Fsrs.Rating.Good
+    let c = { card "What is $x$?" m with Visual = Some "E1"; VisualOnFront = true; Segment = 7 }
+    Store.saveCards p "abc" [ c ]
+    let back = Store.loadCards p "abc"
+    Assert.Equal<Card list>([ c ], back)
+    Directory.Delete(dir, true)
+
+[<Fact>]
+let ``the review queue puts steps first, then the most forgotten, then a few new cards`` () =
+    let now = t0.AddDays 30.0
+    let review days stability = { Fsrs.fresh t0 with Stage = CardStage.Review; Stability = stability; LastReview = Some(now.AddDays(-days)); Due = now.AddDays(-1.0) }
+    let learning = { Fsrs.fresh t0 with Stage = CardStage.Learning; Due = now.AddMinutes(-1.0); LastReview = Some now }
+    let notYet = { review 1.0 10.0 with Due = now.AddDays 3.0 }
+    let fresh = [ for i in 1 .. 25 -> card (sprintf "new %02d" i) { Fsrs.fresh t0 with Due = t0 } ]
+    let deck = [ card "slightly late" (review 11.0 10.0); card "step" learning; card "very late" (review 40.0 10.0); card "later" notYet ] @ fresh
+    let queue = Cards.dueQueue now [ "p", deck ] |> List.map (fun (_, c) -> c.Front)
+    Assert.Equal<string list>([ "step"; "very late"; "slightly late"; "new 01" ], queue |> List.truncate 4)
+    Assert.Equal(3 + Cards.newPerSession, queue.Length)

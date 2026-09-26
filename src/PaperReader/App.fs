@@ -38,13 +38,20 @@ type MainView() as this =
                 if Views.canGoBack then
                     args.Handled <- true
                     dispatch |> Option.iter (fun d -> d State.BackPressed))
-            // keyboard: space play/pause, arrows 15 s, Escape back (not while typing in a text box)
+            // keyboard: space play/pause, arrows 15 s, Escape back (not while typing in a text box);
+            // in a review, space or Enter shows the answer (then answers Good) and 1 to 4 answer
             top.AddHandler(
                 Input.InputElement.KeyDownEvent,
                 (fun _ (e: Input.KeyEventArgs) ->
                     let typing = e.Source :? TextBox
                     let msg =
                         match e.Key with
+                        | Input.Key.Space | Input.Key.Enter when Views.reviewing && not typing -> Some State.ReviewNext
+                        | Input.Key.D1 | Input.Key.NumPad1 when Views.reviewing -> Some(State.RateCard PaperReader.Core.Fsrs.Rating.Again)
+                        | Input.Key.D2 | Input.Key.NumPad2 when Views.reviewing -> Some(State.RateCard PaperReader.Core.Fsrs.Rating.Hard)
+                        | Input.Key.D3 | Input.Key.NumPad3 when Views.reviewing -> Some(State.RateCard PaperReader.Core.Fsrs.Rating.Good)
+                        | Input.Key.D4 | Input.Key.NumPad4 when Views.reviewing -> Some(State.RateCard PaperReader.Core.Fsrs.Rating.Easy)
+                        | _ when Views.reviewing && e.Key <> Input.Key.Escape -> None
                         | Input.Key.Space when not typing -> Some State.TogglePlay
                         | Input.Key.Left when not typing -> Some State.Back15
                         | Input.Key.Right when not typing -> Some State.Forward15

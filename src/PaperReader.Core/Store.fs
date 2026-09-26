@@ -60,6 +60,8 @@ type Paths(root: string) =
     member this.FigureNotes(id) = Path.Combine(this.HelpDir id, "figures.json")
     /// The answer being read aloud, a few sentences per clip.
     member this.AnswerAudio(id, part: int) = Path.Combine(this.HelpDir id, sprintf "answer-%d.wav" part)
+    /// The paper's flashcards and their review state.
+    member this.Cards(id) = Path.Combine(this.Paper id, "cards.json")
 
 let paperId (pdfPath: string) =
     use fs = File.OpenRead pdfPath
@@ -84,6 +86,7 @@ let saveSettings (p: Paths) (s: Settings) =
         w.WriteString("helpModel", s.HelpModel)
         w.WriteString("aboutMe", s.AboutMe)
         w.WriteString("openAlexKey", s.OpenAlexKey)
+        w.WriteNumber("retention", s.Retention)
         w.WriteEndObject())
 
 let loadSettings (p: Paths) : Settings =
@@ -102,7 +105,8 @@ let loadSettings (p: Paths) : Settings =
           StopAtFigures = boolean e "stopAtFigures" def.StopAtFigures
           HelpModel = str e "helpModel" def.HelpModel
           AboutMe = str e "aboutMe" def.AboutMe
-          OpenAlexKey = str e "openAlexKey" def.OpenAlexKey }
+          OpenAlexKey = str e "openAlexKey" def.OpenAlexKey
+          Retention = num e "retention" def.Retention |> max 0.7 |> min 0.97 }
     with _ -> Settings.defaults
 
 // ---- paper metadata (library entry + listening position)
@@ -326,3 +330,71 @@ let loadFigureNotes (p: Paths) (id: string) : Map<string, string> option =
         use d = JsonDocument.Parse(File.ReadAllText(p.FigureNotes id))
         Some(d.RootElement.EnumerateObject() |> Seq.map (fun e -> e.Name, e.Value.GetString()) |> Map.ofSeq)
     with _ -> None
+
+// ---- flashcards
+
+let private stageName =
+    function
+    | CardStage.New -> "new"
+    | CardStage.Learning -> "learning"
+    | CardStage.Review -> "review"
+    | CardStage.Relearning -> "relearning"
+
+let private stageOf =
+    function
+    | "learning" -> CardStage.Learning
+    | "review" -> CardStage.Review
+    | "relearning" -> CardStage.Relearning
+    | _ -> CardStage.New
+
+let private time (e: JsonElement) (name: string) =
+    match DateTime.TryParse(str e name "", Globalization.CultureInfo.InvariantCulture, Globalization.DateTimeStyles.RoundtripKind) with
+    | true, t -> Some(t.ToUniversalTime())
+    | _ -> None
+
+let saveCards (p: Paths) (id: string) (cards: Card list) =
+    writeAtomic (p.Cards id) (fun w ->
+        w.WriteStartArray()
+        for c in cards do
+            w.WriteStartObject()
+            w.WriteString("id", c.Id)
+            w.WriteString("front", c.Front)
+            w.WriteString("back", c.Back)
+            c.Visual |> Option.iter (fun v -> w.WriteString("visual", v))
+            w.WriteBoolean("visualOnFront", c.VisualOnFront)
+            w.WriteNumber("segment", c.Segment)
+            w.WriteString("origin", c.Origin)
+            w.WriteString("created", c.CreatedUtc.ToString("o"))
+            let m = c.Memory
+            w.WriteString("stage", stageName m.Stage)
+            w.WriteString("due", m.Due.ToString("o"))
+            w.WriteNumber("stability", m.Stability)
+            w.WriteNumber("difficulty", m.Difficulty)
+            w.WriteNumber("reps", m.Reps)
+            w.WriteNumber("lapses", m.Lapses)
+            m.LastReview |> Option.iter (fun t -> w.WriteString("last", t.ToString("o")))
+            w.WriteEndObject()
+        w.WriteEndArray())
+
+let loadCards (p: Paths) (id: string) : Card list =
+    try
+        use d = JsonDocument.Parse(File.ReadAllText(p.Cards id))
+        [ for e in d.RootElement.EnumerateArray() ->
+              let created = time e "created" |> Option.defaultValue DateTime.UtcNow
+              { Id = str e "id" (Guid.NewGuid().ToString("N"))
+                Front = str e "front" ""
+                Back = str e "back" ""
+                Visual = optStr e "visual"
+                VisualOnFront = boolean e "visualOnFront" false
+                Segment = int (num e "segment" 0.0)
+                Origin = str e "origin" ""
+                CreatedUtc = created
+                Memory =
+                  { Stage = stageOf (str e "stage" "")
+                    Due = time e "due" |> Option.defaultValue created
+                    Stability = num e "stability" 0.0
+                    Difficulty = num e "difficulty" 0.0
+                    Reps = int (num e "reps" 0.0)
+                    Lapses = int (num e "lapses" 0.0)
+                    LastReview = time e "last" } } ]
+    with _ -> []

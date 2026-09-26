@@ -28,6 +28,14 @@ It runs on Android, on the Linux desktop and in the browser (WebAssembly).
   offers three follow-ups, so typing is rarely needed; you can also type, or tap the microphone and ask
   out loud. Answers can be read to you, show the equation or figure they talk about, and are kept per paper.
   *Ask about it* on any item in the Σ list asks about that one. See [How Ask answers](#how-ask-answers).
+- **Learn** (flashcards with spaced repetition): the cards button in the reader opens *Remember*, where one tap makes
+  cards about the equation or figure on screen, what you just heard, or the section's main points, or you type what you
+  want to remember ("why divide by √d_k"). *Make a deck* writes about one card per page covering the whole paper
+  (problem, key idea, method and its equations, results, limitations); *Make more cards* adds ones the deck doesn't
+  cover yet. Every Ask answer has *Make a card*, and every item in the Σ list has *Remember*. New cards are listed so
+  bad ones can be removed. Reviews (*Learn* in the library, or the banner when cards are due) show the question, then
+  the answer with Again / Hard / Good / Easy and when each would bring the card back; *Listen to it in the paper* jumps
+  to where it is narrated. See [How cards are made and scheduled](#how-cards-are-made-and-scheduled).
 - **Find papers**: search about 270 million works on [OpenAlex](https://openalex.org) (only those with a free
   PDF are listed), or paste an arXiv id or address, a DOI, or a PDF address. *Recommended for you* lists new and
   related papers from [Semantic Scholar](https://www.semanticscholar.org)'s recommender, based on the papers in
@@ -45,7 +53,7 @@ Written in F# with Avalonia, FuncUI and Elmish, for .NET 10.
 
 | Path | What it is |
 | --- | --- |
-| `src/PaperReader.Core` | Everything without UI: PDF layout analysis (PdfPig), math verbalisation, narration, Mistral client, WAV cache, paper search and recommendations (`Discover.fs`) |
+| `src/PaperReader.Core` | Everything without UI: PDF layout analysis (PdfPig), math verbalisation, narration, Mistral client, WAV cache, paper search and recommendations (`Discover.fs`), flashcards (`Cards.fs`) and their FSRS scheduler (`Fsrs.fs`) |
 | `src/PaperReader` | The shared Elmish UI |
 | `src/PaperReader.Android` | Android head: audio player, phone TTS, PDF crops, playback service, microphone |
 | `src/PaperReader.Desktop` | Linux desktop head: ffplay audio, pdftoppm crops, optional espeak-ng, ffmpeg microphone |
@@ -86,7 +94,8 @@ This publishes a self-contained build to `dist/linux-x64/paper-reader` and adds 
 to the application menu and to *Open with* for PDFs. It can also be started directly:
 `dist/linux-x64/paper-reader paper.pdf`. Data lives in `~/.local/share/PaperReader`.
 
-Keys: Space play/pause, ← / → 15 seconds, A ask, Esc back.
+Keys: Space play/pause, ← / → 15 seconds, A ask, Esc back. In a review: Space or Enter shows the answer (then
+answers Good), 1–4 answer Again / Hard / Good / Easy.
 
 ## Browser (WebAssembly)
 
@@ -134,6 +143,26 @@ spoken, and not spoil what's ahead in a recap. Quick taps use low reasoning effo
 1–2 s); walkthroughs and typed or spoken questions use high. The reply ends with the item to show and
 three follow-ups, which become the next taps. `ScriptDump --ask <paper id> <segment> <question>` asks
 from the command line against the desktop app's cache.
+
+## How cards are made and scheduled
+
+Cards are written by the Ask model (GLM 5.3) with the same system prompt as Ask, so it has read the whole paper and
+every equation, figure and table, and the API's cache of that long prefix serves both. The request says what to make
+cards about (with where you are, as Ask describes it), the cards the paper already has (so none is repeated), and rules
+for good cards: one idea each, a short answer, a question that makes sense months later shuffled with other papers
+("In the Transformer, …" rather than "this paper"), understanding over wording, the paper's notation and numbers. A
+card can show an equation, figure or table on its front or with its answer, and remembers where in the narration its
+subject is. Cards are kept per paper in `cards.json`.
+
+Reviews are scheduled with [FSRS-5](https://github.com/open-spaced-repetition/fsrs4anki/wiki/The-Algorithm) (the
+scheduler in Anki since 23.10) with its default parameters. Each card has a stability (days until the chance of
+recalling it falls to 90%) and a difficulty; each answer updates both from how likely recall was at that moment, and
+the card comes back when that chance will have fallen to the retention set in Settings (85, 90 or 95%). For the same
+retention this needs roughly 20–30% fewer reviews than SM-2. New and forgotten cards first come back after 1 and
+10 minutes, within the session. A session takes the cards in short steps first, then the reviews most likely to be
+forgotten, then at most 20 new cards. Intervals of 3 days or more are spread by ±5% so a deck made at once doesn't
+keep coming back on the same day. `ScriptDump --cards <paper id> <segment> <moment|section|visual|paper|text>`
+makes cards from the command line against the desktop app's cache (printed, not saved).
 
 ## Desktop analysis tool
 

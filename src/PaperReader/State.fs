@@ -55,6 +55,41 @@ type HelpState =
       ResumeOnClose: bool
       Cancel: CancellationTokenSource }
 
+/// The Remember panel: making flashcards about the paper while listening.
+type CardsPanel =
+    { /// Segment the cards are about (where the listener paused).
+      Position: int
+      /// The equation or figure on screen, if any.
+      About: string option
+      Input: string
+      /// Playback was on when the panel opened: closing it carries on.
+      ResumeOnClose: bool }
+
+/// Cards being made by the model.
+type MakingCards =
+    { Id: Guid
+      PaperId: string
+      /// What was asked for, as shown.
+      What: string
+      /// Getting the paper ready, before the model writes.
+      Step: string option
+      /// Cards written so far.
+      Count: int
+      Cancel: CancellationTokenSource }
+
+/// A review session: cards shown one at a time until none is due.
+type ReviewState =
+    { /// The paper reviewed, or None for every paper.
+      Scope: string option
+      /// Cards to show, the current one first (paper id, card).
+      Queue: (string * Card) list
+      Revealed: bool
+      /// Answers given, and how many of them were not Again.
+      Answered: int
+      Remembered: int
+      /// Cards in the session when it started (learning steps shown again aren't counted).
+      Total: int }
+
 type ReaderState =
     { Paper: PaperInfo
       Script: Script
@@ -80,7 +115,9 @@ type ReaderState =
       /// The equation kept on screen after such a stop, until the listener continues.
       Held: string option
       /// The Ask panel, when open.
-      Help: HelpState option }
+      Help: HelpState option
+      /// The Remember panel, when open.
+      Cards: CardsPanel option }
 
 /// A search on the Find papers screen.
 type SearchState =
@@ -122,6 +159,8 @@ type DiscoverState =
 type Screen =
     | Library
     | Discover
+    /// Flashcards of every paper: review, and make decks.
+    | Learn
     | Importing of ImportState
     | Reader of ReaderState
 
@@ -136,7 +175,17 @@ type Model =
       /// A paper whose remove button was tapped once (a second tap removes it).
       ConfirmDelete: string option
       /// Find papers, kept while the app runs so going back to it shows the same results.
-      Discover: DiscoverState }
+      Discover: DiscoverState
+      /// Every paper's flashcards, by paper id.
+      Decks: Map<string, Card list>
+      Making: MakingCards option
+      /// The cards made last (paper id, cards), shown so bad ones can be removed; or why making failed.
+      Made: (string * Card list) option
+      MakeError: string option
+      /// A review session, shown over any screen.
+      Review: ReviewState option
+      /// The paper whose cards are listed on the Learn screen.
+      LearnOpen: string option }
 
 type Msg =
     | OpenPdf
@@ -224,6 +273,31 @@ type Msg =
     /// Opens a web page in the system browser.
     | OpenLink of string
     | SetOpenAlexKey of string
+    // ----- Learn
+    | OpenLearn
+    | CloseLearn
+    /// Shows or hides a paper's cards on the Learn screen.
+    | ToggleDeck of paperId: string
+    /// Opens the Remember panel about what is on screen (or the given equation or figure).
+    | OpenCards of about: string option
+    | CloseCards of resume: bool
+    | SetCardInput of string
+    | SendCardInput
+    | MakeCards of paperId: string * Cards.Request
+    | CardsStep of makeId: Guid * step: string
+    | CardsProgress of makeId: Guid * count: int
+    | CardsMade of makeId: Guid * Result<Card list, string>
+    | CancelMaking
+    | DeleteCard of paperId: string * cardId: string
+    | StartReview of paperId: string option
+    | ShowAnswer
+    | RateCard of Fsrs.Rating
+    /// Space or Enter in a review: shows the answer, or answers Good.
+    | ReviewNext
+    | CloseReview
+    /// Listens to where the card's subject is in the paper.
+    | ListenToCard of paperId: string * segment: int
+    | SetRetention of float
 
 let speeds = [| 0.8; 1.0; 1.15; 1.3; 1.5; 1.75; 2.0 |]
 let jumpMs = 15000
@@ -292,6 +366,13 @@ let private saveSettings (s: Settings) : Cmd<Msg> =
 
 let private loadLibrary () =
     try Store.library (paths ()) with _ -> []
+
+let private loadDecks (papers: PaperInfo list) : Map<string, Card list> =
+    let p = paths ()
+    papers
+    |> List.map (fun x -> x.Id, (try Store.loadCards p x.Id with _ -> []))
+    |> List.filter (fun (_, cards) -> not cards.IsEmpty)
+    |> Map.ofList
 
 let private runTask (work: unit -> Task<'a>) (ok: 'a -> Msg) (fail: exn -> Msg) : Cmd<Msg> =
     Cmd.ofEffect (fun dispatch ->
@@ -369,8 +450,9 @@ let private stopsHere (settings: Settings) (r: ReaderState) =
 
 let init () : Model * Cmd<Msg> =
     let settings = try Store.loadSettings (paths ()) with _ -> Settings.defaults
+    let papers = loadLibrary ()
     { Screen = Screen.Library
-      Papers = loadLibrary ()
+      Papers = papers
       Settings = settings
       ShowSettings = false
       Voices = []
@@ -384,7 +466,13 @@ let init () : Model * Cmd<Msg> =
           Expanded = None
           Fetching = None
           Failed = None
-          Known = [] } },
+          Known = [] }
+      Decks = loadDecks papers
+      Making = None
+      Made = None
+      MakeError = None
+      Review = None
+      LearnOpen = None },
     Cmd.ofEffect (fun dispatch ->
         (platform ()).SetIncomingPdfHandler(fun (path, name) -> dispatch (ImportFile(path, name)))
         (platform ()).SetRemoteHandler(fun play -> dispatch (Remote play)))
@@ -486,6 +574,66 @@ let private withHelp (model: Model) (f: ReaderState -> HelpState -> HelpState * 
     | _ -> model, Cmd.none
 
 // ---------------------------------------------------------------------------------------------
+// Learn
+// ---------------------------------------------------------------------------------------------
+
+let deckOf (model: Model) (paperId: string) = model.Decks.TryFind paperId |> Option.defaultValue []
+
+/// Replaces a paper's cards and saves them.
+let private setDeck (model: Model) (paperId: string) (cards: Card list) : Model * Cmd<Msg> =
+    { model with Decks = (if cards.IsEmpty then model.Decks.Remove paperId else model.Decks.Add(paperId, cards)) },
+    Cmd.ofEffect (fun _ -> try Store.saveCards (paths ()) paperId cards with _ -> ())
+
+/// Where cards about "this" are: the moment the Ask or Remember panel opened at, or where playback is.
+let private cardPosition (r: ReaderState) =
+    match r.Help, r.Cards with
+    | Some h, _ -> h.Position
+    | None, Some c -> c.Position
+    | None, None -> if r.Held.IsSome && r.Current > 0 then r.Current - 1 else r.Current
+
+let private startMaking (settings: Settings) (paperId: string) (script: Script option) (position: int) (existing: Card list)
+                        (request: Cards.Request) : MakingCards * Cmd<Msg> =
+    let id = Guid.NewGuid()
+    let cts = new CancellationTokenSource()
+    let p = paths ()
+    let work =
+        Cmd.ofEffect (fun dispatch ->
+            Task.Run(fun () ->
+                task {
+                    try
+                        let script =
+                            match script |> Option.orElse (Store.loadScript p paperId) with
+                            | Some s -> s
+                            | None -> failwith "This paper's cache is from an older version. Remove it and add the PDF again."
+                        let! k =
+                            match knowledge.TryGetValue paperId with
+                            | true, k -> Task.FromResult k
+                            | _ ->
+                                task {
+                                    let! k = Help.prepare settings p paperId script (fun step -> dispatch (CardsStep(id, step))) cts.Token
+                                    knowledge.[paperId] <- k
+                                    return k
+                                }
+                        dispatch (CardsProgress(id, 0))
+                        let! cards = Cards.make settings script k position existing request (fun n -> dispatch (CardsProgress(id, n))) cts.Token
+                        dispatch (CardsMade(id, Ok cards))
+                    with e ->
+                        let e = match e with :? AggregateException as a when not (isNull a.InnerException) -> a.InnerException | e -> e
+                        dispatch (CardsMade(id, Error(errorText e)))
+                }
+                :> Task)
+            |> ignore)
+    let what = match script with Some s -> Cards.describe s request | None -> "The whole paper"
+    { Id = id; PaperId = paperId; What = what; Step = Some "Getting ready"; Count = 0; Cancel = cts }, work
+
+let private withReview (model: Model) (f: ReviewState -> ReviewState * Cmd<Msg>) : Model * Cmd<Msg> =
+    match model.Review with
+    | Some rv ->
+        let rv, cmd = f rv
+        { model with Review = Some rv }, cmd
+    | None -> model, Cmd.none
+
+// ---------------------------------------------------------------------------------------------
 // Find papers
 // ---------------------------------------------------------------------------------------------
 
@@ -577,7 +725,8 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
     | ImportFinished (importId, result) ->
         match model.Screen, result with
         | Screen.Importing s, Ok (paper, _, warning) when s.Id = importId ->
-            let model = { model with Papers = loadLibrary (); Notice = warning }
+            let papers = loadLibrary ()
+            let model = { model with Papers = papers; Decks = loadDecks papers; Notice = warning }
             // a paper imported before may already have audio: load it like a library paper
             model, Cmd.ofMsg (OpenPaper paper)
         | Screen.Importing s, Error e when s.Id = importId -> { model with Screen = Screen.Library; Notice = Some e }, Cmd.none
@@ -585,7 +734,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
     | AskDelete id -> { model with ConfirmDelete = Some id }, Cmd.none
     | DeletePaper id ->
         (try Store.deletePaper (paths ()) id with _ -> ())
-        { model with Papers = loadLibrary (); ConfirmDelete = None }, Cmd.none
+        { model with Papers = loadLibrary (); ConfirmDelete = None; Decks = model.Decks.Remove id }, Cmd.none
 
     // ----- reader
     | OpenPaper paper when Import.needsRefresh model.Settings (paths ()) paper.Id ->
@@ -648,7 +797,8 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
               Zoom = None
               Stops = Narration.equationStops script
               Held = None
-              Help = None }
+              Help = None
+              Cards = None }
         let r, playCmd = play r model.Settings
         { model with Screen = Screen.Reader r }, Cmd.batch [ startSynth r model.Settings; playCmd ]
     | CloseReader ->
@@ -659,6 +809,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             Cmd.batch [ cmd; Cmd.ofEffect (fun _ -> stopSynth (); (platform ()).EndPlayback()) ]
         | _ -> model, Cmd.none
     | TogglePlay when (match model.Screen with Screen.Reader r -> r.Help.IsSome | _ -> false) -> update (CloseHelp true) model
+    | TogglePlay when (match model.Screen with Screen.Reader r -> r.Cards.IsSome | _ -> false) -> update (CloseCards true) model
     | TogglePlay ->
         withReader model (fun r ->
             if r.Playing then pause r
@@ -683,7 +834,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
     | JumpToSegment i ->
         withReader model (fun r ->
             r.Help |> Option.iter (fun h -> h.Cancel.Cancel())
-            let r = { r with ShowOutline = false; ShowEquations = false; Zoom = None; Help = None }
+            let r = { r with ShowOutline = false; ShowEquations = false; Zoom = None; Help = None; Cards = None }
             let r, cmd = seek r model.Settings { Segment = i; OffsetMs = 0 }
             if r.Playing then r, cmd else play r model.Settings)
     | CycleSpeed ->
@@ -1066,6 +1217,130 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         let settings = { model.Settings with OpenAlexKey = key.Trim() }
         { model with Settings = settings }, saveSettings settings
 
+    // ----- Learn
+    | OpenLearn ->
+        { model with Screen = Screen.Learn; Notice = None; ConfirmDelete = None; Decks = loadDecks model.Papers }, Cmd.none
+    | CloseLearn -> { model with Screen = Screen.Library; MakeError = None }, Cmd.none
+    | ToggleDeck id -> { model with LearnOpen = (if model.LearnOpen = Some id then None else Some id) }, Cmd.none
+    | OpenCards about ->
+        withReader model (fun r ->
+            let wasPlaying = r.Playing
+            let r, pauseCmd = if r.Playing then pause r else r, Cmd.none
+            let about =
+                match about with
+                | Some v -> Some v
+                | None ->
+                    match r.Held with
+                    | Some v -> Some v
+                    | None ->
+                        r.Script.Segments.[r.Current].Show
+                        |> Option.filter (fun v -> r.Script.Visual v |> Option.exists (fun v -> v.Kind <> VisualKind.Inline))
+            let panel = { Position = cardPosition r; About = about; Input = ""; ResumeOnClose = wasPlaying }
+            { r with Cards = Some panel; ShowEquations = false; ShowOutline = false; Zoom = None }, pauseCmd)
+        |> fun (m, cmd) -> { m with MakeError = None }, cmd
+    | CloseCards resume ->
+        withReader model (fun r ->
+            match r.Cards with
+            | None -> r, Cmd.none
+            | Some c ->
+                let r = { r with Cards = None }
+                if resume || c.ResumeOnClose then play r model.Settings else r, Cmd.none)
+    | SetCardInput text ->
+        withReader model (fun r -> { r with Cards = r.Cards |> Option.map (fun c -> { c with Input = text }) }, Cmd.none)
+    | SendCardInput ->
+        match model.Screen with
+        | Screen.Reader ({ Cards = Some c } as r) when c.Input.Trim() <> "" ->
+            let model = { model with Screen = Screen.Reader { r with Cards = Some { c with Input = "" } } }
+            update (MakeCards(r.Paper.Id, Cards.Request.Topic c.Input)) model
+        | _ -> model, Cmd.none
+    | MakeCards (paperId, request) ->
+        if not (Settings.hasKey model.Settings) then { model with MakeError = Some "Add a Mistral API key in Settings to make cards." }, Cmd.none
+        elif model.Making.IsSome then { model with MakeError = Some "Wait for the cards being made to finish." }, Cmd.none
+        else
+            let script, position =
+                match model.Screen with
+                | Screen.Reader r when r.Paper.Id = paperId -> Some r.Script, cardPosition r
+                | _ -> None, 0
+            let making, work = startMaking model.Settings paperId script position (deckOf model paperId) request
+            { model with Making = Some making; Made = None; MakeError = None }, work
+    | CardsStep (id, step) ->
+        match model.Making with
+        | Some m when m.Id = id -> { model with Making = Some { m with Step = Some step } }, Cmd.none
+        | _ -> model, Cmd.none
+    | CardsProgress (id, count) ->
+        match model.Making with
+        | Some m when m.Id = id -> { model with Making = Some { m with Step = None; Count = count } }, Cmd.none
+        | _ -> model, Cmd.none
+    | CardsMade (id, result) ->
+        match model.Making, result with
+        | Some m, Ok cards when m.Id = id ->
+            let model, save = setDeck model m.PaperId (deckOf model m.PaperId @ cards)
+            { model with Making = None; Made = Some(m.PaperId, cards) }, save
+        | Some m, Error e when m.Id = id ->
+            { model with Making = None; MakeError = (if e = "Cancelled." then None else Some e) }, Cmd.none
+        | _ -> model, Cmd.none
+    | CancelMaking ->
+        model.Making |> Option.iter (fun m -> m.Cancel.Cancel())
+        { model with Making = None }, Cmd.none
+    | DeleteCard (paperId, cardId) ->
+        let model, save = setDeck model paperId (deckOf model paperId |> List.filter (fun c -> c.Id <> cardId))
+        let made = model.Made |> Option.map (fun (p, cards) -> p, cards |> List.filter (fun c -> c.Id <> cardId))
+        let review =
+            model.Review
+            |> Option.map (fun rv ->
+                match rv.Queue with
+                | (_, c) :: rest when c.Id = cardId -> { rv with Queue = rest; Revealed = false }
+                | q -> { rv with Queue = q |> List.filter (fun (_, c) -> c.Id <> cardId) })
+        { model with Made = made; Review = review }, save
+    | StartReview scope ->
+        let decks =
+            match scope with
+            | Some id -> [ id, deckOf model id ]
+            | None -> Map.toList model.Decks
+        match Cards.dueQueue DateTime.UtcNow decks with
+        | [] -> { model with Notice = Some "Nothing to review right now." }, Cmd.none
+        | queue ->
+            let model, pauseCmd = withReader model (fun r -> if r.Playing then pause r else r, Cmd.none)
+            { model with Review = Some { Scope = scope; Queue = queue; Revealed = false; Answered = 0; Remembered = 0; Total = queue.Length } },
+            pauseCmd
+    | ShowAnswer -> withReview model (fun rv -> { rv with Revealed = true }, Cmd.none)
+    | RateCard rating ->
+        match model.Review with
+        | Some ({ Revealed = true; Queue = (paperId, c) :: rest } as rv) ->
+            let card = { c with Memory = Fsrs.review model.Settings.Retention DateTime.UtcNow c.Id c.Memory rating }
+            let model, save = setDeck model paperId (deckOf model paperId |> List.map (fun x -> if x.Id = c.Id then card else x))
+            // a card still in its short steps comes back later in the session
+            let again = card.Memory.Stage = CardStage.Learning || card.Memory.Stage = CardStage.Relearning
+            let rv =
+                { rv with
+                    Queue = (if again then rest @ [ paperId, card ] else rest)
+                    Revealed = false
+                    Answered = rv.Answered + 1
+                    Remembered = rv.Remembered + (if rating = Fsrs.Rating.Again then 0 else 1) }
+            { model with Review = Some rv }, save
+        | _ -> model, Cmd.none
+    | ReviewNext ->
+        match model.Review with
+        | Some { Revealed = false; Queue = _ :: _ } -> update ShowAnswer model
+        | Some { Revealed = true } -> update (RateCard Fsrs.Rating.Good) model
+        | Some { Queue = [] } -> update CloseReview model
+        | None -> model, Cmd.none
+    | CloseReview -> { model with Review = None }, Cmd.none
+    | ListenToCard (paperId, segment) ->
+        let model = { model with Review = None }
+        match model.Screen with
+        | Screen.Reader r when r.Paper.Id = paperId -> update (JumpToSegment segment) model
+        | _ ->
+            match model.Papers |> List.tryFind (fun p -> p.Id = paperId) with
+            | Some paper ->
+                let model, close = update CloseReader model
+                let model, openCmd = update (OpenPaper { paper with LastSegment = segment }) model
+                model, Cmd.batch [ close; openCmd ]
+            | None -> model, Cmd.none
+    | SetRetention r ->
+        let settings = { model.Settings with Retention = r }
+        { model with Settings = settings }, saveSettings settings
+
     // ----- settings
     | SetShowSettings show ->
         let model = { model with ShowSettings = show }
@@ -1122,20 +1397,23 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
     // ----- Android back button
     | BackPressed ->
         if model.ShowSettings then update (SetShowSettings false) model
+        elif model.Review.IsSome then update CloseReview model
         else
             match model.Screen with
             | Screen.Reader r when r.Zoom.IsSome -> update ToggleZoom model
             | Screen.Reader r when r.Help.IsSome -> update (CloseHelp false) model
+            | Screen.Reader r when r.Cards.IsSome -> update (CloseCards false) model
             | Screen.Reader r when r.ShowOutline -> update ToggleOutline model
             | Screen.Reader r when r.ShowEquations -> update ToggleEquations model
             | Screen.Reader _ -> update CloseReader model
             | Screen.Importing _ -> update CancelImport model
             | Screen.Discover -> update CloseDiscover model
+            | Screen.Learn -> update CloseLearn model
             | Screen.Library -> model, Cmd.none
 
 /// True when the back button has something to close inside the app.
 let canGoBack (model: Model) =
-    model.ShowSettings || (match model.Screen with Screen.Library -> false | _ -> true)
+    model.ShowSettings || model.Review.IsSome || (match model.Screen with Screen.Library -> false | _ -> true)
 
 let subscriptions (model: Model) : Sub<Msg> =
     match model.Screen with
