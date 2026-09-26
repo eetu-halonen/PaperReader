@@ -79,6 +79,7 @@ module Icons =
     let stop = "M7 7 H17 V17 H7 Z"
     let search = "M10.5 4 A6.5 6.5 0 1 1 10.5 17 A6.5 6.5 0 1 1 10.5 4 Z M15.3 15.3 L20 20"
     let refresh = "M19 12 A7 7 0 1 1 16.95 7.05 M17.5 3.5 V7.5 H13.5"
+    let walk = "M13.5 3.2 A1.7 1.7 0 1 1 13.5 6.6 A1.7 1.7 0 1 1 13.5 3.2 Z M12.8 9 L11.2 14.8 L8.2 20.5 M11.2 14.8 L14.3 16.8 L15.4 20.5 M8.3 12.6 L10.2 9.6 L12.8 9 L14.9 11.8 L17.4 12.8"
     let cards = "M8 4.5 H19 A1.5 1.5 0 0 1 20.5 6 V15.5 M4.5 8 H15 A1.5 1.5 0 0 1 16.5 9.5 V18.5 A1.5 1.5 0 0 1 15 20 H4.5 A1.5 1.5 0 0 1 3 18.5 V9.5 A1.5 1.5 0 0 1 4.5 8 Z"
 
 let icon (data: string) (color: string) (size: float) (filled: bool) : IView =
@@ -931,14 +932,65 @@ let private roundControl (data: string) (onClick: unit -> unit) (caption: string
         ]
     ]
 
-let private controls (model: Model) (r: ReaderState) (dispatch: Msg -> unit) : IView =
+/// A playback error (with a way out) or "preparing the voice", when there is one.
+let private playerStatus (model: Model) (r: ReaderState) (dispatch: Msg -> unit) : IView list =
+    let usingMistralVoice = Settings.hasKey model.Settings && model.Settings.UseMistralVoice
+    match r.Error, r.Waiting with
+    | Some e, _ ->
+        [ StackPanel.create [
+              StackPanel.spacing 8.0
+              StackPanel.children [
+                  label e 13.0 Palette.danger
+                  if usingMistralVoice then
+                      StackPanel.create [
+                          StackPanel.orientation Orientation.Horizontal
+                          StackPanel.spacing 8.0
+                          StackPanel.children [
+                              pill "Use the device's voice" (fun () -> dispatch UsePhoneVoice) false
+                              pill "Settings" (fun () -> dispatch (SetShowSettings true)) false
+                          ]
+                      ]
+              ]
+          ] ]
+    | None, true ->
+        [ StackPanel.create [
+              StackPanel.orientation Orientation.Horizontal
+              StackPanel.spacing 10.0
+              StackPanel.children [
+                  ProgressBar.create [
+                      ProgressBar.isIndeterminate true
+                      ProgressBar.width 48.0
+                      ProgressBar.height 4.0
+                      ProgressBar.minHeight 4.0
+                      ProgressBar.minWidth 48.0
+                      ProgressBar.verticalAlignment VerticalAlignment.Center
+                      ProgressBar.foreground Palette.accent
+                  ]
+                  label "Preparing the voice…" 13.0 Palette.muted
+              ]
+          ] ]
+    | None, false -> []
+
+/// How far through the paper the listener is, as a thin bar.
+let private progressBar (r: ReaderState) : IView =
     let segs = r.Script.Segments
-    let seg = segs.[r.Current]
     let fraction =
         let d = r.Durations.TryFind r.Current |> Option.defaultValue 1
         (float r.Current + min 1.0 (float r.Offset / float (max 1 d))) / float (max 1 segs.Length)
+    ProgressBar.create [
+        ProgressBar.minimum 0.0
+        ProgressBar.maximum 1.0
+        ProgressBar.value fraction
+        ProgressBar.height 4.0
+        ProgressBar.minHeight 4.0
+        ProgressBar.cornerRadius 2.0
+        ProgressBar.foreground Palette.accent
+        ProgressBar.background Palette.surfaceHigh
+    ]
+
+let private controls (model: Model) (r: ReaderState) (dispatch: Msg -> unit) : IView =
+    let seg = r.Script.Segments.[r.Current]
     let sectionCount = max 1 (r.Script.Sections.Length - 1)
-    let usingMistralVoice = Settings.hasKey model.Settings && model.Settings.UseMistralVoice
     Border.create [
         Border.background Palette.surface
         Border.cornerRadius (24.0, 24.0, 0.0, 0.0)
@@ -947,51 +999,8 @@ let private controls (model: Model) (r: ReaderState) (dispatch: Msg -> unit) : I
             StackPanel.create [
                 StackPanel.spacing 10.0
                 StackPanel.children [
-                    match r.Error, r.Waiting with
-                    | Some e, _ ->
-                        StackPanel.create [
-                            StackPanel.spacing 8.0
-                            StackPanel.children [
-                                label e 13.0 Palette.danger
-                                if usingMistralVoice then
-                                    StackPanel.create [
-                                        StackPanel.orientation Orientation.Horizontal
-                                        StackPanel.spacing 8.0
-                                        StackPanel.children [
-                                            pill "Use the device's voice" (fun () -> dispatch UsePhoneVoice) false
-                                            pill "Settings" (fun () -> dispatch (SetShowSettings true)) false
-                                        ]
-                                    ]
-                            ]
-                        ]
-                    | None, true ->
-                        StackPanel.create [
-                            StackPanel.orientation Orientation.Horizontal
-                            StackPanel.spacing 10.0
-                            StackPanel.children [
-                                ProgressBar.create [
-                                    ProgressBar.isIndeterminate true
-                                    ProgressBar.width 48.0
-                                    ProgressBar.height 4.0
-                                    ProgressBar.minHeight 4.0
-                                    ProgressBar.minWidth 48.0
-                                    ProgressBar.verticalAlignment VerticalAlignment.Center
-                                    ProgressBar.foreground Palette.accent
-                                ]
-                                label "Preparing the voice…" 13.0 Palette.muted
-                            ]
-                        ]
-                    | None, false -> ()
-                    ProgressBar.create [
-                        ProgressBar.minimum 0.0
-                        ProgressBar.maximum 1.0
-                        ProgressBar.value fraction
-                        ProgressBar.height 4.0
-                        ProgressBar.minHeight 4.0
-                        ProgressBar.cornerRadius 2.0
-                        ProgressBar.foreground Palette.accent
-                        ProgressBar.background Palette.surfaceHigh
-                    ]
+                    yield! playerStatus model r dispatch
+                    progressBar r
                     Grid.create [
                         Grid.columnDefinitions "*,Auto"
                         Grid.children [
@@ -2320,17 +2329,235 @@ let private learnView (model: Model) (dispatch: Msg -> unit) : IView =
         ]
     ]
 
+// ---------------------------------------------------------------------------------------------
+// Walking mode: the simple player, big buttons and the equation large
+// ---------------------------------------------------------------------------------------------
+
+/// Display size of a crop pixel in walking mode: larger than the full player, glanced at from arm's length.
+let private walkMathScale = 1.3
+
+let private sectionName (r: ReaderState) (seg: Segment) =
+    if seg.Section < r.Script.Sections.Length && seg.Section > 0 then r.Script.Sections.[seg.Section].Title else "Beginning"
+
+/// A button big enough to hit while walking, icon above its word.
+let private walkButton (column: int) (height: float) (data: string) (text: string) (primary: bool) (key: obj) (onClick: unit -> unit) : IView =
+    let fg = if primary then Palette.onAccent else Palette.text
+    Button.create [
+        Grid.column column
+        Button.height height
+        Button.margin (Thickness(5.0, 0.0))
+        Button.cornerRadius 24.0
+        Button.horizontalAlignment HorizontalAlignment.Stretch
+        Button.horizontalContentAlignment HorizontalAlignment.Center
+        Button.verticalContentAlignment VerticalAlignment.Center
+        Button.background (if primary then Palette.accent else Palette.surfaceHigh)
+        Button.onClick ((fun _ -> onClick ()), SubPatchOptions.OnChangeOf key)
+        Button.content (
+            StackPanel.create [
+                StackPanel.spacing 4.0
+                StackPanel.children [
+                    Border.create [
+                        Border.horizontalAlignment HorizontalAlignment.Center
+                        Border.child (icon data (if primary then fg else Palette.accent) (if primary then 40.0 else 30.0) primary)
+                    ]
+                    TextBlock.create [
+                        TextBlock.text text
+                        TextBlock.fontSize (if primary then 22.0 else 16.0)
+                        TextBlock.fontWeight FontWeight.SemiBold
+                        TextBlock.foreground fg
+                        TextBlock.horizontalAlignment HorizontalAlignment.Center
+                    ]
+                ]
+            ]
+        )
+    ]
+
+/// The equation or figure as large as fits (tap for full size), or else the sentence being spoken in large type.
+let private walkingStage (r: ReaderState) (seg: Segment) (dispatch: Msg -> unit) : IView =
+    let paths = Store.Paths((Services.get ()).DataDir)
+    let visual = (match r.Held with Some v -> Some v | None -> seg.Show) |> Option.bind r.Script.Visual
+    let image = visual |> Option.bind (fun v -> bitmap (paths.Image(r.Paper.Id, v.Id)) |> Option.map (fun b -> v, b))
+    match image with
+    | Some (v, bmp) ->
+        Border.create [
+            Border.margin (Thickness(5.0, 4.0, 5.0, 12.0))
+            Border.padding (Thickness(12.0, 8.0, 12.0, 12.0))
+            Border.cornerRadius 20.0
+            Border.background Palette.paper
+            Border.verticalAlignment VerticalAlignment.Center
+            Border.onTapped ((fun _ -> dispatch ToggleZoom), SubPatchOptions.Never)
+            Border.child (
+                Grid.create [
+                    Grid.rowDefinitions "Auto,*"
+                    Grid.children [
+                        TextBlock.create [
+                            Grid.row 0
+                            TextBlock.text (if r.Held.IsSome then sprintf "%s · stopped here" (visualName v) else visualName v)
+                            TextBlock.fontSize 13.0
+                            TextBlock.foreground Palette.ink
+                            TextBlock.margin (Thickness(0.0, 0.0, 0.0, 6.0))
+                            TextBlock.textTrimming TextTrimming.CharacterEllipsis
+                        ]
+                        Image.create [
+                            Grid.row 1
+                            Image.source bmp
+                            Image.stretch Stretch.Uniform
+                            Image.maxWidth (float bmp.PixelSize.Width * walkMathScale)
+                            Image.maxHeight (float bmp.PixelSize.Height * walkMathScale)
+                            Image.horizontalAlignment HorizontalAlignment.Center
+                            Image.verticalAlignment VerticalAlignment.Center
+                        ]
+                    ]
+                ]
+            )
+        ]
+    | None ->
+        let heading = seg.Kind = UnitKind.Heading || seg.Kind = UnitKind.Title
+        ScrollViewer.create [
+            ScrollViewer.content (
+                TextBlock.create [
+                    TextBlock.margin (Thickness(10.0, 12.0, 10.0, 12.0))
+                    TextBlock.verticalAlignment VerticalAlignment.Center
+                    TextBlock.text seg.Say
+                    TextBlock.fontSize (if heading then 32.0 else 27.0)
+                    TextBlock.lineHeight (if heading then 40.0 else 38.0)
+                    TextBlock.fontWeight (if heading then FontWeight.Bold else FontWeight.Medium)
+                    TextBlock.foreground (if heading then Palette.accent else Palette.text)
+                    TextBlock.textWrapping TextWrapping.Wrap
+                ]
+            )
+        ]
+
+/// The simple player for listening on the move: one huge play / pause / continue button within thumb's reach,
+/// three large ones above it, and the equation on screen as big as it goes.
+let private walkingOverlay (model: Model) (r: ReaderState) (dispatch: Msg -> unit) : IView =
+    let seg = r.Script.Segments.[r.Current]
+    let again = r.Held |> Option.bind (firstReading r.Script)
+    Border.create [
+        Border.background Palette.bg
+        Border.padding (Thickness(11.0, 8.0, 11.0, 16.0))
+        Border.child (
+            DockPanel.create [
+                DockPanel.children [
+                    Grid.create [
+                        DockPanel.dock Dock.Top
+                        Grid.columnDefinitions "Auto,*,Auto"
+                        Grid.margin (Thickness(5.0, 0.0, 5.0, 4.0))
+                        Grid.children [
+                            Button.create [
+                                Grid.column 0
+                                Button.height 52.0
+                                Button.cornerRadius 26.0
+                                Button.padding (Thickness(14.0, 0.0, 18.0, 0.0))
+                                Button.verticalContentAlignment VerticalAlignment.Center
+                                Button.background Palette.surfaceHigh
+                                Button.onClick ((fun _ -> dispatch (SetWalking false)), SubPatchOptions.Never)
+                                Button.content (
+                                    StackPanel.create [
+                                        StackPanel.orientation Orientation.Horizontal
+                                        StackPanel.spacing 8.0
+                                        StackPanel.children [
+                                            icon Icons.close Palette.text 20.0 false
+                                            TextBlock.create [
+                                                TextBlock.text "Exit"
+                                                TextBlock.fontSize 16.0
+                                                TextBlock.fontWeight FontWeight.SemiBold
+                                                TextBlock.foreground Palette.text
+                                                TextBlock.verticalAlignment VerticalAlignment.Center
+                                            ]
+                                        ]
+                                    ]
+                                )
+                            ]
+                            StackPanel.create [
+                                Grid.column 1
+                                StackPanel.margin (Thickness(12.0, 0.0))
+                                StackPanel.verticalAlignment VerticalAlignment.Center
+                                StackPanel.spacing 2.0
+                                StackPanel.children [
+                                    TextBlock.create [
+                                        TextBlock.text (sectionName r seg)
+                                        TextBlock.fontSize 16.0
+                                        TextBlock.fontWeight FontWeight.SemiBold
+                                        TextBlock.foreground Palette.accent
+                                        TextBlock.textTrimming TextTrimming.CharacterEllipsis
+                                    ]
+                                    TextBlock.create [
+                                        TextBlock.text (
+                                            if r.Finished then "Finished"
+                                            else sprintf "Page %d of %d · %s" (seg.Page + 1) r.Script.PageCount (formatMinutes (remainingMs r model.Settings.Speed)))
+                                        TextBlock.fontSize 13.0
+                                        TextBlock.foreground Palette.muted
+                                        TextBlock.textTrimming TextTrimming.CharacterEllipsis
+                                    ]
+                                ]
+                            ]
+                            Button.create [
+                                Grid.column 2
+                                Button.height 52.0
+                                Button.minWidth 76.0
+                                Button.cornerRadius 26.0
+                                Button.horizontalContentAlignment HorizontalAlignment.Center
+                                Button.verticalContentAlignment VerticalAlignment.Center
+                                Button.background Palette.surfaceHigh
+                                Button.foreground Palette.text
+                                Button.fontSize 18.0
+                                Button.fontWeight FontWeight.SemiBold
+                                Button.content (sprintf "%g×" model.Settings.Speed)
+                                Button.onClick ((fun _ -> dispatch CycleSpeed), SubPatchOptions.Never)
+                            ]
+                        ]
+                    ]
+                    StackPanel.create [
+                        DockPanel.dock Dock.Bottom
+                        StackPanel.spacing 12.0
+                        StackPanel.children [
+                            Border.create [
+                                Border.margin (Thickness(5.0, 0.0))
+                                Border.child (StackPanel.create [ StackPanel.spacing 10.0; StackPanel.children [ yield! playerStatus model r dispatch; progressBar r ] ])
+                            ]
+                            Grid.create [
+                                Grid.columnDefinitions (if again.IsSome then "*,*" else "*,*,*")
+                                Grid.children [
+                                    match again with
+                                    | Some i ->
+                                        // stopped at an equation: hear it once more, or ask about it
+                                        walkButton 0 88.0 Icons.back "Hear it again" false (box ("again", i)) (fun () -> dispatch (JumpToSegment i))
+                                        walkButton 1 88.0 Icons.ask "Ask" false (box "ask") (fun () -> dispatch (OpenHelp r.Held))
+                                    | None ->
+                                        walkButton 0 88.0 Icons.back "Back 15 s" false (box "back") (fun () -> dispatch Back15)
+                                        walkButton 1 88.0 Icons.ask "Ask" false (box "ask") (fun () -> dispatch (OpenHelp r.Held))
+                                        walkButton 2 88.0 Icons.forward "Skip 15 s" false (box "forward") (fun () -> dispatch Forward15)
+                                ]
+                            ]
+                            Grid.create [
+                                Grid.children [
+                                    let data, text =
+                                        if r.Playing then Icons.pause, "Pause"
+                                        elif r.Held.IsSome then Icons.play, "Continue"
+                                        elif r.Finished then Icons.play, "Play again"
+                                        else Icons.play, "Play"
+                                    walkButton 0 128.0 data text true (box "play") (fun () -> dispatch TogglePlay)
+                                ]
+                            ]
+                        ]
+                    ]
+                    walkingStage r seg dispatch
+                ]
+            ]
+        )
+    ]
+
 let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) : IView =
     let seg = r.Script.Segments.[r.Current]
-    let sectionTitle =
-        if seg.Section < r.Script.Sections.Length && seg.Section > 0 then r.Script.Sections.[seg.Section].Title else "Beginning"
+    let sectionTitle = sectionName r seg
     Grid.create [
         Grid.children [
             DockPanel.create [
                 DockPanel.children [
                     Grid.create [
                         DockPanel.dock Dock.Top
-                        Grid.columnDefinitions "Auto,*,Auto,Auto,Auto,Auto"
+                        Grid.columnDefinitions "Auto,*,Auto,Auto,Auto,Auto,Auto"
                         Grid.margin (Thickness(4.0, 6.0, 4.0, 2.0))
                         Grid.children [
                             Border.create [ Grid.column 0; Border.child (iconButton Icons.chevronLeft 24.0 (fun () -> dispatch CloseReader) "close-reader") ]
@@ -2381,15 +2608,17 @@ let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) :
                                     ]
                                 )
                             ]
-                            Border.create [ Grid.column 3; Border.child (iconButton Icons.cards 22.0 (fun () -> dispatch (OpenCards None)) "cards") ]
-                            Border.create [ Grid.column 4; Border.child (iconButton Icons.sigma 22.0 (fun () -> dispatch ToggleEquations) "equations") ]
-                            Border.create [ Grid.column 5; Border.child (iconButton Icons.sliders 22.0 (fun () -> dispatch (SetShowSettings true)) "reader-settings") ]
+                            Border.create [ Grid.column 3; Border.child (iconButton Icons.walk 22.0 (fun () -> dispatch (SetWalking true)) "walking") ]
+                            Border.create [ Grid.column 4; Border.child (iconButton Icons.cards 22.0 (fun () -> dispatch (OpenCards None)) "cards") ]
+                            Border.create [ Grid.column 5; Border.child (iconButton Icons.sigma 22.0 (fun () -> dispatch ToggleEquations) "equations") ]
+                            Border.create [ Grid.column 6; Border.child (iconButton Icons.sliders 22.0 (fun () -> dispatch (SetShowSettings true)) "reader-settings") ]
                         ]
                     ]
                     Border.create [ DockPanel.dock Dock.Bottom; Border.child (controls model r dispatch) ]
                     stage r seg dispatch
                 ]
             ]
+            if model.Settings.WalkingMode then walkingOverlay model r dispatch
             if r.ShowOutline then outlineOverlay r dispatch
             if r.ShowEquations then equationsOverlay r dispatch
             match r.Help with
@@ -2610,9 +2839,15 @@ let mutable canGoBack = false
 /// Set on every render: a review is open, so keys answer cards instead of controlling playback.
 let mutable reviewing = false
 
+/// Set on every render, for the W key: a paper is open, and whether it shows the walking player.
+let mutable inReader = false
+let mutable walking = false
+
 let view (model: Model) (dispatch: Msg -> unit) : IView =
     canGoBack <- State.canGoBack model
     reviewing <- model.Review.IsSome
+    inReader <- (match model.Screen with Screen.Reader _ -> true | _ -> false)
+    walking <- model.Settings.WalkingMode
     Grid.create [
         Grid.background Palette.bg
         Grid.children [

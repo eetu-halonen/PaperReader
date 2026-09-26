@@ -218,6 +218,8 @@ type Msg =
     | ToggleEquations
     | SetStopAtEquations of bool
     | SetStopAtFigures of bool
+    /// Switches the reader between the full player and the simple walking one.
+    | SetWalking of bool
     | SetShowSettings of bool
     | SetApiKey of string
     | SetNarration of bool
@@ -1372,6 +1374,9 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
     | SetStopAtFigures on ->
         let settings = { model.Settings with StopAtFigures = on }
         { model with Settings = settings }, saveSettings settings
+    | SetWalking on ->
+        let settings = { model.Settings with WalkingMode = on }
+        { model with Settings = settings }, saveSettings settings
     | SetStopAtEquations on ->
         let settings = { model.Settings with StopAtEquations = on }
         { model with Settings = settings }, saveSettings settings
@@ -1405,6 +1410,8 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             | Screen.Reader r when r.Cards.IsSome -> update (CloseCards false) model
             | Screen.Reader r when r.ShowOutline -> update ToggleOutline model
             | Screen.Reader r when r.ShowEquations -> update ToggleEquations model
+            // a stray back press on a walk leaves the simple player, it doesn't stop the paper
+            | Screen.Reader _ when model.Settings.WalkingMode -> update (SetWalking false) model
             | Screen.Reader _ -> update CloseReader model
             | Screen.Importing _ -> update CancelImport model
             | Screen.Discover -> update CloseDiscover model

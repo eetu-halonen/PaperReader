@@ -43,6 +43,11 @@ It runs on Android, on the Linux desktop and in the browser (WebAssembly).
   preprint servers first, since some publishers only serve their PDFs to a browser) and prepares it like an
   opened file; if no copy can be downloaded, *Web page* opens it in the browser. Both services are free and need
   no key; OpenAlex allows about 100 searches a day without one, and a free OpenAlex key (Settings) raises that.
+- **Walking mode** (the walker button in the reader, or W): a simple full-screen player for listening on the move.
+  A huge Play / Pause / Continue button at the bottom, Back 15 s, Ask and Skip 15 s above it, speed and Exit at
+  the top, and the equation or figure being discussed as large as the screen allows (tap it for full size). When
+  playback stops at an equation, the buttons become *Hear it again*, *Ask* and *Continue*. It stays on for the
+  next paper until you tap Exit; the back button leaves walking mode rather than closing the paper.
 - Controls: play/pause, back and forward 15 s, speed, contents list. Playback continues in the
   background, with a media notification, lock-screen and headset controls; it pauses for calls
   and when headphones are unplugged.

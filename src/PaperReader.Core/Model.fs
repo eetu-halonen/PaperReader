@@ -180,6 +180,8 @@ type Settings =
       StopAtEquations: bool
       /// The same for figures and tables, after they are first shown and discussed.
       StopAtFigures: bool
+      /// The reader shows the simple player: big buttons and the equation large, for listening on the move.
+      WalkingMode: bool
       /// Model that answers the listener's questions (Ask).
       HelpModel: string
       /// A line about the listener ("biology PhD student, rusty on linear algebra"), so answers fit them.
@@ -201,6 +203,7 @@ module Settings =
           Speed = 1.0
           StopAtEquations = false
           StopAtFigures = false
+          WalkingMode = false
           HelpModel = "zai-glm-5-3"
           AboutMe = ""
           OpenAlexKey = ""
