@@ -543,6 +543,20 @@ let ``cards are saved and read back`` () =
     Directory.Delete(dir, true)
 
 [<Fact>]
+let ``settings are saved and read back, and a setting missing from an older file takes its default`` () =
+    let dir = Path.Combine(Path.GetTempPath(), "pr-test-" + Guid.NewGuid().ToString("N"))
+    let p = Store.Paths dir
+    let s = { Settings.defaults with StopAtEquations = true; WalkingMode = true; TurnSideways = false; Speed = 1.3 }
+    Store.saveSettings p s
+    Assert.Equal(s, Store.loadSettings p)
+    File.WriteAllText(p.Settings, """{"speed":1.5,"stopAtEquations":true}""")
+    let older = Store.loadSettings p
+    Assert.Equal(1.5, older.Speed)
+    Assert.True older.StopAtEquations
+    Assert.Equal(Settings.defaults.TurnSideways, older.TurnSideways)
+    Directory.Delete(dir, true)
+
+[<Fact>]
 let ``the review queue puts steps first, then the most forgotten, then a few new cards`` () =
     let now = t0.AddDays 30.0
     let review days stability = { Fsrs.fresh t0 with Stage = CardStage.Review; Stability = stability; LastReview = Some(now.AddDays(-days)); Due = now.AddDays(-1.0) }

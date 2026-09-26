@@ -23,7 +23,11 @@ It runs on Android, on the Linux desktop and in the browser (WebAssembly).
 - *Stop at equations* / *Stop at figures and tables* (Settings): after one has been read and explained,
   playback pauses with it on screen until you tap Continue (or *Hear it again*).
 - The Σ button lists every equation, figure and table: the ones heard so far (latest first) and the ones
-  coming up, each with *Listen from here*; tap one to see it full size.
+  coming up, each with *Listen from here*; tap one to see it full screen.
+- **Full screen** (tap the equation or figure on screen): it is shown as large as the screen allows. On a phone, a
+  wide one is turned to run along the long side, much larger: turn the phone to read it (*Upright* keeps it upright
+  from then on; also *Turn wide equations sideways* in Settings). When it is the one being listened to, *Continue*
+  goes back to the player and carries on, and *Hear it again* replays it while it stays full screen.
 - **Ask** (with a Mistral key): pauses playback and answers questions about the part you are listening to.
   One-tap questions fit the moment: walk me through the equation or figure on screen, I didn't get that,
   give an example, why does it matter, what is *BLEU* (jargon just heard), recap so far. Every answer
@@ -56,9 +60,12 @@ It runs on Android, on the Linux desktop and in the browser (WebAssembly).
   no key; OpenAlex allows about 100 searches a day without one, and a free OpenAlex key (Settings) raises that.
 - **Walking mode** (the walker button in the reader, or W): a simple full-screen player for listening on the move.
   A huge Play / Pause / Continue button at the bottom, Back 15 s, Ask and Skip 15 s above it, speed and Exit at
-  the top, and the equation or figure being discussed as large as the screen allows (tap it for full size). When
-  playback stops at an equation, the buttons become *Hear it again*, *Ask* and *Continue*. It stays on for the
-  next paper until you tap Exit; the back button leaves walking mode rather than closing the paper.
+  the top, and the equation or figure being discussed as large as the screen allows, with the sentence being said
+  under it (*Full screen*, or tap it, for larger). A switch under it turns *Stop at equations* (or *Stop at figures and
+  tables*) on and off. When playback stops at one, it is ringed and marked *Paused at Equation (n)*, the last
+  sentence heard stays under it, and the buttons become *Hear it again*, *Ask* and *Continue*. With the phone on its
+  side, the equation takes the left of the screen and the buttons the right. It stays on for the next paper until you
+  tap Exit; the back button leaves walking mode rather than closing the paper.
 - Controls: play/pause, back and forward 15 s, speed, contents list. Playback continues in the
   background, with a media notification, lock-screen and headset controls; it pauses for calls
   and when headphones are unplugged.

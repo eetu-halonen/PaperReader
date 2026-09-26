@@ -183,7 +183,7 @@ type ReaderState =
       ShowOutline: bool
       /// The equations list is open.
       ShowEquations: bool
-      /// The visual shown full size, if any.
+      /// The visual shown full screen, if any.
       Zoom: string option
       /// Where "stop at equations" pauses: segment index -> the equation it has just read and explained.
       Stops: Map<int, string>
@@ -270,7 +270,10 @@ type Model =
       /// How far each paper's study plan is (ideas done, ideas), for the Learn screen.
       Studied: Map<string, int * int>
       /// The list of what the learner knows is open on the Learn screen.
-      ShowKnown: bool }
+      ShowKnown: bool
+      /// The app's size in dp (0 until it is laid out), for layouts that change with it: the walking player and the
+      /// reader's title in landscape, and the full-screen view of an equation.
+      Viewport: float * float }
 
 type Msg =
     | OpenDocument
@@ -297,9 +300,11 @@ type Msg =
     | ClipFailed of paperId: string * index: int * message: string
     | PlayerFailed of string
     | ToggleOutline
-    /// Shows the equation on screen full size, or closes the full-size view.
+    /// Opens the full-screen view of the equation on screen, or closes it.
     | ToggleZoom
     | ZoomVisual of string
+    /// Turns wide visuals sideways full screen (true), or keeps them upright.
+    | SetTurnSideways of bool
     | ToggleEquations
     | SetStopAtEquations of bool
     | SetStopAtFigures of bool
@@ -316,6 +321,8 @@ type Msg =
     | VoicesLoaded of Result<Mistral.Voice list, string>
     | Dismiss
     | BackPressed
+    /// The app was laid out at a new size (dp): rotated, or the window resized.
+    | Resized of width: float * height: float
     // ----- Ask
     /// Opens the Ask panel about what is on screen, or about a given equation or figure.
     | OpenHelp of about: string option
@@ -617,7 +624,8 @@ let init () : Model * Cmd<Msg> =
       Concepts = (try Store.loadConcepts (paths ()) with _ -> []) |> List.map (fun c -> c.Id, c) |> Map.ofList
       StudyOnOpen = None
       Studied = Map.empty
-      ShowKnown = false },
+      ShowKnown = false
+      Viewport = (0.0, 0.0) },
     Cmd.ofEffect (fun dispatch ->
         (platform ()).SetIncomingFileHandler(fun (path, name) -> dispatch (ImportFile(path, name)))
         (platform ()).SetRemoteHandler(fun play -> dispatch (Remote play)))
@@ -1209,8 +1217,10 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
     | TogglePlay ->
         withReader model (fun r ->
             if r.Playing then pause r
-            elif r.Finished then play { r with Current = 0; Offset = 0 } model.Settings
-            else play r model.Settings)
+            else
+                // carrying on from the full-screen view goes back to the player
+                let r = { r with Zoom = None }
+                if r.Finished then play { r with Current = 0; Offset = 0 } model.Settings else play r model.Settings)
     | Remote wanted ->
         withReader model (fun r ->
             if wanted && not r.Playing then
@@ -1230,7 +1240,9 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
     | JumpToSegment i ->
         withReader model (fun r ->
             r.Help |> Option.iter (fun h -> h.Cancel.Cancel())
-            let r = { r with ShowOutline = false; ShowEquations = false; Zoom = None; Help = None; Cards = None; Study = r.Study |> Option.map (fun s -> { s with Hidden = true }) }
+            // hearing an equation again from its full-screen view keeps it full screen
+            let zoom = if r.Zoom.IsSome && i >= 0 && i < r.Script.Segments.Length && r.Zoom = r.Script.Segments.[i].Show then r.Zoom else None
+            let r = { r with ShowOutline = false; ShowEquations = false; Zoom = zoom; Help = None; Cards = None; Study = r.Study |> Option.map (fun s -> { s with Hidden = true }) }
             let r, cmd = seek r model.Settings { Segment = i; OffsetMs = 0 }
             if r.Playing then r, cmd else play r model.Settings)
     | CycleSpeed ->
@@ -2207,6 +2219,9 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
     | SetWalking on ->
         let settings = { model.Settings with WalkingMode = on }
         { model with Settings = settings }, saveSettings settings
+    | SetTurnSideways on ->
+        let settings = { model.Settings with TurnSideways = on }
+        { model with Settings = settings }, saveSettings settings
     | SetStopAtEquations on ->
         let settings = { model.Settings with StopAtEquations = on }
         { model with Settings = settings }, saveSettings settings
@@ -2228,6 +2243,11 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             runTask (fun () -> Mistral.listVoices key CancellationToken.None) (Ok >> VoicesLoaded) (errorText >> Error >> VoicesLoaded)
     | VoicesLoaded (Ok voices) -> { model with Voices = voices; VoicesStatus = None }, Cmd.none
     | VoicesLoaded (Error e) -> { model with VoicesStatus = Some e }, Cmd.none
+
+    | Resized (width, height) ->
+        let w, h = model.Viewport
+        if abs (width - w) < 0.5 && abs (height - h) < 0.5 then model, Cmd.none
+        else { model with Viewport = (width, height) }, Cmd.none
 
     // ----- Android back button
     | BackPressed ->

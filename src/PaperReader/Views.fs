@@ -89,6 +89,9 @@ module Icons =
     let cards = "M8 4.5 H19 A1.5 1.5 0 0 1 20.5 6 V15.5 M4.5 8 H15 A1.5 1.5 0 0 1 16.5 9.5 V18.5 A1.5 1.5 0 0 1 15 20 H4.5 A1.5 1.5 0 0 1 3 18.5 V9.5 A1.5 1.5 0 0 1 4.5 8 Z"
     let study = "M2.5 9 L12 4.5 L21.5 9 L12 13.5 Z M6.5 11 V15.8 C6.5 17.3 9 18.8 12 18.8 C15 18.8 17.5 17.3 17.5 15.8 V11 M21.5 9 V14.5"
     let check = "M5 12.5 L10 17.5 L19 7"
+    /// A phone on its side, and upright: which way the full-screen view turns.
+    let phoneSideways = "M4.5 7 H19.5 A1.5 1.5 0 0 1 21 8.5 V15.5 A1.5 1.5 0 0 1 19.5 17 H4.5 A1.5 1.5 0 0 1 3 15.5 V8.5 A1.5 1.5 0 0 1 4.5 7 Z M18 12 H18.1"
+    let phoneUpright = "M8.5 3 H15.5 A1.5 1.5 0 0 1 17 4.5 V19.5 A1.5 1.5 0 0 1 15.5 21 H8.5 A1.5 1.5 0 0 1 7 19.5 V4.5 A1.5 1.5 0 0 1 8.5 3 Z M12 18 H12.1"
 
 let icon (data: string) (color: string) (size: float) (filled: bool) : IView =
     Viewbox.create [
@@ -188,6 +191,17 @@ let private formatMinutes (ms: int) =
     elif minutes < 1 then "under a minute left"
     elif minutes < 60 then sprintf "%d min left" minutes
     else sprintf "%d h %d min left" (minutes / 60) (minutes % 60)
+
+/// The app's size in dp, or a phone's until it is laid out.
+let private viewport (model: Model) =
+    match model.Viewport with
+    | w, h when w > 0.0 && h > 0.0 -> w, h
+    | _ -> 412.0, 860.0
+
+/// Smooth scaling for equation images, which are shown larger or smaller than drawn: without it thin strokes
+/// (a fraction bar, a minus) break up.
+let private smooth: IAttr<Image> =
+    Image.init (fun i -> RenderOptions.SetBitmapInterpolationMode(i, BitmapInterpolationMode.HighQuality))
 
 // ---------------------------------------------------------------------------------------------
 // Library
@@ -828,6 +842,7 @@ let private stage (r: ReaderState) (seg: Segment) (dispatch: Msg -> unit) : IVie
                                     Grid.row 1
                                     Image.source bmp
                                     Image.stretch Stretch.Uniform
+                                    smooth
                                     // one size for all math: crops are 3 px per point, so 10 pt text shows at
                                     // about 27 dp; only crops too big for the card are scaled down
                                     Image.maxWidth (float bmp.PixelSize.Width * mathScale)
@@ -958,12 +973,11 @@ let private playerStatus (model: Model) (r: ReaderState) (dispatch: Msg -> unit)
               StackPanel.children [
                   label e 13.0 Palette.danger
                   if usingMistralVoice then
-                      StackPanel.create [
-                          StackPanel.orientation Orientation.Horizontal
-                          StackPanel.spacing 8.0
-                          StackPanel.children [
-                              pill "Use the device's voice" (fun () -> dispatch UsePhoneVoice) false
-                              pill "Settings" (fun () -> dispatch (SetShowSettings true)) false
+                      // wraps in the narrow column of the walking player on its side
+                      WrapPanel.create [
+                          WrapPanel.children [
+                              Border.create [ Border.margin (Thickness(0.0, 0.0, 8.0, 8.0)); Border.child (pill "Use the device's voice" (fun () -> dispatch UsePhoneVoice) false) ]
+                              Border.create [ Border.margin (Thickness(0.0, 0.0, 8.0, 8.0)); Border.child (pill "Settings" (fun () -> dispatch (SetShowSettings true)) false) ]
                           ]
                       ]
               ]
@@ -1169,6 +1183,7 @@ let private equationCard (r: ReaderState) (v: Visual) (firstSegment: int) (ahead
                                 Image.create [
                                     Image.source bmp
                                     Image.stretch Stretch.Uniform
+                                    smooth
                                     Image.maxWidth (float bmp.PixelSize.Width * 0.7)
                                     Image.maxHeight (min 420.0 (float bmp.PixelSize.Height * 0.7))
                                     Image.horizontalAlignment HorizontalAlignment.Left
@@ -1254,43 +1269,182 @@ let private equationsOverlay (r: ReaderState) (dispatch: Msg -> unit) : IView =
         )
     ]
 
-let private zoomOverlay (r: ReaderState) (visual: string) (dispatch: Msg -> unit) : IView =
+/// Largest display size of a crop pixel full screen: past it an equation only gets blurrier.
+let private zoomMaxScale = 1.5
+
+let private sidewaysTurn: ITransform = RotateTransform 90.0
+let private uprightTurn: ITransform = RotateTransform 0.0
+
+/// A wide button in a row at the bottom of a screen: icon and word side by side.
+let private actionButton (column: int) (data: string) (text: string) (primary: bool) (key: obj) (onClick: unit -> unit) : IView =
+    let fg = if primary then Palette.onAccent else Palette.text
+    Button.create [
+        Grid.column column
+        Button.height 56.0
+        Button.margin (Thickness(5.0, 0.0))
+        Button.cornerRadius 28.0
+        Button.horizontalAlignment HorizontalAlignment.Stretch
+        Button.horizontalContentAlignment HorizontalAlignment.Center
+        Button.verticalContentAlignment VerticalAlignment.Center
+        Button.background (if primary then Palette.accent else Palette.surfaceHigh)
+        Button.onClick ((fun _ -> onClick ()), SubPatchOptions.OnChangeOf key)
+        Button.content (
+            StackPanel.create [
+                StackPanel.orientation Orientation.Horizontal
+                StackPanel.spacing 10.0
+                StackPanel.children [
+                    icon data (if primary then fg else Palette.accent) 20.0 primary
+                    TextBlock.create [
+                        TextBlock.text text
+                        TextBlock.fontSize 17.0
+                        TextBlock.fontWeight FontWeight.SemiBold
+                        TextBlock.foreground fg
+                        TextBlock.verticalAlignment VerticalAlignment.Center
+                    ]
+                ]
+            ]
+        )
+    ]
+
+/// An equation or figure as large as the screen allows. On an upright phone a wide one is turned sideways when that
+/// shows it much larger (the phone is turned to read it). When it is the one being listened to, playback is carried
+/// on from here: stopped at it, Continue goes back to the player and listens on.
+let private zoomOverlay (model: Model) (r: ReaderState) (visual: string) (dispatch: Msg -> unit) : IView =
     let paths = Store.Paths((Services.get ()).DataDir)
     let bmp = bitmap (paths.Image(r.Paper.Id, visual))
+    let v = r.Script.Visual visual
+    let onStage =
+        match r.Held with
+        | Some held -> held = visual
+        | None -> r.Script.Segments.[r.Current].Show = Some visual
+    let again = if onStage then r.Held |> Option.bind (firstReading r.Script) else None
+    // the room the card gets: the screen less the header, the buttons and the margins around the card
+    let vw, vh = viewport model
+    let roomW, roomH = vw - 2.0 * 16.0 - 2.0 * 14.0, vh - 64.0 - (if onStage then 84.0 else 0.0) - 2.0 * 16.0 - 2.0 * 14.0
+    let upright, sideways =
+        match bmp with
+        | Some b ->
+            let w, h = float b.PixelSize.Width, float b.PixelSize.Height
+            min zoomMaxScale (min (roomW / w) (roomH / h)), min zoomMaxScale (min (roomH / w) (roomW / h))
+        | None -> 1.0, 1.0
+    let canTurn = Services.turnable && sideways >= 1.4 * upright
+    let turned = canTurn && model.Settings.TurnSideways
     Grid.create [
-        Grid.background "#F2000000"
+        Grid.background Palette.bg
+        Grid.rowDefinitions "Auto,*,Auto"
         Grid.children [
+            Grid.create [
+                Grid.row 0
+                Grid.columnDefinitions "*,Auto,Auto"
+                Grid.margin (Thickness(20.0, 8.0, 8.0, 8.0))
+                Grid.children [
+                    StackPanel.create [
+                        Grid.column 0
+                        StackPanel.verticalAlignment VerticalAlignment.Center
+                        StackPanel.spacing 2.0
+                        StackPanel.children [
+                            TextBlock.create [
+                                TextBlock.text (match v with Some v -> visualName v | None -> "")
+                                TextBlock.fontSize 17.0
+                                TextBlock.fontWeight FontWeight.SemiBold
+                                TextBlock.foreground Palette.text
+                                TextBlock.textTrimming TextTrimming.CharacterEllipsis
+                            ]
+                            TextBlock.create [
+                                TextBlock.text (
+                                    match v with
+                                    | Some v ->
+                                        let where = sprintf "%s %d" (capitalize (Formats.pageNoun r.Paper.Format)) (v.Page + 1)
+                                        if turned then where + " · turn your phone to read it" else where
+                                    | None -> "")
+                                TextBlock.fontSize 13.0
+                                TextBlock.foreground (if turned then Palette.accent else Palette.muted)
+                                TextBlock.textTrimming TextTrimming.CharacterEllipsis
+                            ]
+                        ]
+                    ]
+                    if canTurn then
+                        Button.create [
+                            Grid.column 1
+                            Button.height 44.0
+                            Button.cornerRadius 22.0
+                            Button.padding (Thickness(12.0, 0.0, 16.0, 0.0))
+                            Button.margin (Thickness(8.0, 0.0, 4.0, 0.0))
+                            Button.verticalAlignment VerticalAlignment.Center
+                            Button.verticalContentAlignment VerticalAlignment.Center
+                            Button.background Palette.surfaceHigh
+                            Button.onClick ((fun _ -> dispatch (SetTurnSideways(not turned))), SubPatchOptions.OnChangeOf turned)
+                            Button.content (
+                                StackPanel.create [
+                                    StackPanel.orientation Orientation.Horizontal
+                                    StackPanel.spacing 8.0
+                                    StackPanel.children [
+                                        icon (if turned then Icons.phoneUpright else Icons.phoneSideways) Palette.accent 20.0 false
+                                        TextBlock.create [
+                                            TextBlock.text (if turned then "Upright" else "Sideways")
+                                            TextBlock.fontSize 15.0
+                                            TextBlock.fontWeight FontWeight.SemiBold
+                                            TextBlock.foreground Palette.text
+                                            TextBlock.verticalAlignment VerticalAlignment.Center
+                                        ]
+                                    ]
+                                ]
+                            )
+                        ]
+                    Border.create [
+                        Grid.column 2
+                        Border.verticalAlignment VerticalAlignment.Center
+                        Border.background Palette.surfaceHigh
+                        Border.cornerRadius 24.0
+                        Border.child (iconButton Icons.close 22.0 (fun () -> dispatch ToggleZoom) "close-zoom")
+                    ]
+                ]
+            ]
             match bmp with
             | Some b ->
-                // shown at the crop's natural resolution (about 3x the paper's size), scroll to pan
-                ScrollViewer.create [
-                    ScrollViewer.horizontalScrollBarVisibility ScrollBarVisibility.Auto
-                    ScrollViewer.verticalScrollBarVisibility ScrollBarVisibility.Auto
-                    ScrollViewer.content (
+                LayoutTransformControl.create [
+                    Grid.row 1
+                    LayoutTransformControl.margin 16.0
+                    LayoutTransformControl.horizontalAlignment HorizontalAlignment.Center
+                    LayoutTransformControl.verticalAlignment VerticalAlignment.Center
+                    LayoutTransformControl.layoutTransform (if turned then sidewaysTurn else uprightTurn)
+                    LayoutTransformControl.child (
                         Border.create [
                             Border.background Palette.paper
-                            Border.padding 16.0
-                            Border.margin (Thickness(12.0, 72.0, 12.0, 24.0))
-                            Border.cornerRadius 12.0
-                            Border.horizontalAlignment HorizontalAlignment.Left
+                            Border.cornerRadius 16.0
+                            Border.padding 14.0
                             Border.child (
                                 Image.create [
                                     Image.source b
-                                    Image.stretch Stretch.None
+                                    Image.stretch Stretch.Uniform
+                                    Image.maxWidth (float b.PixelSize.Width * zoomMaxScale)
+                                    Image.maxHeight (float b.PixelSize.Height * zoomMaxScale)
+                                    smooth
                                 ]
                             )
                         ]
                     )
                 ]
             | None -> ()
-            Border.create [
-                Border.horizontalAlignment HorizontalAlignment.Right
-                Border.verticalAlignment VerticalAlignment.Top
-                Border.margin 8.0
-                Border.background Palette.surfaceHigh
-                Border.cornerRadius 26.0
-                Border.child (iconButton Icons.close 22.0 (fun () -> dispatch ToggleZoom) "close-zoom")
-            ]
+            if onStage then
+                Grid.create [
+                    Grid.row 2
+                    Grid.margin (Thickness(11.0, 4.0, 11.0, 20.0))
+                    Grid.columnDefinitions (if again.IsSome then "*,1.4*" else "*")
+                    Grid.children [
+                        match again with
+                        | Some i ->
+                            actionButton 0 Icons.back "Hear it again" false (box ("zoom-again", i)) (fun () -> dispatch (JumpToSegment i))
+                            actionButton 1 Icons.play "Continue" true (box "zoom-play") (fun () -> dispatch TogglePlay)
+                        | None ->
+                            let data, text =
+                                if r.Playing then Icons.pause, "Pause"
+                                elif r.Held.IsSome then Icons.play, "Continue"
+                                elif r.Finished then Icons.play, "Play again"
+                                else Icons.play, "Play"
+                            actionButton 0 data text true (box "zoom-play") (fun () -> dispatch TogglePlay)
+                    ]
+                ]
         ]
     ]
 
@@ -1434,6 +1588,7 @@ let private visualThumb (r: ReaderState) (id: string) (maxHeight: float) (dispat
                         Image.create [
                             Image.source bmp
                             Image.stretch Stretch.Uniform
+                            smooth
                             Image.maxWidth (float bmp.PixelSize.Width * 0.6)
                             Image.maxHeight (min maxHeight (float bmp.PixelSize.Height * 0.6))
                             Image.horizontalAlignment HorizontalAlignment.Left
@@ -1727,6 +1882,7 @@ let private cardImage (paperId: string) (visual: string) (maxHeight: float) : IV
                 Image.create [
                     Image.source bmp
                     Image.stretch Stretch.Uniform
+                    smooth
                     Image.maxWidth (float bmp.PixelSize.Width * 0.6)
                     Image.maxHeight (min maxHeight (float bmp.PixelSize.Height * 0.6))
                     Image.horizontalAlignment HorizontalAlignment.Left
@@ -3239,13 +3395,15 @@ let private walkMathScale = 1.3
 let private sectionName (r: ReaderState) (seg: Segment) =
     if seg.Section < r.Script.Sections.Length && seg.Section > 0 then r.Script.Sections.[seg.Section].Title else "Beginning"
 
-/// A button big enough to hit while walking, icon above its word.
+/// A button big enough to hit while walking, icon above its word; smaller type on the lower buttons of short screens.
 let private walkButton (column: int) (height: float) (data: string) (text: string) (primary: bool) (key: obj) (onClick: unit -> unit) : IView =
     let fg = if primary then Palette.onAccent else Palette.text
+    let roomy = height >= (if primary then 110.0 else 80.0)
     Button.create [
         Grid.column column
         Button.height height
         Button.margin (Thickness(5.0, 0.0))
+        Button.padding (Thickness(4.0, 0.0))
         Button.cornerRadius 24.0
         Button.horizontalAlignment HorizontalAlignment.Stretch
         Button.horizontalContentAlignment HorizontalAlignment.Center
@@ -3258,58 +3416,195 @@ let private walkButton (column: int) (height: float) (data: string) (text: strin
                 StackPanel.children [
                     Border.create [
                         Border.horizontalAlignment HorizontalAlignment.Center
-                        Border.child (icon data (if primary then fg else Palette.accent) (if primary then 40.0 else 30.0) primary)
+                        Border.child (
+                            icon data (if primary then fg else Palette.accent)
+                                (match primary, roomy with
+                                 | true, true -> 40.0
+                                 | true, false -> 32.0
+                                 | false, true -> 30.0
+                                 | false, false -> 26.0)
+                                primary)
                     ]
                     TextBlock.create [
                         TextBlock.text text
-                        TextBlock.fontSize (if primary then 22.0 else 16.0)
+                        TextBlock.fontSize (
+                            match primary, roomy with
+                            | true, true -> 22.0
+                            | true, false -> 19.0
+                            | false, true -> 16.0
+                            | false, false -> 14.0)
                         TextBlock.fontWeight FontWeight.SemiBold
                         TextBlock.foreground fg
                         TextBlock.horizontalAlignment HorizontalAlignment.Center
+                        TextBlock.textTrimming TextTrimming.CharacterEllipsis
                     ]
                 ]
             ]
         )
     ]
 
-/// The equation or figure as large as fits (tap for full size), or else the sentence being spoken in large type.
-let private walkingStage (r: ReaderState) (seg: Segment) (dispatch: Msg -> unit) : IView =
+/// A switch in the app's colours, for a row that toggles as a whole (a bigger target than a switch).
+let private switchMark (on: bool) : IView =
+    Border.create [
+        Border.width 42.0
+        Border.height 26.0
+        Border.cornerRadius 13.0
+        Border.padding 4.0
+        Border.verticalAlignment VerticalAlignment.Center
+        Border.background (if on then Palette.accent else Palette.surfaceHigh)
+        Border.borderBrush (if on then Palette.accent else Palette.faint)
+        Border.borderThickness 1.5
+        Border.child (
+            Ellipse.create [
+                Ellipse.width 15.0
+                Ellipse.height 15.0
+                Ellipse.fill (if on then Palette.onAccent else Palette.muted)
+                Ellipse.horizontalAlignment (if on then HorizontalAlignment.Right else HorizontalAlignment.Left)
+                Ellipse.verticalAlignment VerticalAlignment.Center
+            ]
+        )
+    ]
+
+/// The setting that stops playback once this kind of visual has been explained: its name, whether it is on, and
+/// the message that changes it.
+let private stopSetting (settings: Settings) (v: Visual) : (string * bool * (bool -> Msg)) option =
+    match v.Kind with
+    | VisualKind.Equation | VisualKind.Algorithm -> Some("Stop at equations", settings.StopAtEquations, SetStopAtEquations)
+    | VisualKind.Figure | VisualKind.Table -> Some("Stop at figures and tables", settings.StopAtFigures, SetStopAtFigures)
+    | VisualKind.Inline -> None
+
+/// The equation or figure as large as fits, with what is being said about it underneath (tap it for full screen);
+/// or else the sentence being spoken, in large type.
+let private walkingStage (model: Model) (r: ReaderState) (seg: Segment) (dispatch: Msg -> unit) : IView =
     let paths = Store.Paths((Services.get ()).DataDir)
+    let vw, vh = viewport model
     let visual = (match r.Held with Some v -> Some v | None -> seg.Show) |> Option.bind r.Script.Visual
     let image = visual |> Option.bind (fun v -> bitmap (paths.Image(r.Paper.Id, v.Id)) |> Option.map (fun b -> v, b))
     match image with
     | Some (v, bmp) ->
-        Border.create [
-            Border.margin (Thickness(5.0, 4.0, 5.0, 12.0))
-            Border.padding (Thickness(12.0, 8.0, 12.0, 12.0))
-            Border.cornerRadius 20.0
-            Border.background Palette.paper
-            Border.verticalAlignment VerticalAlignment.Center
-            Border.onTapped ((fun _ -> dispatch ToggleZoom), SubPatchOptions.Never)
-            Border.child (
+        let held = r.Held.IsSome
+        // stopped at it: the sentence just heard (the next isn't said yet); playing: the one being said
+        let caption = if held then (if r.Current > 0 then r.Script.Segments.[r.Current - 1].Say else "") else seg.Say
+        Grid.create [
+            Grid.rowDefinitions "Auto,*,Auto,Auto"
+            Grid.verticalAlignment VerticalAlignment.Center
+            Grid.children [
+                // what it is, and a way to see it larger
                 Grid.create [
-                    Grid.rowDefinitions "Auto,*"
+                    Grid.row 0
+                    Grid.columnDefinitions "*,Auto"
+                    Grid.margin (Thickness(6.0, 0.0, 0.0, 4.0))
                     Grid.children [
-                        TextBlock.create [
-                            Grid.row 0
-                            TextBlock.text (if r.Held.IsSome then sprintf "%s · stopped here" (visualName v) else visualName v)
-                            TextBlock.fontSize 13.0
-                            TextBlock.foreground Palette.ink
-                            TextBlock.margin (Thickness(0.0, 0.0, 0.0, 6.0))
-                            TextBlock.textTrimming TextTrimming.CharacterEllipsis
+                        StackPanel.create [
+                            Grid.column 0
+                            StackPanel.orientation Orientation.Horizontal
+                            StackPanel.spacing 8.0
+                            StackPanel.verticalAlignment VerticalAlignment.Center
+                            StackPanel.children [
+                                if held then icon Icons.pause Palette.accent 14.0 true
+                                TextBlock.create [
+                                    TextBlock.text (if held then "Paused at " + Help.spokenName v else visualName v)
+                                    TextBlock.fontSize 15.0
+                                    TextBlock.fontWeight FontWeight.SemiBold
+                                    TextBlock.foreground (if held then Palette.accent else Palette.muted)
+                                    TextBlock.verticalAlignment VerticalAlignment.Center
+                                    TextBlock.textTrimming TextTrimming.CharacterEllipsis
+                                ]
+                            ]
                         ]
-                        Image.create [
-                            Grid.row 1
-                            Image.source bmp
-                            Image.stretch Stretch.Uniform
-                            Image.maxWidth (float bmp.PixelSize.Width * walkMathScale)
-                            Image.maxHeight (float bmp.PixelSize.Height * walkMathScale)
-                            Image.horizontalAlignment HorizontalAlignment.Center
-                            Image.verticalAlignment VerticalAlignment.Center
+                        plainButton "Transparent" [
+                            Grid.column 1
+                            Button.padding (Thickness(10.0, 8.0))
+                            Button.cornerRadius 18.0
+                            Button.verticalAlignment VerticalAlignment.Center
+                            Button.onClick ((fun _ -> dispatch ToggleZoom), SubPatchOptions.Never)
+                            Button.content (
+                                StackPanel.create [
+                                    StackPanel.orientation Orientation.Horizontal
+                                    StackPanel.spacing 7.0
+                                    StackPanel.children [
+                                        icon Icons.expand Palette.accent 16.0 false
+                                        TextBlock.create [
+                                            TextBlock.text "Full screen"
+                                            TextBlock.fontSize 14.0
+                                            TextBlock.fontWeight FontWeight.SemiBold
+                                            TextBlock.foreground Palette.accent
+                                            TextBlock.verticalAlignment VerticalAlignment.Center
+                                        ]
+                                    ]
+                                ]
+                            )
                         ]
                     ]
                 ]
-            )
+                // ringed while playback waits on it
+                Border.create [
+                    Grid.row 1
+                    Border.padding 3.0
+                    Border.cornerRadius 24.0
+                    Border.borderThickness 2.0
+                    Border.borderBrush (if held then Palette.accent else "Transparent")
+                    Border.child (
+                        Border.create [
+                            Border.padding (Thickness(10.0, 14.0))
+                            Border.cornerRadius 19.0
+                            Border.background Palette.paper
+                            Border.onTapped ((fun _ -> dispatch ToggleZoom), SubPatchOptions.Never)
+                            Border.child (
+                                Image.create [
+                                    Image.source bmp
+                                    Image.stretch Stretch.Uniform
+                                    Image.maxWidth (float bmp.PixelSize.Width * walkMathScale)
+                                    Image.maxHeight (float bmp.PixelSize.Height * walkMathScale)
+                                    Image.horizontalAlignment HorizontalAlignment.Center
+                                    Image.verticalAlignment VerticalAlignment.Center
+                                    smooth
+                                ]
+                            )
+                        ]
+                    )
+                ]
+                if caption <> "" then
+                    TextBlock.create [
+                        Grid.row 2
+                        TextBlock.margin (Thickness(8.0, 12.0, 8.0, 0.0))
+                        TextBlock.text caption
+                        TextBlock.fontSize 18.0
+                        TextBlock.lineHeight 26.0
+                        TextBlock.foreground Palette.muted
+                        TextBlock.textWrapping TextWrapping.Wrap
+                        // fewer lines where height is short, so the equation keeps its room
+                        TextBlock.maxLines (if vw > vh then 2 elif vh < 760.0 then 3 else 5)
+                        TextBlock.textTrimming TextTrimming.WordEllipsis
+                    ]
+                // whether playback waits at the next one, where the question comes up
+                match stopSetting model.Settings v with
+                | Some (name, on, set) ->
+                    plainButton "Transparent" [
+                        Grid.row 3
+                        Button.margin (Thickness(2.0, 10.0, 0.0, 0.0))
+                        Button.padding (Thickness(6.0, 8.0, 12.0, 8.0))
+                        Button.cornerRadius 16.0
+                        Button.horizontalAlignment HorizontalAlignment.Left
+                        Button.onClick ((fun _ -> dispatch (set (not on))), SubPatchOptions.OnChangeOf(name, on))
+                        Button.content (
+                            StackPanel.create [
+                                StackPanel.orientation Orientation.Horizontal
+                                StackPanel.spacing 12.0
+                                StackPanel.children [
+                                    switchMark on
+                                    TextBlock.create [
+                                        TextBlock.text name
+                                        TextBlock.fontSize 15.0
+                                        TextBlock.foreground (if on then Palette.text else Palette.muted)
+                                        TextBlock.verticalAlignment VerticalAlignment.Center
+                                    ]
+                                ]
+                            ]
+                        )
+                    ]
+                | None -> ()
+            ]
         ]
     | None ->
         let heading = seg.Kind = UnitKind.Heading || seg.Kind = UnitKind.Title
@@ -3328,190 +3623,257 @@ let private walkingStage (r: ReaderState) (seg: Segment) (dispatch: Msg -> unit)
             )
         ]
 
-/// The simple player for listening on the move: one huge play / pause / continue button within thumb's reach,
-/// three large ones above it, and the equation on screen as big as it goes.
+/// The simple player for listening on the move: one huge play / pause / continue button within thumb's reach, three
+/// large ones above it, and the equation on screen as big as it goes. With the phone on its side, the equation takes
+/// the left and the buttons stack on the right.
 let private walkingOverlay (model: Model) (r: ReaderState) (dispatch: Msg -> unit) : IView =
     let seg = r.Script.Segments.[r.Current]
     let again = r.Held |> Option.bind (firstReading r.Script)
-    Border.create [
-        Border.background Palette.bg
-        Border.padding (Thickness(11.0, 8.0, 11.0, 16.0))
-        Border.child (
-            DockPanel.create [
-                DockPanel.children [
-                    Grid.create [
-                        DockPanel.dock Dock.Top
-                        Grid.columnDefinitions "Auto,*,Auto"
-                        Grid.margin (Thickness(5.0, 0.0, 5.0, 4.0))
-                        Grid.children [
-                            Button.create [
-                                Grid.column 0
-                                Button.height 52.0
-                                Button.cornerRadius 26.0
-                                Button.padding (Thickness(14.0, 0.0, 18.0, 0.0))
-                                Button.verticalContentAlignment VerticalAlignment.Center
-                                Button.background Palette.surfaceHigh
-                                Button.onClick ((fun _ -> dispatch (SetWalking false)), SubPatchOptions.Never)
-                                Button.content (
-                                    StackPanel.create [
-                                        StackPanel.orientation Orientation.Horizontal
-                                        StackPanel.spacing 8.0
-                                        StackPanel.children [
-                                            icon Icons.close Palette.text 20.0 false
-                                            TextBlock.create [
-                                                TextBlock.text "Exit"
-                                                TextBlock.fontSize 16.0
-                                                TextBlock.fontWeight FontWeight.SemiBold
-                                                TextBlock.foreground Palette.text
-                                                TextBlock.verticalAlignment VerticalAlignment.Center
-                                            ]
-                                        ]
-                                    ]
-                                )
-                            ]
-                            StackPanel.create [
-                                Grid.column 1
-                                StackPanel.margin (Thickness(12.0, 0.0))
-                                StackPanel.verticalAlignment VerticalAlignment.Center
-                                StackPanel.spacing 2.0
-                                StackPanel.children [
-                                    TextBlock.create [
-                                        TextBlock.text (sectionName r seg)
-                                        TextBlock.fontSize 16.0
-                                        TextBlock.fontWeight FontWeight.SemiBold
-                                        TextBlock.foreground Palette.accent
-                                        TextBlock.textTrimming TextTrimming.CharacterEllipsis
-                                    ]
-                                    TextBlock.create [
-                                        TextBlock.text (
-                                            if r.Finished then "Finished"
-                                            else sprintf "%s %d of %d · %s" (capitalize (Formats.pageNoun r.Paper.Format)) (seg.Page + 1) r.Script.PageCount (formatMinutes (remainingMs r model.Settings.Speed)))
-                                        TextBlock.fontSize 13.0
-                                        TextBlock.foreground Palette.muted
-                                        TextBlock.textTrimming TextTrimming.CharacterEllipsis
-                                    ]
-                                ]
-                            ]
-                            Button.create [
-                                Grid.column 2
-                                Button.height 52.0
-                                Button.minWidth 76.0
-                                Button.cornerRadius 26.0
-                                Button.horizontalContentAlignment HorizontalAlignment.Center
-                                Button.verticalContentAlignment VerticalAlignment.Center
-                                Button.background Palette.surfaceHigh
-                                Button.foreground Palette.text
-                                Button.fontSize 18.0
-                                Button.fontWeight FontWeight.SemiBold
-                                Button.content (sprintf "%g×" model.Settings.Speed)
-                                Button.onClick ((fun _ -> dispatch CycleSpeed), SubPatchOptions.Never)
-                            ]
+    let vw, vh = viewport model
+    let landscape = vw > vh
+    // lower buttons where height is short, so the equation keeps its room
+    let small, big = if landscape then 68.0, 92.0 elif vh < 760.0 then 76.0, 104.0 else 88.0, 128.0
+    let exit =
+        Button.create [
+            Grid.column 0
+            Button.height 52.0
+            Button.cornerRadius 26.0
+            Button.padding (Thickness(14.0, 0.0, 18.0, 0.0))
+            Button.verticalAlignment VerticalAlignment.Center
+            Button.verticalContentAlignment VerticalAlignment.Center
+            Button.background Palette.surfaceHigh
+            Button.onClick ((fun _ -> dispatch (SetWalking false)), SubPatchOptions.Never)
+            Button.content (
+                StackPanel.create [
+                    StackPanel.orientation Orientation.Horizontal
+                    StackPanel.spacing 8.0
+                    StackPanel.children [
+                        icon Icons.close Palette.text 20.0 false
+                        TextBlock.create [
+                            TextBlock.text "Exit"
+                            TextBlock.fontSize 16.0
+                            TextBlock.fontWeight FontWeight.SemiBold
+                            TextBlock.foreground Palette.text
+                            TextBlock.verticalAlignment VerticalAlignment.Center
                         ]
                     ]
-                    StackPanel.create [
-                        DockPanel.dock Dock.Bottom
-                        StackPanel.spacing 12.0
-                        StackPanel.children [
-                            Border.create [
-                                Border.margin (Thickness(5.0, 0.0))
-                                Border.child (StackPanel.create [ StackPanel.spacing 10.0; StackPanel.children [ yield! playerStatus model r dispatch; progressBar r ] ])
-                            ]
-                            Grid.create [
-                                Grid.columnDefinitions (if again.IsSome then "*,*" else "*,*,*")
-                                Grid.children [
-                                    match again with
-                                    | Some i ->
-                                        // stopped at an equation: hear it once more, or ask about it
-                                        walkButton 0 88.0 Icons.back "Hear it again" false (box ("again", i)) (fun () -> dispatch (JumpToSegment i))
-                                        walkButton 1 88.0 Icons.ask "Ask" false (box "ask") (fun () -> dispatch (OpenHelp r.Held))
-                                    | None ->
-                                        walkButton 0 88.0 Icons.back "Back 15 s" false (box "back") (fun () -> dispatch Back15)
-                                        walkButton 1 88.0 Icons.ask "Ask" false (box "ask") (fun () -> dispatch (OpenHelp r.Held))
-                                        walkButton 2 88.0 Icons.forward "Skip 15 s" false (box "forward") (fun () -> dispatch Forward15)
-                                ]
-                            ]
-                            Grid.create [
-                                Grid.children [
-                                    let data, text =
-                                        if r.Playing then Icons.pause, "Pause"
-                                        elif r.Held.IsSome then Icons.play, "Continue"
-                                        elif r.Finished then Icons.play, "Play again"
-                                        else Icons.play, "Play"
-                                    walkButton 0 128.0 data text true (box "play") (fun () -> dispatch TogglePlay)
-                                ]
-                            ]
-                        ]
-                    ]
-                    walkingStage r seg dispatch
+                ]
+            )
+        ]
+    let speed =
+        Button.create [
+            Grid.column 2
+            Button.height 52.0
+            Button.minWidth 76.0
+            Button.cornerRadius 26.0
+            Button.verticalAlignment VerticalAlignment.Center
+            Button.horizontalContentAlignment HorizontalAlignment.Center
+            Button.verticalContentAlignment VerticalAlignment.Center
+            Button.background Palette.surfaceHigh
+            Button.foreground Palette.text
+            Button.fontSize 18.0
+            Button.fontWeight FontWeight.SemiBold
+            Button.content (sprintf "%g×" model.Settings.Speed)
+            Button.onClick ((fun _ -> dispatch CycleSpeed), SubPatchOptions.Never)
+        ]
+    // the section, and how far through the paper
+    let where =
+        StackPanel.create [
+            Grid.column 1
+            StackPanel.margin (if landscape then Thickness(6.0, 14.0, 6.0, 0.0) else Thickness(12.0, 0.0))
+            StackPanel.verticalAlignment VerticalAlignment.Center
+            StackPanel.spacing 2.0
+            StackPanel.children [
+                TextBlock.create [
+                    TextBlock.text (sectionName r seg)
+                    TextBlock.fontSize 16.0
+                    TextBlock.fontWeight FontWeight.SemiBold
+                    TextBlock.foreground Palette.accent
+                    TextBlock.textWrapping (if landscape then TextWrapping.Wrap else TextWrapping.NoWrap)
+                    TextBlock.maxLines 2
+                    TextBlock.textTrimming TextTrimming.CharacterEllipsis
+                ]
+                TextBlock.create [
+                    TextBlock.text (
+                        if r.Finished then "Finished"
+                        else sprintf "%s %d of %d · %s" (capitalize (Formats.pageNoun r.Paper.Format)) (seg.Page + 1) r.Script.PageCount (formatMinutes (remainingMs r model.Settings.Speed)))
+                    TextBlock.fontSize 13.0
+                    TextBlock.foreground Palette.muted
+                    TextBlock.textTrimming TextTrimming.CharacterEllipsis
                 ]
             ]
+        ]
+    // a playback error or "preparing the voice": over the progress bar, or on its side under the equation, where the
+    // narrow column of buttons has no room for it
+    let status = playerStatus model r dispatch
+    let buttons =
+        StackPanel.create [
+            StackPanel.spacing 12.0
+            StackPanel.children [
+                Border.create [
+                    Border.margin (Thickness(5.0, 0.0))
+                    Border.child (
+                        StackPanel.create [
+                            StackPanel.spacing 10.0
+                            StackPanel.children [
+                                if not landscape then yield! status
+                                progressBar r
+                            ]
+                        ]
+                    )
+                ]
+                Grid.create [
+                    Grid.columnDefinitions (if again.IsSome then "*,*" else "*,*,*")
+                    Grid.children [
+                        match again with
+                        | Some i ->
+                            // stopped at an equation: hear it once more, or ask about it
+                            walkButton 0 small Icons.back "Hear it again" false (box ("again", i)) (fun () -> dispatch (JumpToSegment i))
+                            walkButton 1 small Icons.ask "Ask" false (box "ask") (fun () -> dispatch (OpenHelp r.Held))
+                        | None ->
+                            walkButton 0 small Icons.back "Back 15 s" false (box "back") (fun () -> dispatch Back15)
+                            walkButton 1 small Icons.ask "Ask" false (box "ask") (fun () -> dispatch (OpenHelp r.Held))
+                            walkButton 2 small Icons.forward "Skip 15 s" false (box "forward") (fun () -> dispatch Forward15)
+                    ]
+                ]
+                Grid.create [
+                    Grid.children [
+                        let data, text =
+                            if r.Playing then Icons.pause, "Pause"
+                            elif r.Held.IsSome then Icons.play, "Continue"
+                            elif r.Finished then Icons.play, "Play again"
+                            else Icons.play, "Play"
+                        walkButton 0 big data text true (box "play") (fun () -> dispatch TogglePlay)
+                    ]
+                ]
+            ]
+        ]
+    Border.create [
+        Border.background Palette.bg
+        Border.padding (Thickness(11.0, 8.0, 11.0, (if landscape then 12.0 else 16.0)))
+        Border.child (
+            if landscape then
+                Grid.create [
+                    Grid.columnDefinitions (sprintf "*,%g" (Math.Clamp(Math.Round(0.34 * vw), 240.0, 320.0)))
+                    Grid.children [
+                        DockPanel.create [
+                            Grid.column 0
+                            DockPanel.margin (Thickness(5.0, 0.0, 16.0, 0.0))
+                            DockPanel.children [
+                                if not status.IsEmpty then
+                                    StackPanel.create [ DockPanel.dock Dock.Bottom; StackPanel.margin (Thickness(6.0, 8.0, 0.0, 4.0)); StackPanel.children status ]
+                                walkingStage model r seg dispatch
+                            ]
+                        ]
+                        DockPanel.create [
+                            Grid.column 1
+                            DockPanel.children [
+                                StackPanel.create [
+                                    DockPanel.dock Dock.Top
+                                    StackPanel.margin (Thickness(5.0, 0.0))
+                                    StackPanel.children [
+                                        Grid.create [ Grid.columnDefinitions "Auto,*,Auto"; Grid.children [ exit; speed ] ]
+                                        where
+                                    ]
+                                ]
+                                // the last child fills the rest: the buttons sit at its bottom, within thumb's reach
+                                Border.create [ Border.verticalAlignment VerticalAlignment.Bottom; Border.child buttons ]
+                            ]
+                        ]
+                    ]
+                ]
+                :> IView
+            else
+                DockPanel.create [
+                    DockPanel.children [
+                        Grid.create [
+                            DockPanel.dock Dock.Top
+                            Grid.columnDefinitions "Auto,*,Auto"
+                            Grid.margin (Thickness(5.0, 0.0, 5.0, 4.0))
+                            Grid.children [ exit; where; speed ]
+                        ]
+                        Border.create [ DockPanel.dock Dock.Bottom; Border.child buttons ]
+                        Border.create [ Border.margin (Thickness(5.0, 0.0)); Border.child (walkingStage model r seg dispatch) ]
+                    ]
+                ]
+                :> IView
         )
     ]
 
 let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) : IView =
     let seg = r.Script.Segments.[r.Current]
-    let sectionTitle = sectionName r seg
+    let vw, vh = viewport model
+    // upright, the title gets a row of its own: beside the buttons it is cut to a word
+    let titleRow = vw <= vh
+    let title =
+        StackPanel.create [
+            Grid.column 1
+            StackPanel.verticalAlignment VerticalAlignment.Center
+            StackPanel.margin (if titleRow then Thickness(20.0, 0.0, 20.0, 4.0) else Thickness(0.0))
+            StackPanel.spacing 2.0
+            StackPanel.children [
+                TextBlock.create [
+                    TextBlock.text (sectionName r seg)
+                    TextBlock.fontSize (if titleRow then 16.0 else 14.0)
+                    TextBlock.fontWeight FontWeight.SemiBold
+                    TextBlock.foreground Palette.accent
+                    TextBlock.textTrimming TextTrimming.CharacterEllipsis
+                ]
+                TextBlock.create [
+                    TextBlock.text r.Script.Title
+                    TextBlock.fontSize (if titleRow then 13.0 else 12.0)
+                    TextBlock.foreground Palette.muted
+                    TextBlock.textTrimming TextTrimming.CharacterEllipsis
+                ]
+            ]
+        ]
     Grid.create [
         Grid.children [
             DockPanel.create [
                 DockPanel.children [
-                    Grid.create [
+                    StackPanel.create [
                         DockPanel.dock Dock.Top
-                        Grid.columnDefinitions "Auto,*,Auto,Auto,Auto,Auto,Auto"
-                        Grid.margin (Thickness(4.0, 6.0, 4.0, 2.0))
-                        Grid.children [
-                            Border.create [ Grid.column 0; Border.child (iconButton Icons.chevronLeft 24.0 (fun () -> dispatch CloseReader) "close-reader") ]
-                            StackPanel.create [
-                                Grid.column 1
-                                StackPanel.verticalAlignment VerticalAlignment.Center
-                                StackPanel.spacing 2.0
-                                StackPanel.children [
-                                    TextBlock.create [
-                                        TextBlock.text sectionTitle
-                                        TextBlock.fontSize 14.0
-                                        TextBlock.fontWeight FontWeight.SemiBold
-                                        TextBlock.foreground Palette.accent
-                                        TextBlock.textTrimming TextTrimming.CharacterEllipsis
+                        StackPanel.children [
+                            Grid.create [
+                                Grid.columnDefinitions "Auto,*,Auto,Auto,Auto,Auto,Auto"
+                                Grid.margin (Thickness(4.0, 6.0, 4.0, 2.0))
+                                Grid.children [
+                                    Border.create [ Grid.column 0; Border.child (iconButton Icons.chevronLeft 24.0 (fun () -> dispatch CloseReader) "close-reader") ]
+                                    if not titleRow then title
+                                    Button.create [
+                                        Grid.column 2
+                                        Button.height 38.0
+                                        Button.cornerRadius 19.0
+                                        Button.padding (Thickness(12.0, 0.0, 14.0, 0.0))
+                                        Button.margin (Thickness(6.0, 0.0, 2.0, 0.0))
+                                        Button.verticalAlignment VerticalAlignment.Center
+                                        Button.verticalContentAlignment VerticalAlignment.Center
+                                        Button.background Palette.surfaceHigh
+                                        Button.onClick ((fun _ -> dispatch (OpenHelp None)), SubPatchOptions.Never)
+                                        Button.content (
+                                            StackPanel.create [
+                                                StackPanel.orientation Orientation.Horizontal
+                                                StackPanel.spacing 6.0
+                                                StackPanel.children [
+                                                    icon Icons.ask Palette.accent 20.0 false
+                                                    TextBlock.create [
+                                                        TextBlock.text "Ask"
+                                                        TextBlock.fontSize 15.0
+                                                        TextBlock.fontWeight FontWeight.SemiBold
+                                                        TextBlock.foreground Palette.text
+                                                        TextBlock.verticalAlignment VerticalAlignment.Center
+                                                    ]
+                                                ]
+                                            ]
+                                        )
                                     ]
-                                    TextBlock.create [
-                                        TextBlock.text r.Script.Title
-                                        TextBlock.fontSize 12.0
-                                        TextBlock.foreground Palette.muted
-                                        TextBlock.textTrimming TextTrimming.CharacterEllipsis
-                                    ]
+                                    Border.create [ Grid.column 3; Border.child (iconButton Icons.walk 22.0 (fun () -> dispatch (SetWalking true)) "walking") ]
+                                    Border.create [ Grid.column 4; Border.child (iconButton Icons.cards 22.0 (fun () -> dispatch (OpenCards None)) "cards") ]
+                                    Border.create [ Grid.column 5; Border.child (iconButton Icons.sigma 22.0 (fun () -> dispatch ToggleEquations) "equations") ]
+                                    Border.create [ Grid.column 6; Border.child (iconButton Icons.sliders 22.0 (fun () -> dispatch (SetShowSettings true)) "reader-settings") ]
                                 ]
                             ]
-                            Button.create [
-                                Grid.column 2
-                                Button.height 38.0
-                                Button.cornerRadius 19.0
-                                Button.padding (Thickness(12.0, 0.0, 14.0, 0.0))
-                                Button.margin (Thickness(6.0, 0.0, 2.0, 0.0))
-                                Button.verticalAlignment VerticalAlignment.Center
-                                Button.verticalContentAlignment VerticalAlignment.Center
-                                Button.background Palette.surfaceHigh
-                                Button.onClick ((fun _ -> dispatch (OpenHelp None)), SubPatchOptions.Never)
-                                Button.content (
-                                    StackPanel.create [
-                                        StackPanel.orientation Orientation.Horizontal
-                                        StackPanel.spacing 6.0
-                                        StackPanel.children [
-                                            icon Icons.ask Palette.accent 20.0 false
-                                            TextBlock.create [
-                                                TextBlock.text "Ask"
-                                                TextBlock.fontSize 15.0
-                                                TextBlock.fontWeight FontWeight.SemiBold
-                                                TextBlock.foreground Palette.text
-                                                TextBlock.verticalAlignment VerticalAlignment.Center
-                                            ]
-                                        ]
-                                    ]
-                                )
-                            ]
-                            Border.create [ Grid.column 3; Border.child (iconButton Icons.walk 22.0 (fun () -> dispatch (SetWalking true)) "walking") ]
-                            Border.create [ Grid.column 4; Border.child (iconButton Icons.cards 22.0 (fun () -> dispatch (OpenCards None)) "cards") ]
-                            Border.create [ Grid.column 5; Border.child (iconButton Icons.sigma 22.0 (fun () -> dispatch ToggleEquations) "equations") ]
-                            Border.create [ Grid.column 6; Border.child (iconButton Icons.sliders 22.0 (fun () -> dispatch (SetShowSettings true)) "reader-settings") ]
+                            if titleRow then title
                         ]
                     ]
                     Border.create [ DockPanel.dock Dock.Bottom; Border.child (controls model r dispatch) ]
@@ -3562,7 +3924,7 @@ let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) :
             | Some s when not s.Hidden -> studyOverlay model r s dispatch
             | _ -> ()
             match r.Zoom with
-            | Some v -> zoomOverlay r v dispatch
+            | Some v -> zoomOverlay model r v dispatch
             | None -> ()
         ]
     ]
@@ -3638,6 +4000,8 @@ let private settingsView (model: Model) (dispatch: Msg -> unit) : IView =
                                     sectionTitle "LISTENING"
                                     toggle "Stop at equations" "Pause once an equation or algorithm has been read and explained, with it on screen, until you tap Continue." s.StopAtEquations (SetStopAtEquations >> dispatch)
                                     toggle "Stop at figures and tables" "The same for figures and tables, after they are first shown and discussed." s.StopAtFigures (SetStopAtFigures >> dispatch)
+                                    if Services.turnable then
+                                        toggle "Turn wide equations sideways" "Full screen, a wide equation or figure runs along the long side of the screen, much larger. Turn the phone to read it." s.TurnSideways (SetTurnSideways >> dispatch)
                                     sectionTitle "ASK AND STUDY"
                                     label "About you" 16.0 Palette.text
                                     TextBox.create [

@@ -19,6 +19,8 @@ type MainView() as this =
 
     do
         this.Background <- Media.SolidColorBrush(Media.Color.Parse Views.Palette.bg)
+        // some layouts follow the app's size: turning the phone, resizing the window
+        this.SizeChanged.Add(fun e -> dispatch |> Option.iter (fun d -> d (State.Resized(e.NewSize.Width, e.NewSize.Height))))
         Program.mkProgram State.init State.update Views.view
         |> Program.withHost this
         |> Program.withSubscription (fun model ->

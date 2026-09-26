@@ -94,6 +94,7 @@ let saveSettings (p: Paths) (s: Settings) =
         w.WriteBoolean("stopAtEquations", s.StopAtEquations)
         w.WriteBoolean("stopAtFigures", s.StopAtFigures)
         w.WriteBoolean("walkingMode", s.WalkingMode)
+        w.WriteBoolean("turnSideways", s.TurnSideways)
         w.WriteString("helpModel", s.HelpModel)
         w.WriteString("aboutMe", s.AboutMe)
         w.WriteString("openAlexKey", s.OpenAlexKey)
@@ -115,6 +116,7 @@ let loadSettings (p: Paths) : Settings =
           StopAtEquations = boolean e "stopAtEquations" def.StopAtEquations
           StopAtFigures = boolean e "stopAtFigures" def.StopAtFigures
           WalkingMode = boolean e "walkingMode" def.WalkingMode
+          TurnSideways = boolean e "turnSideways" def.TurnSideways
           HelpModel = str e "helpModel" def.HelpModel
           AboutMe = str e "aboutMe" def.AboutMe
           OpenAlexKey = str e "openAlexKey" def.OpenAlexKey

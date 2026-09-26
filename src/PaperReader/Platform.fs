@@ -58,6 +58,10 @@ module Services =
     /// The window root, needed for the file picker.
     let mutable topLevel: Avalonia.Controls.TopLevel option = None
 
+    /// The device is turned on its side to read (a phone or tablet): full screen, a wide equation can be turned
+    /// sideways. Not in the browser, which is as likely to be on a desktop.
+    let mutable turnable = System.OperatingSystem.IsAndroid()
+
     let get () =
         match platform with
         | Some p -> p

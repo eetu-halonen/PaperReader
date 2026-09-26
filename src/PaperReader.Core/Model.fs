@@ -224,6 +224,9 @@ type Settings =
       StopAtFigures: bool
       /// The reader shows the simple player: big buttons and the equation large, for listening on the move.
       WalkingMode: bool
+      /// Full screen, a wide equation or figure is turned to run along the phone's long side (turn the phone to read
+      /// it), where it shows much larger.
+      TurnSideways: bool
       /// Model that answers the listener's questions (Ask).
       HelpModel: string
       /// A line about the listener ("biology PhD student, rusty on linear algebra"), so answers fit them.
@@ -246,6 +249,7 @@ module Settings =
           StopAtEquations = false
           StopAtFigures = false
           WalkingMode = false
+          TurnSideways = true
           HelpModel = "zai-glm-5-3"
           AboutMe = ""
           OpenAlexKey = ""
