@@ -130,14 +130,92 @@ let unsupported (fileName: string) =
     sprintf "%s isn't a kind of document Paper Reader can read. It reads PDF, EPUB, Word (DOCX), OpenDocument (ODT), PowerPoint (PPTX), web pages (HTML), Markdown and text files, and with a Mistral key photos of pages (PNG, JPEG, WebP)."
         (if ext = "" then "This file" else sprintf "A .%s file" (ext.ToLowerInvariant()))
 
-/// A document from Mistral OCR's pages (a photo or scan): its markdown, with the pictures OCR cut out.
-let fromOcr (pages: Mistral.OcrPage list) (fallbackTitle: string) (source: string) : Document =
+/// What OCR found on a page that isn't the document's running text: page headers and footers (with the
+/// footnotes and page numbers), the reference list, and margin text such as an arXiv stamp.
+let private ocrNoise = set [ "header"; "footer"; "references"; "aside_text" ]
+
+let private abstractRx = Regex(@"^[#\s*_]*abstract\b", RegexOptions.IgnoreCase)
+
+/// A part of an OCR page: markdown to parse (with the kind of block it came from), or a block made already.
+type private OcrItem =
+    | Md of kind: string * markdown: string
+    | Made of Block
+
+/// The first page without its front matter: the author names, affiliations and notes between the title and
+/// the abstract. Kept whole when there is no abstract to go by.
+let private withoutFrontMatter (blocks: Mistral.OcrBlock list) =
+    match blocks |> List.tryFindIndex (fun b -> (b.Kind = "title" || b.Kind = "text") && abstractRx.IsMatch b.Content) with
+    | Some k when k > 0 ->
+        let title = blocks |> List.take k |> List.tryFind (fun b -> b.Kind = "title")
+        Option.toList title @ List.skip k blocks
+    | _ -> blocks
+
+/// A document from Mistral OCR's pages. OCR's typed blocks are used when it gives them: page headers and
+/// footers, the reference list and the front matter are left out, and a paragraph broken by a page turn is
+/// joined again. With `sizes` (the crop boxes of a PDF that has its own text), figures are cut out of the PDF
+/// with their captions; otherwise (photos or scans of pages) the pictures OCR cut out are used.
+let fromOcr (pages: Mistral.OcrPage list) (sizes: (float * float)[] option) (fallbackTitle: string) (source: string) : Document =
+    let pages = pages |> List.sortBy (fun p -> p.Index)
+    let firstIndex = match pages with p :: _ -> p.Index | [] -> 0
+    let items =
+        pages
+        |> List.map (fun page ->
+            if page.Blocks.IsEmpty then Collections.Generic.List [ Md("text", page.Markdown) ]
+            else
+                let size =
+                    match sizes with
+                    | Some s when page.Index < s.Length && page.Width > 0.0 && page.Height > 0.0 -> Some s.[page.Index]
+                    | _ -> None
+                let groups =
+                    match size with
+                    | Some _ -> Ocr.figureGroups page |> List.filter (fun (_, k, _, _) -> k = VisualKind.Figure)
+                    | None -> []
+                let claimed = Collections.Generic.HashSet<Mistral.OcrBlock>(HashIdentity.Reference)
+                for (_, _, _, content) in groups do
+                    for b in content do claimed.Add b |> ignore
+                let blocks = page.Blocks |> List.filter (fun b -> not (ocrNoise.Contains b.Kind))
+                let blocks = if page.Index = firstIndex then withoutFrontMatter blocks else blocks
+                Collections.Generic.List
+                    [ for b in blocks do
+                          match groups |> List.tryFind (fun (cb, _, _, _) -> obj.ReferenceEquals(cb, b)), size with
+                          | Some (cb, _, _, content), Some size ->
+                              yield Made(Block.Image(Region(Ocr.region page size (cb :: content)), "", Markup.inlineText cb.Content))
+                          | _ when claimed.Contains b -> ()
+                          | _, Some size when b.Kind = "image" -> yield Made(Block.Image(Region(Ocr.region page size [ b ]), "", ""))
+                          | _ -> yield Md(b.Kind, b.Content) ])
+        |> Array.ofList
+    // a paragraph that runs over the page turn: the next page's first text continues in lower case
+    for k in 1 .. items.Length - 1 do
+        let prev, cur = items.[k - 1], items.[k]
+        if prev.Count > 0 then
+            match prev.[prev.Count - 1] with
+            | Md ("text", ending) when not (Regex.IsMatch(ending.TrimEnd(), @"[.!?:;]$")) ->
+                // only when no heading, equation or list comes first: text after those starts afresh
+                let first =
+                    cur |> Seq.tryFindIndex (function Md (("text" | "title" | "equation" | "list"), _) -> true | _ -> false)
+                match first |> Option.map (fun j -> j, cur.[j]) with
+                | Some (j, Md ("text", text)) when text.Length > 0 && Char.IsLower(text.TrimStart().[0]) ->
+                    prev.[prev.Count - 1] <- Md("text", ending.TrimEnd() + " " + text.TrimStart())
+                    cur.RemoveAt j
+                | _ -> ()
+            | _ -> ()
     let blocks =
-        [ for page in pages |> List.sortBy (fun p -> p.Index) do
+        [ for (page, parts) in Seq.zip pages items do
               let images = page.Images |> dict
               let resolve (src: string) = match images.TryGetValue src with | true, b -> Some(Data b) | _ -> None
               yield Block.Break
-              yield! Markup.markdownBlocks page.Markdown resolve ]
+              let pending = Collections.Generic.List<string>()
+              let flush () =
+                  let md = String.Join("\n\n", pending)
+                  pending.Clear()
+                  Markup.markdownBlocks md resolve
+              for part in parts do
+                  match part with
+                  | Md (_, md) -> pending.Add md
+                  | Made b ->
+                      yield! flush ()
+                      yield b
+              yield! flush () ]
     let title =
         blocks |> List.tryPick (function Block.Heading (_, t) when t.Length < 200 -> Some t | _ -> None)
         |> Option.defaultValue fallbackTitle

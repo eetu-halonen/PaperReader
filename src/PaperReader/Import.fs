@@ -145,8 +145,29 @@ let private ocrPages (settings: Settings) (paths: Store.Paths) (id: string) (mim
         progress "Reading the pages with Mistral OCR" (Some 0.05)
         let! pages = Mistral.ocrDocument settings.MistralApiKey mime bytes true ct
         File.WriteAllText(ocrMarker paths id, "")
-        let doc = Formats.fromOcr pages fallbackTitle "photos or scans of pages, read by OCR (headers, footers and page numbers may be mixed in)"
+        let doc = Formats.fromOcr pages None fallbackTitle "photos or scans of pages, read by OCR (math as $LaTeX$)"
         return { doc with Blocks = doc.Blocks |> Markup.dropReferences |> Blocks.attachCaptions }
+    }
+
+/// Reads a PDF with Mistral OCR: the text, the equations as LaTeX (typeset from it, so what is shown is what is
+/// read) and the tables; figures are cut out of the PDF where OCR found them.
+let private ocrPdf (platform: IPlatform) (settings: Settings) (paths: Store.Paths) (id: string) (fallbackTitle: string)
+                   (progress: Progress) (ct: CancellationToken) : Task<Analysis> =
+    task {
+        let pdf = paths.Pdf id
+        progress "Reading the paper with Mistral OCR" (Some 0.05)
+        let! pages = Mistral.ocr settings.MistralApiKey "application/pdf" (File.ReadAllBytes pdf) ct
+        let sizes = Layout.pageSizes pdf
+        let doc = Formats.fromOcr pages (Some sizes) fallbackTitle "a PDF (most likely a research paper) read by Mistral OCR: math is given as exact $LaTeX$"
+        let doc = { doc with Blocks = doc.Blocks |> Markup.dropReferences |> Blocks.attachCaptions }
+        let! analysis = fromBlocks paths id doc progress ct
+        let figures = analysis.Visuals |> Array.filter (fun v -> v.Parts.Length > 0)
+        let! outcomes =
+            renderCrops platform settings paths id figures (fun k ->
+                progress (sprintf "Cutting out the figures (%d of %d)" k figures.Length) (Some(0.45 * float k / float (max 1 figures.Length)))) ct
+        File.WriteAllText(ocrMarker paths id, "")
+        let missing = outcomes |> List.filter (fun (v, _) -> not (File.Exists(paths.Image(id, v)))) |> List.map fst |> set
+        return { withoutVisuals missing analysis with PageCount = max analysis.PageCount sizes.Length }
     }
 
 /// Analyses, draws the visuals, narrates and caches a document: a PDF (layout analysis and math crops; OCR when
@@ -188,6 +209,28 @@ let run (platform: IPlatform) (settings: Settings) (source: string) (displayName
             let! analysis, ocrWarning =
                 task {
                     match format with
+                    | Formats.Format.Pdf when Settings.hasKey settings ->
+                        let! read =
+                            task {
+                                try
+                                    let! a = ocrPdf platform settings paths id fallbackTitle progress ct
+                                    return Ok a
+                                with
+                                | :? OperationCanceledException -> return raise (OperationCanceledException())
+                                | Mistral.MistralError (_, m) -> return Error m
+                                | e -> return Error e.Message
+                            }
+                        match read with
+                        | Ok a -> return a, None
+                        | Error m ->
+                            // offline, or OCR failed: the layout analysis reads it instead
+                            progress "Reading the paper" (Some 0.02)
+                            let! analysis = Task.Run(fun () -> Layout.analyze stored (fun _ _ -> ()))
+                            ct.ThrowIfCancellationRequested()
+                            if sentenceCount analysis < 3 then return failwith ("Mistral OCR could not read this PDF: " + m)
+                            else
+                                let! _ = renderCrops platform settings paths id analysis.Visuals ignore ct
+                                return analysis, Some("reading with Mistral OCR failed, so equations come from the page layout: " + m)
                     | Formats.Format.Pdf ->
                         let pdf = stored
                         progress "Reading the paper" (Some 0.02)

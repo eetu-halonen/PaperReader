@@ -217,13 +217,15 @@ type Settings =
       UseMistralVoice: bool
       VoiceId: string
       VoiceName: string
+      /// The tutor's voice in Study, different from the paper's so it is clear who is talking ("": picked when
+      /// Study first opens).
+      TutorVoiceId: string
+      TutorVoiceName: string
       Speed: float
       /// Pause after an equation has been read and explained, until the listener continues.
       StopAtEquations: bool
       /// The same for figures and tables, after they are first shown and discussed.
       StopAtFigures: bool
-      /// The reader shows the simple player: big buttons and the equation large, for listening on the move.
-      WalkingMode: bool
       /// Full screen, a wide equation or figure is turned to run along the phone's long side (turn the phone to read
       /// it), where it shows much larger.
       TurnSideways: bool
@@ -250,10 +252,11 @@ module Settings =
           UseMistralVoice = true
           VoiceId = "en_paul_neutral"
           VoiceName = "Paul - Neutral"
+          TutorVoiceId = ""
+          TutorVoiceName = ""
           Speed = 1.0
           StopAtEquations = false
           StopAtFigures = false
-          WalkingMode = false
           TurnSideways = true
           HelpModel = "zai-glm-5-3"
           AboutMe = ""

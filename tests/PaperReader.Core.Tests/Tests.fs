@@ -546,7 +546,7 @@ let ``cards are saved and read back`` () =
 let ``settings are saved and read back, and a setting missing from an older file takes its default`` () =
     let dir = Path.Combine(Path.GetTempPath(), "pr-test-" + Guid.NewGuid().ToString("N"))
     let p = Store.Paths dir
-    let s = { Settings.defaults with StopAtEquations = true; WalkingMode = true; TurnSideways = false; Speed = 1.3 }
+    let s = { Settings.defaults with StopAtEquations = true; TutorVoiceId = "en_jane_neutral"; TurnSideways = false; Speed = 1.3 }
     Store.saveSettings p s
     Assert.Equal(s, Store.loadSettings p)
     File.WriteAllText(p.Settings, """{"speed":1.5,"stopAtEquations":true}""")

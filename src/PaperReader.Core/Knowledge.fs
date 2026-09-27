@@ -89,9 +89,9 @@ let queue (now: DateTime) (decks: (string * Card list) list) (concepts: Concept 
     let items =
         [ for id, cards in decks do
               for c in cards do
-                  if Fsrs.isDue now c.Memory then yield ReviewItem.Card(id, c)
+                  if Fsrs.isDueForReview now c.Memory then yield ReviewItem.Card(id, c)
           for c in concepts do
-              if c.Memory.Stage <> CardStage.New && Fsrs.isDue now c.Memory then
+              if c.Memory.Stage <> CardStage.New && Fsrs.isDueForReview now c.Memory then
                   match pick false Set.empty c with
                   | Some q -> yield ReviewItem.Concept(c, q)
                   | None -> () ]

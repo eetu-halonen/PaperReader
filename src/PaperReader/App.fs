@@ -40,7 +40,7 @@ type MainView() as this =
                 if Views.canGoBack then
                     args.Handled <- true
                     dispatch |> Option.iter (fun d -> d State.BackPressed))
-            // keyboard: space play/pause, arrows 15 s, W walking mode, S study, Escape back (not while typing in a text
+            // keyboard: space play/pause, arrows 15 s, S study, Escape back (not while typing in a text
             // box); in a review, space or Enter shows the answer (then answers Good) and 1 to 4 answer or pick an option;
             // in the tutor's turn, 1 to 4 pick an option and Enter pauses or goes on
             top.AddHandler(
@@ -64,7 +64,6 @@ type MainView() as this =
                         | Input.Key.Left when not typing -> Some State.Back15
                         | Input.Key.Right when not typing -> Some State.Forward15
                         | Input.Key.A when not typing && e.KeyModifiers = Input.KeyModifiers.None -> Some(State.OpenHelp None)
-                        | Input.Key.W when not typing && e.KeyModifiers = Input.KeyModifiers.None && Views.inReader -> Some(State.SetWalking(not Views.walking))
                         | Input.Key.S when not typing && e.KeyModifiers = Input.KeyModifiers.None && Views.inReader -> Some State.OpenStudy
                         | Input.Key.Escape when Views.canGoBack -> Some State.BackPressed
                         | _ -> None

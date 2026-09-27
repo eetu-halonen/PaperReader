@@ -94,10 +94,11 @@ let saveSettings (p: Paths) (s: Settings) =
         w.WriteBoolean("useMistralVoice", s.UseMistralVoice)
         w.WriteString("voiceId", s.VoiceId)
         w.WriteString("voiceName", s.VoiceName)
+        w.WriteString("tutorVoiceId", s.TutorVoiceId)
+        w.WriteString("tutorVoiceName", s.TutorVoiceName)
         w.WriteNumber("speed", s.Speed)
         w.WriteBoolean("stopAtEquations", s.StopAtEquations)
         w.WriteBoolean("stopAtFigures", s.StopAtFigures)
-        w.WriteBoolean("walkingMode", s.WalkingMode)
         w.WriteBoolean("turnSideways", s.TurnSideways)
         w.WriteString("helpModel", s.HelpModel)
         w.WriteString("aboutMe", s.AboutMe)
@@ -118,10 +119,11 @@ let loadSettings (p: Paths) : Settings =
           UseMistralVoice = boolean e "useMistralVoice" def.UseMistralVoice
           VoiceId = str e "voiceId" def.VoiceId
           VoiceName = str e "voiceName" def.VoiceName
+          TutorVoiceId = str e "tutorVoiceId" def.TutorVoiceId
+          TutorVoiceName = str e "tutorVoiceName" def.TutorVoiceName
           Speed = num e "speed" def.Speed
           StopAtEquations = boolean e "stopAtEquations" def.StopAtEquations
           StopAtFigures = boolean e "stopAtFigures" def.StopAtFigures
-          WalkingMode = boolean e "walkingMode" def.WalkingMode
           TurnSideways = boolean e "turnSideways" def.TurnSideways
           HelpModel = str e "helpModel" def.HelpModel
           AboutMe = str e "aboutMe" def.AboutMe

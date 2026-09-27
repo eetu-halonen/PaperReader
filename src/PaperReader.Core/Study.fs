@@ -103,11 +103,13 @@ type Progress =
       /// When the plan was last matched against what the learner knows.
       Matched: DateTime
       /// The first segment of the narration not yet heard in the session.
-      Heard: int }
+      Heard: int
+      /// Where the tutor is (a lesson, or a question not answered yet), so the session comes back to the same place.
+      At: string }
 
 module Progress =
     let empty (now: DateTime) =
-        { Links = Map.empty; Done = Map.empty; Recaps = Set.empty; Teach = Set.empty; Reported = Set.empty; Matched = now; Heard = 0 }
+        { Links = Map.empty; Done = Map.empty; Recaps = Set.empty; Teach = Set.empty; Reported = Set.empty; Matched = now; Heard = 0; At = "" }
 
 /// A stretch of the narration and the tutor's part around it: the background ideas taught before it is heard, and
 /// the paper's ideas it covers, taught and checked right after it.
@@ -542,6 +544,16 @@ let lessonSaid (idea: Idea) (lesson: Lesson) : Said list =
           yield! said "Here's an example."
           yield! said lesson.Example ]
 
+/// The order a question's options are shown and said in (indices into its options): mixed, so where the right one
+/// sits gives nothing away, but always the same for the same question, so it looks the same when it comes back.
+let optionOrder (q: Question) : int list =
+    // FNV-1a: string hashes in .NET change from run to run
+    let mutable h = 2166136261u
+    for c in q.Id do
+        h <- (h ^^^ uint32 c) * 16777619u
+    let rng = Random(int (h &&& 0x7FFFFFFFu))
+    [ 0 .. q.Options.Length - 1 ] |> List.sortBy (fun _ -> rng.Next())
+
 /// Options are said and heard by number: letters sound alike (B, D, E), numbers don't.
 let private optionName (position: int) = sprintf "option %d" (position + 1)
 
@@ -894,17 +906,22 @@ ANSWER: <answer>
 
 /// What the tutor has in front of it when the learner asks something in a study session.
 type Moment =
-    { /// The idea being studied: its name, what it is about, and where the paper covers it.
+    { /// The idea being studied: its name ("" between ideas, while the paper is read), what it is about, and where
+      /// the paper covers it.
       Name: string
       Goal: string
       Background: bool
       Section: int
-      /// The lesson the learner heard, if any.
+      /// The idea's lesson, for when the tutor hasn't said anything yet in this session.
       Lesson: Lesson option
       /// A question just answered, and the option chosen (None: "I don't know").
-      Answered: (Question * int option) option }
+      Answered: (Question * int option) option
+      /// What the tutor said last, oldest first: the lesson, a question and its options, the feedback on an answer.
+      Said: string list
+      /// The paper's sentences heard last, when the paper is being read.
+      Heard: string list }
 
-type TutorTurn = { Question: string; Answer: string }
+type TutorTurn = { Question: string; Answer: string; Followups: string list }
 
 let private questionBlock (q: Question) (choice: int option) =
     let sb = StringBuilder()
@@ -917,19 +934,25 @@ let private questionBlock (q: Question) (choice: int option) =
     | _ -> sb.Append("They said they didn't know.\n") |> ignore
     sb.ToString()
 
-/// A question to the tutor, after Ask's system prompt; the reply follows its REPLY FORMAT.
-let tutorPrompt (script: Script) (m: Moment) (history: TutorTurn list) (question: string) =
+/// The latest question to the tutor, after Ask's system prompt and the conversation so far (see `tutorMessages`);
+/// the reply follows its REPLY FORMAT.
+let tutorPrompt (script: Script) (m: Moment) (question: string) =
     let sb = StringBuilder()
     sb.Append("STUDYING NOW: the learner is in a study session on this paper: they hear it read aloud section by section, \
-               and between sections a tutor's spoken lessons and questions. Answer as that tutor, about the idea below (the \
-               HOW TO ANSWER rules apply, about this idea in place of LISTENING NOW). Build on the lesson they heard rather \
-               than repeating it.\n\n") |> ignore
-    sb.AppendFormat("Idea: \"{0}\": {1}\n", m.Name, oneLine m.Goal) |> ignore
-    if m.Background then sb.Append("Background knowledge the paper relies on (not explained in it).\n") |> ignore
-    elif m.Section > 0 && m.Section < script.Sections.Length then
-        sb.AppendFormat("In the paper: section \"{0}\".\n", script.Sections.[m.Section].Title) |> ignore
+               and between sections a tutor's spoken lessons and questions. Answer as that tutor (the HOW TO ANSWER rules \
+               apply, about the moment below in place of LISTENING NOW). The messages before this one are your \
+               conversation with the learner: build on them and on what the tutor just said aloud. Never repeat an \
+               explanation already given: if they ask about it again, explain it another way or go deeper.\n\n") |> ignore
+    if m.Name <> "" then
+        sb.AppendFormat("Idea being studied: \"{0}\": {1}\n", m.Name, oneLine m.Goal) |> ignore
+        if m.Background then sb.Append("Background knowledge the paper relies on (not explained in it).\n") |> ignore
+        elif m.Section > 0 && m.Section < script.Sections.Length then
+            sb.AppendFormat("In the paper: section \"{0}\".\n", script.Sections.[m.Section].Title) |> ignore
+    if not m.Heard.IsEmpty then
+        sb.Append("The paper is being read to them; they just heard:\n") |> ignore
+        for x in m.Heard do sb.AppendFormat("  {0}\n", x) |> ignore
     match m.Lesson with
-    | Some l when l.Explanation <> "" ->
+    | Some l when l.Explanation <> "" && m.Said.IsEmpty ->
         sb.Append("The lesson they heard:\n\"\"\"\n").Append(l.Explanation) |> ignore
         if l.Example <> "" then sb.Append("\n\nExample: ").Append(l.Example) |> ignore
         sb.Append("\n\"\"\"\n") |> ignore
@@ -937,12 +960,20 @@ let tutorPrompt (script: Script) (m: Moment) (history: TutorTurn list) (question
     match m.Answered with
     | Some (q, choice) -> sb.Append(questionBlock q choice) |> ignore
     | None -> ()
-    if not history.IsEmpty then
-        sb.Append("\nEarlier in this session, about this idea:\n") |> ignore
-        for t in history |> List.rev |> List.truncate 4 |> List.rev do
-            sb.AppendFormat("Q: {0}\nA: {1}\n", t.Question, t.Answer) |> ignore
+    if not m.Said.IsEmpty then
+        sb.Append("\nWHAT THE TUTOR JUST SAID ALOUD (oldest first; \"this\", \"that\" and \"the answer\" usually mean the last of it):\n") |> ignore
+        for x in m.Said do sb.Append("\"\"\"\n").Append(x.Trim()).Append("\n\"\"\"\n") |> ignore
     sb.Append("\nQUESTION: ").Append(question) |> ignore
     sb.ToString()
+
+/// The whole request: the paper, the conversation (the latest turns, as turns), and the question.
+let tutorMessages (settings: Settings) (script: Script) (k: Help.Knowledge) (m: Moment) (history: TutorTurn list) (question: string) =
+    [ yield "system", Help.systemPrompt settings script k
+      for t in history |> List.rev |> List.truncate 6 |> List.rev do
+          yield "user", t.Question
+          // with the reply's tail, so the model keeps writing it
+          yield "assistant", sprintf "%s\n---\nSHOW: none\nNEXT: %s" t.Answer (String.Join(" | ", t.Followups))
+      yield "user", tutorPrompt script m question ]
 
 /// The one-tap questions to the tutor: about the lesson, or about a question answered wrong.
 let tutorTaps (answeredWrong: bool) =
@@ -1009,6 +1040,18 @@ let parseMatches (text: string) : (string * string) list =
     [ for m in Regex.Matches(text, @"\b(c\w+)\s*(?:=|->|:)\s*(k\d+)\b", RegexOptions.IgnoreCase) ->
           m.Groups.[1].Value.ToLowerInvariant(), m.Groups.[2].Value.ToLowerInvariant() ]
 
+/// The voice the tutor speaks with, when none is chosen yet: another of the preset voices in the narrator's language,
+/// another speaker if there is one, so the tutor never sounds like the paper.
+let tutorVoice (narrator: string) (voices: Mistral.Voice list) : Mistral.Voice option =
+    let parts (id: string) = id.Split('_')
+    let language (id: string) = (parts id).[0]
+    let speaker (id: string) = let p = parts id in if p.Length > 1 then p.[1] else id
+    let others = voices |> List.filter (fun v -> v.Id <> narrator && language v.Id = language narrator)
+    others
+    |> List.tryFind (fun v -> speaker v.Id <> speaker narrator && v.Id.EndsWith "_neutral")
+    |> Option.orElse (others |> List.tryFind (fun v -> speaker v.Id <> speaker narrator))
+    |> Option.orElse (List.tryHead others)
+
 // ---------------------------------------------------------------------------------------------
 // Asking the model
 // ---------------------------------------------------------------------------------------------
@@ -1063,7 +1106,7 @@ let askTutor (settings: Settings) (script: Script) (k: Help.Knowledge) (m: Momen
              (onText: string -> unit) (ct: CancellationToken) : Task<Help.Reply> =
     task {
         let! text =
-            Mistral.chatStream settings.MistralApiKey settings.HelpModel (withPaper settings script k (tutorPrompt script m history question))
+            Mistral.chatStream settings.MistralApiKey settings.HelpModel (tutorMessages settings script k m history question)
                 (effort settings (if quick then "low" else "high")) (Help.visibleAnswer >> onText) ct
         let reply = Help.parseReply script text
         if reply.Answer = "" then failwith "The model sent an empty answer. Try again."
@@ -1168,6 +1211,7 @@ let saveProgress (p: Store.Paths) (id: string) (s: Progress) =
         list "reported" s.Reported
         w.WriteString("matched", s.Matched.ToString("o"))
         w.WriteNumber("heard", s.Heard)
+        w.WriteString("at", s.At)
         w.WriteEndObject()
         w.Flush()
     File.Move(path + ".tmp", path, true)
@@ -1203,5 +1247,9 @@ let loadProgress (p: Store.Paths) (id: string) : Progress option =
               Heard =
                 match e.TryGetProperty "heard" with
                 | true, h when h.ValueKind = JsonValueKind.Number -> h.GetInt32()
-                | _ -> 0 }
+                | _ -> 0
+              At =
+                match e.TryGetProperty "at" with
+                | true, a when a.ValueKind = JsonValueKind.String -> a.GetString()
+                | _ -> "" }
     with _ -> None

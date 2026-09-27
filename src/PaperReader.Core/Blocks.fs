@@ -14,6 +14,8 @@ type ImageSource =
     | Data of byte[]
     /// An address to download it from (a web page's picture), fetched at import.
     | Link of string
+    /// An area of a PDF page (a figure OCR found), cut out of the PDF when the paper's images are drawn.
+    | Region of PageRect
 
 [<RequireQualifiedAccess>]
 type Block =
@@ -209,7 +211,7 @@ let private substantial (latex: string) =
 // Blocks to units and visuals
 // ---------------------------------------------------------------------------------------------
 
-let private tagRx = Regex(@"\\tag\*?\{([^}]*)\}", RegexOptions.Compiled)
+let private tagRx = Regex(@"\\tag\*?\s*\{([^}]*)\}", RegexOptions.Compiled)
 let private numberedHeadingRx = Regex(@"^((\d{1,2}(\.\d{1,2})*|[A-Z](\.\d{1,2})*)\.?)\s+(.*)$", RegexOptions.Compiled)
 let private chapterRx = Regex(@"^(chapter|part|book|section|appendix|lesson|unit|slide)\b", RegexOptions.Compiled ||| RegexOptions.IgnoreCase)
 
@@ -248,6 +250,7 @@ let analyze (doc: Document) : Analysis * (string * Picture) list =
     let paged = doc.Blocks |> List.exists (fun b -> b = Block.Break)
     let mutable page = 0
     let mutable started = false // the document has content on the current page
+    let mutable breaks = 0
     let mutable chars = 0
     let usedIds = Collections.Generic.HashSet<string>()
     let mutable pictureCount = 0
@@ -302,7 +305,9 @@ let analyze (doc: Document) : Analysis * (string * Picture) list =
     for b in doc.Blocks do
         match b with
         | Block.Break ->
-            if paged && started then page <- page + 1
+            // every break starts a page, even after an empty one; a leading break doesn't
+            if paged && (started || breaks > 0) then page <- page + 1
+            breaks <- breaks + 1
             started <- false
         | Block.Heading (_, text) ->
             let text = MathText.tidy text
@@ -318,7 +323,7 @@ let analyze (doc: Document) : Analysis * (string * Picture) list =
         | Block.Item text -> addText text None
         | Block.Math (latex, number) ->
             let number = number |> Option.orElse (let m = tagRx.Match latex in if m.Success then Some(m.Groups.[1].Value.Trim()) else None)
-            let latex = (tagRx.Replace(latex, "")).Trim()
+            let latex = MathText.compactLatex ((tagRx.Replace(latex, "")).Trim())
             if latex <> "" then
                 let id = sprintf "E%d" (counter + 1)
                 visuals.Add { Id = id; Kind = VisualKind.Equation; Page = page; Parts = [||]; EqNumber = number; RawText = latex; Latex = Some latex }
@@ -339,6 +344,14 @@ let analyze (doc: Document) : Analysis * (string * Picture) list =
                 let text = if alt <> "" then "Picture: " + MathText.tidy alt else "Picture."
                 addUnit UnitKind.Sentence text (SpeechText.forSpeech (if alt <> "" then text else "A picture is shown.")) (Some id) true "S" |> ignore
                 advance text
+        | Block.Image (Region r, _, caption) ->
+            let number = Ocr.captionOf caption |> Option.filter (fun (k, _) -> k = VisualKind.Figure) |> Option.map snd
+            let id = visualId VisualKind.Figure number
+            visuals.Add { Id = id; Kind = VisualKind.Figure; Page = r.Page; Parts = [| r |]; EqNumber = number
+                          RawText = (if caption <> "" then caption else "Picture"); Latex = None }
+            if caption <> "" then addText caption (Some id)
+            else addUnit UnitKind.Sentence "Picture." (SpeechText.forSpeech "A picture is shown.") (Some id) true "S" |> ignore
+            advance caption
         | Block.Image (Link _, _, caption) ->
             // not fetched (see resolveImages): the caption is still read
             if caption <> "" then addText caption None

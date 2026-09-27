@@ -4,7 +4,7 @@ module PaperReader.Core.Ocr
 open System
 open System.Text.RegularExpressions
 
-let private tagRx = Regex(@"\\tag\*?\{[^}]*\}", RegexOptions.Compiled)
+let private tagRx = Regex(@"\\tag\*?\s*\{[^}]*\}", RegexOptions.Compiled)
 let private mathRx = Regex(@"\$\$(.+?)\$\$|\\\[(.+?)\\\]|\\\((.+?)\\\)|\$(.+?)\$", RegexOptions.Compiled ||| RegexOptions.Singleline)
 
 /// The formula without display delimiters or an equation-number tag.
@@ -123,70 +123,74 @@ let captionOf (text: string) : (VisualKind * string) option =
 let figureId (kind: VisualKind) (number: string) =
     (if kind = VisualKind.Table then "Tab" else "Fig") + number
 
-let private union (rs: PageRect list) =
-    let x0 = rs |> List.map (fun r -> r.X) |> List.min
-    let y0 = rs |> List.map (fun r -> r.Y) |> List.min
-    let x1 = rs |> List.map (fun r -> r.X + r.W) |> List.max
-    let y1 = rs |> List.map (fun r -> r.Y + r.H) |> List.max
-    { rs.Head with X = x0; Y = y0; W = x1 - x0; H = y1 - y0 }
+/// The figures and tables on one OCR page: each numbered caption with the blocks it captions. A figure is the
+/// images between its caption and the caption (or page top) above it, with any sub-captions among them; a
+/// table is the table block nearest its caption. Coordinates are the page image's pixels.
+let figureGroups (page: Mistral.OcrPage) : (Mistral.OcrBlock * VisualKind * string * Mistral.OcrBlock list) list =
+    let captions =
+        page.Blocks
+        |> List.choose (fun b -> if b.Kind = "caption" then captionOf b.Content |> Option.map (fun (k, n) -> b, k, n) else None)
+        |> List.sortBy (fun (b, _, _) -> b.Y0)
+    let claimed = Collections.Generic.HashSet<Mistral.OcrBlock>(HashIdentity.Reference)
+    let mid (b: Mistral.OcrBlock) = (b.Y0 + b.Y1) / 2.0
+    [ for (i, (cb, kind, number)) in List.indexed captions do
+          let above = captions |> List.take i |> List.map (fun (b, _, _) -> b.Y1) |> List.fold max 0.0
+          // how far 2 pt is in page pixels
+          let slack = 2.0 * page.Height / 792.0
+          let content =
+              match kind with
+              | VisualKind.Table ->
+                  page.Blocks
+                  |> List.filter (fun b -> b.Kind = "table" && not (claimed.Contains b))
+                  |> List.sortBy (fun b -> min (abs (b.Y0 - cb.Y1)) (abs (cb.Y0 - b.Y1)))
+                  |> List.truncate 1
+              | _ ->
+                  let images =
+                      page.Blocks
+                      |> List.filter (fun b -> b.Kind = "image" && not (claimed.Contains b) && mid b >= above && mid b <= cb.Y0 + slack)
+                  match images with
+                  | [] -> []
+                  | _ ->
+                      let top = images |> List.map (fun b -> b.Y0) |> List.min
+                      // sub-captions ("(a) …", panel titles) between the images and the caption
+                      let subCaptions =
+                          page.Blocks
+                          |> List.filter (fun b ->
+                              b.Kind = "caption" && not (obj.ReferenceEquals(b, cb)) && (captionOf b.Content).IsNone
+                              && b.Y0 >= top - 10.0 * slack && b.Y1 <= cb.Y0 + slack)
+                      images @ subCaptions
+          if not content.IsEmpty then
+              for b in content do claimed.Add b |> ignore
+              yield cb, kind, number, content ]
 
-/// Figures and tables with their captions, from OCR's image, table and caption blocks. A figure is the
-/// images between its caption and the caption (or page top) above it, with any sub-captions among them;
-/// a table is the table block nearest its caption. The region includes the caption.
+/// The region of a page (in points) that OCR blocks cover, with a little margin. `size` is the page's crop box.
+let region (page: Mistral.OcrPage) (size: float * float) (blocks: Mistral.OcrBlock list) : PageRect =
+    let pw, ph = size
+    let sx, sy = pw / page.Width, ph / page.Height
+    let pad = 4.0
+    let x0 = max 0.0 ((blocks |> List.map (fun b -> b.X0) |> List.min) * sx - pad)
+    let y0 = max 0.0 ((blocks |> List.map (fun b -> b.Y0) |> List.min) * sy - pad)
+    let x1 = min pw ((blocks |> List.map (fun b -> b.X1) |> List.max) * sx + pad)
+    let y1 = min ph ((blocks |> List.map (fun b -> b.Y1) |> List.max) * sy + pad)
+    { Page = page.Index; X = x0; Y = y0; W = x1 - x0; H = y1 - y0 }
+
+/// Figures and tables with their captions, from OCR's image, table and caption blocks (see figureGroups).
+/// The region includes the caption.
 let figures (pages: Mistral.OcrPage list) (sizes: (float * float)[]) : Visual list =
     let seen = Collections.Generic.HashSet<string>()
     [ for page in pages |> List.sortBy (fun p -> p.Index) do
           if page.Index < sizes.Length && page.Width > 0.0 && page.Height > 0.0 then
-              let pw, ph = sizes.[page.Index]
-              let sx, sy = pw / page.Width, ph / page.Height
-              let rect (b: Mistral.OcrBlock) = { Page = page.Index; X = b.X0 * sx; Y = b.Y0 * sy; W = (b.X1 - b.X0) * sx; H = (b.Y1 - b.Y0) * sy }
-              let blocks = page.Blocks |> List.map (fun b -> b, rect b)
-              let captions =
-                  blocks
-                  |> List.choose (fun (b, r) -> if b.Kind = "caption" then captionOf b.Content |> Option.map (fun (k, n) -> b, r, k, n) else None)
-                  |> List.sortBy (fun (_, r, _, _) -> r.Y)
-              let claimed = Collections.Generic.HashSet<Mistral.OcrBlock>(HashIdentity.Reference)
-              for (i, (cb, cr, kind, number)) in List.indexed captions do
-                  let above = captions |> List.take i |> List.map (fun (_, r, _, _) -> r.Y + r.H) |> List.fold max 0.0
-                  let content =
-                      match kind with
-                      | VisualKind.Table ->
-                          blocks
-                          |> List.filter (fun (b, _) -> b.Kind = "table" && not (claimed.Contains b))
-                          |> List.sortBy (fun (_, r) -> min (abs (r.Y - (cr.Y + cr.H))) (abs (cr.Y - (r.Y + r.H))))
-                          |> List.truncate 1
-                      | _ ->
-                          let images =
-                              blocks
-                              |> List.filter (fun (b, r) ->
-                                  b.Kind = "image" && not (claimed.Contains b) && r.Y + r.H / 2.0 >= above && r.Y + r.H / 2.0 <= cr.Y + 2.0)
-                          match images with
-                          | [] -> []
-                          | _ ->
-                              let top = images |> List.map (fun (_, r) -> r.Y) |> List.min
-                              // sub-captions ("(a) …", panel titles) between the images and the caption
-                              let subCaptions =
-                                  blocks
-                                  |> List.filter (fun (b, r) ->
-                                      b.Kind = "caption" && not (obj.ReferenceEquals(b, cb)) && (captionOf b.Content).IsNone
-                                      && r.Y >= top - 20.0 && r.Y + r.H <= cr.Y + 2.0)
-                              images @ subCaptions
-                  if not content.IsEmpty then
-                      for (b, _) in content do claimed.Add b |> ignore
-                      let id = figureId kind number
-                      if seen.Add id then
-                          let r = union (cr :: (content |> List.map snd))
-                          let pad = 4.0
-                          let x0, y0 = max 0.0 (r.X - pad), max 0.0 (r.Y - pad)
-                          let x1, y1 = min pw (r.X + r.W + pad), min ph (r.Y + r.H + pad)
-                          yield
-                              { Id = id
-                                Kind = kind
-                                Page = page.Index
-                                Parts = [| { r with X = x0; Y = y0; W = x1 - x0; H = y1 - y0 } |]
-                                EqNumber = Some number
-                                RawText = cb.Content
-                                Latex = None } ]
+              for (cb, kind, number, content) in figureGroups page do
+                  let id = figureId kind number
+                  if seen.Add id then
+                      yield
+                          { Id = id
+                            Kind = kind
+                            Page = page.Index
+                            Parts = [| region page sizes.[page.Index] (cb :: content) |]
+                            EqNumber = Some number
+                            RawText = cb.Content
+                            Latex = None } ]
 
 /// Points each figure's or table's caption sentence at its image.
 let linkCaptions (figures: Visual list) (units: SourceUnit[]) =

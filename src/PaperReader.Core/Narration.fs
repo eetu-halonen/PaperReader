@@ -140,14 +140,14 @@ let systemPrompt = """You write the narration script for a phone app that reads 
 
 You receive the text of part of a document as numbered source units in reading order. DOCUMENT TYPE says what kind of document it is and how its text was read; fit the narration to it (a paper, a novel, a slide deck and a how-to guide are read differently, but always faithfully).
 - [T#] the title, [H#] a section heading (in slides, a slide title; in a book, a chapter title),
-- [S#] a sentence. Text extracted from a PDF garbles inline math: subscripts appear as x_{i}, superscripts as x^{2}, symbols may be missing or odd. Other documents give inline math as $LaTeX$.
-- [E#] a display equation. Its image is attached right after it; the extracted text is only a rough hint, LaTeX (when given) is usually exact.
+- [S#] a sentence. Text extracted from a PDF's layout garbles inline math: subscripts appear as x_{i}, superscripts as x^{2}, symbols may be missing or odd. Documents read by OCR, and other documents, give inline math as $LaTeX$, which is exact.
+- [E#] a display equation. Given as LaTeX, it is exact: OCR read it from the page the listener sees. Given as extracted text, the text is only a rough hint and the equation's image is attached right after it.
 - [S#] marked CAPTION of Figure N or Table N, or PICTURE / TABLE without a number: the image is attached right after it.
 
 Write segments that narrate every unit, in order. Rules:
 1. Be faithful. Narrate every sentence; do not summarise, skip, reorder, or add claims. Rephrase only as much as needed for listening; keep the authors' wording otherwise.
-2. Read inline math the way a lecturer says it aloud: "x sub i", "theta transpose x", "the norm of w, squared", "the sum over i from 1 to n of ...". Use the context to repair garbled extraction.
-3. For each [E#] write one segment (or a few) with "src" and "show" set to that id. Start with "Equation N." if it is numbered (never read the number in brackets); for an unnumbered one just say what it states. Then say what it states: read it fully in words when it is short; when it is long, walk through it clearly, left side then right side, without skipping terms. Use the image; trust it over the extracted text.
+2. Read inline math the way a lecturer says it aloud: "x sub i", "theta transpose x", "the norm of w, squared", "the sum over i from 1 to n of ...". Use the context to repair garbled extracted text, but read $LaTeX$ as it is written.
+3. For each [E#] write one segment (or a few) with "src" and "show" set to that id. Start with "Equation N." if it is numbered (never read the number in brackets); for an unnumbered one just say what it states. Then say what it states: read it fully in words when it is short; when it is long, walk through it clearly, left side then right side, without skipping terms. When LaTeX is given, read exactly that formula: never change, add or drop a symbol, index, exponent or term because you expect something else, even if it looks unusual. Only for extracted text, use the image and trust it over the text.
    For an ALGORITHM unit: read its caption, then walk through the steps in order, briefly, reading the math in words.
    For a CODE LISTING: say in a sentence what the code does, then walk through its main steps in words; never read out punctuation or symbols one by one.
 4. When a sentence explains or refers to an equation (for example "where x is ..." right after it, or "as in Equation 3"), set "show" to that equation's id so the listener can look at it. Likewise, when a sentence refers to a figure or table ("Figure 2 shows", "see Table 3"), set "show" to its id (Fig2, Tab3). Earlier ones are listed under KNOWN EQUATIONS AND FIGURES.
@@ -218,7 +218,7 @@ let private label (u: SourceUnit) (visuals: Collections.Generic.IDictionary<stri
             | None -> " unnumbered"
         match u.Visual |> Option.bind (fun v -> match visuals.TryGetValue v with | true, x -> x.Latex | _ -> None) with
         | Some latex ->
-            sprintf "[%s] EQUATION%s. LaTeX: %s\n(image of %s follows)" u.Id num (latex.Replace("\n", @" \\ ")) u.Id
+            sprintf "[%s] EQUATION%s. LaTeX (exact): %s" u.Id num (latex.Replace("\n", @" \\ "))
         | None -> sprintf "[%s] EQUATION%s. Extracted text: %s\n(image of %s follows)" u.Id num (u.Text.Replace("\n", " ")) u.Id
 
 let private cleanSay (s: string) =
@@ -326,7 +326,9 @@ let buildWithMistral
                         let withImage =
                             match u.Visual with
                             | Some v when visuals.ContainsKey v ->
-                                u.Kind = UnitKind.Equation || visuals.[v].Kind = VisualKind.Figure || visuals.[v].Kind = VisualKind.Table
+                                // an equation given as LaTeX goes without its image: the LaTeX is what is shown
+                                (u.Kind = UnitKind.Equation && not (visuals.[v].Kind = VisualKind.Equation && visuals.[v].Latex.IsSome))
+                                || visuals.[v].Kind = VisualKind.Figure || visuals.[v].Kind = VisualKind.Table
                             | _ -> false
                         match u.Visual with
                         | Some v when withImage ->

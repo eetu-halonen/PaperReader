@@ -231,6 +231,18 @@ let private latexSilent =
     set [ "left"; "right"; "big"; "Big"; "bigg"; "Bigg"; "bigl"; "bigr"; "Bigl"; "Bigr"; "biggl"; "biggr"; "middle"; "limits"; "nolimits"
           "nonumber"; "notag"; "label"; "tag"; "begin"; "end"; "hline"; "centering"; "displaystyle"; "textstyle"; "scriptstyle" ]
 
+let private textArgRx = RegularExpressions.Regex(@"\\(?:text|textrm|textit|textbf|mathrm|mathit|mathbf|operatorname|mbox)\s*\{[^{}]*\}", RegularExpressions.RegexOptions.Compiled)
+let private looseRx = RegularExpressions.Regex(@"(?<!\\[A-Za-z]*)(?<=[A-Za-z0-9.])\s+(?=[A-Za-z0-9.])", RegularExpressions.RegexOptions.Compiled)
+
+/// LaTeX without the spaces OCR puts between the letters and digits of one word or number
+/// ("p o s / 1 0 0 0 0" is "pos / 10000"): in math they mean nothing, but a reader would spell them out.
+/// Spaces inside \text{…} are kept, and so is the one after a command (\cdot x).
+let compactLatex (latex: string) =
+    let kept = Collections.Generic.List<string>()
+    let masked = textArgRx.Replace(latex, fun (m: RegularExpressions.Match) -> kept.Add m.Value; sprintf "\u0001%d\u0002" (kept.Count - 1))
+    let compact = looseRx.Replace(masked, "")
+    RegularExpressions.Regex.Replace(compact, "\u0001(\\d+)\u0002", fun (m: RegularExpressions.Match) -> kept.[int m.Groups.[1].Value])
+
 type private LatexToken =
     | Command of string
     | Open

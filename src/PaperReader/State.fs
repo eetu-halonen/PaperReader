@@ -200,15 +200,18 @@ type StudyState =
       /// The session goes on by itself; false when the learner paused it.
       Running: bool
       Voice: Voice option
-      /// What the tutor was saying before answering a question in the tutor panel, to go back to.
+      /// What the tutor was saying when the Ask panel opened, to go back to when it closes.
       Aside: Voice option
       Ear: Ear
       /// Answers to the question on screen that weren't heard or understood.
       Tries: int
       /// What the learner said last.
       Heard: string
-      /// What the conversation with the tutor is about (an idea of the plan, or the learner's idea), and the conversation.
-      ChatAbout: string
+      /// What the tutor said last (a few things, oldest first), so a question to it can be about any of them.
+      Said: string list
+      /// The tutor comes in after the paper: its next words start with its sound.
+      Cue: bool
+      /// The conversation with the tutor in this session.
       Chat: Study.TutorTurn list
       Followups: string list
       /// A question to the tutor on its way: its id, the question, and the answer so far.
@@ -244,6 +247,8 @@ type ReaderState =
       Error: string option
       Finished: bool
       ShowOutline: bool
+      /// The menu with the rest of the reader (contents, equations, cards, the tutor, settings) is open.
+      ShowMenu: bool
       /// The equations list is open.
       ShowEquations: bool
       /// The visual shown full screen, if any.
@@ -324,6 +329,8 @@ type Model =
       MakeError: string option
       /// A review session, shown over any screen.
       Review: ReviewState option
+      /// The minute it is, so what is due (the Review buttons) is worked out again as cards come back.
+      Clock: DateTime
       /// The paper whose cards are listed on the Learn screen.
       LearnOpen: string option
       /// What the learner knows across papers (Study), by id.
@@ -358,11 +365,16 @@ type Msg =
     | CycleSpeed
     | JumpToSegment of int
     | Tick of positionMs: int
+    /// A minute has passed: cards and ideas may have come due.
+    | Minute
     | ClipEnded of generation: int
+    /// The sound before the paper goes on (after the tutor) has been played.
+    | CueEnded of generation: int
     | ClipReady of paperId: string * voiceKey: string * index: int * durationMs: int
     | ClipFailed of paperId: string * index: int * message: string
     | PlayerFailed of string
     | ToggleOutline
+    | ToggleMenu
     /// Opens the full-screen view of the equation on screen, or closes it.
     | ToggleZoom
     | ZoomVisual of string
@@ -371,8 +383,6 @@ type Msg =
     | ToggleEquations
     | SetStopAtEquations of bool
     | SetStopAtFigures of bool
-    /// Switches the reader between the full player and the simple walking one.
-    | SetWalking of bool
     | SetShowSettings of bool
     | SetApiKey of string
     | SetNarration of bool
@@ -380,6 +390,8 @@ type Msg =
     | SetMistralVoice of bool
     | UsePhoneVoice
     | PickVoice of Mistral.Voice
+    /// The tutor's voice in Study.
+    | PickTutorVoice of Mistral.Voice
     | LoadVoices
     | VoicesLoaded of Result<Mistral.Voice list, string>
     | Dismiss
@@ -639,6 +651,17 @@ let private play (r: ReaderState) (settings: Settings) : ReaderState * Cmd<Msg> 
     else
         { r with Waiting = true }, Cmd.batch [ stopAudio; moveSynth r.Current; playbackState r true ]
 
+/// Plays a short sound, then the clip at the reader's current position (see CueEnded). Waiting meanwhile, so the
+/// sound's position isn't taken for the clip's.
+let private playAfterCue (r: ReaderState) (cue: string) : ReaderState * Cmd<Msg> =
+    let gen = r.Generation + 1
+    let r = { r with Playing = true; Waiting = true; Finished = false; Generation = gen; Held = None }
+    let start =
+        Cmd.ofEffect (fun dispatch ->
+            if File.Exists cue then (platform ()).Player.Play(cue, 0, 1.0, (fun () -> dispatch (CueEnded gen)), (fun _ -> dispatch (CueEnded gen)))
+            else dispatch (CueEnded gen))
+    r, Cmd.batch [ start; moveSynth r.Current; playbackState r true ]
+
 let private pause (r: ReaderState) : ReaderState * Cmd<Msg> =
     let offset = if r.Playing && not r.Waiting then (platform ()).Player.PositionMs else r.Offset
     { r with Playing = false; Waiting = false; Offset = offset; Generation = r.Generation + 1 },
@@ -691,6 +714,7 @@ let init () : Model * Cmd<Msg> =
       Made = None
       MakeError = None
       Review = None
+      Clock = DateTime.UtcNow
       LearnOpen = None
       Concepts = (try Store.loadConcepts (paths ()) with _ -> []) |> List.map (fun c -> c.Id, c) |> Map.ofList
       StudyOnOpen = None
@@ -973,6 +997,20 @@ let private rematch (settings: Settings) (r: ReaderState) (plan: Study.Plan) (pr
                 with _ -> () // tried again next time
             })
 
+/// Chooses the tutor's voice the first time Study opens (a Mistral voice, with a key).
+let private pickTutorVoice (model: Model) : Cmd<Msg> =
+    let settings = model.Settings
+    if settings.TutorVoiceId <> "" || not (Settings.hasKey settings && settings.UseMistralVoice) then Cmd.none
+    else
+        let known = model.Voices
+        background (fun dispatch ->
+            task {
+                try
+                    let! voices = if known.IsEmpty then Mistral.listVoices settings.MistralApiKey CancellationToken.None else Task.FromResult known
+                    Study.tutorVoice settings.VoiceId voices |> Option.iter (PickTutorVoice >> dispatch)
+                with _ -> () // the narrator's voice meanwhile; tried again next time
+            })
+
 /// Starts writing the lessons of the idea being taught and the next ones, two at a time.
 let private prefetch (settings: Settings) (r: ReaderState) (s: StudyState) (concepts: Map<string, Concept>) : StudyState * Cmd<Msg> =
     match s.Plan with
@@ -993,12 +1031,26 @@ let private prefetch (settings: Settings) (r: ReaderState) (s: StudyState) (conc
 /// Making the clips of what the tutor is saying; cancelled when it says something else.
 let mutable private voiceCancel = new CancellationTokenSource()
 
+/// The tutor speaks with its own voice (Settings), so it is clear who is talking: the paper or the tutor.
+let private tutorSettings (settings: Settings) =
+    if settings.TutorVoiceId = "" then settings else { settings with VoiceId = settings.TutorVoiceId }
+
+/// The short sounds between the paper and the tutor: the tutor coming in (rising), and the paper going on (falling).
+let private cuePath (tutor: bool) =
+    let path = Path.Combine((platform ()).DataDir, (if tutor then "cue-tutor-v1.wav" else "cue-paper-v1.wav"))
+    if not (File.Exists path) then
+        try Wav.writeNotes path (if tutor then [ 523.25, 90; 659.25, 90; 783.99, 170 ] else [ 783.99, 90; 523.25, 170 ]) with _ -> ()
+    path
+
+/// The tutor's sound, at the start of what it says after the paper (an empty clip: nothing to synthesize).
+let private tutorCue: Study.Said = { Show = ""; Say = "" }
+
 let private clipPath (settings: Settings) (paperId: string) (say: string) =
-    (paths ()).StudyAudio(paperId, Settings.voiceKey settings, say)
+    if say = "" then cuePath true else (paths ()).StudyAudio(paperId, Settings.voiceKey (tutorSettings settings), say)
 
 /// Makes the clips not made yet, two at a time in order, and tells `voice` (if any) as each is ready.
 let private makeClips (settings: Settings) (paperId: string) (voice: Guid option) (said: Study.Said list) (ct: CancellationToken) : Cmd<Msg> =
-    match engineFor settings with
+    match engineFor (tutorSettings settings) with
     | None -> Cmd.none
     | Some engine ->
         background (fun dispatch ->
@@ -1007,7 +1059,7 @@ let private makeClips (settings: Settings) (paperId: string) (voice: Guid option
                 let one (i: int) (x: Study.Said) : Task =
                     task {
                         let path = clipPath settings paperId x.Say
-                        if not (File.Exists path) then
+                        if x.Say <> "" && not (File.Exists path) then
                             do! gate.WaitAsync(ct)
                             try
                                 try
@@ -1125,10 +1177,9 @@ let private chimePath () = Path.Combine((platform ()).DataDir, "chime-v1.wav")
 
 // ----- the session
 
-/// A question with its options in a fresh order, so where the right one sits gives nothing away.
+/// A question, its options in their order (mixed, and the same each time it is asked).
 let private newQuiz (idea: string option) (concept: string option) (purpose: QuizPurpose) (q: Question) =
-    let order = [ 0 .. q.Options.Length - 1 ] |> List.sortBy (fun _ -> Random.Shared.Next())
-    { Idea = idea; Concept = concept; Purpose = purpose; Question = q; Order = order; Choice = None; Spoken = false; Before = None }
+    { Idea = idea; Concept = concept; Purpose = purpose; Question = q; Order = Study.optionOrder q; Choice = None; Spoken = false; Before = None }
 
 /// A question on an idea: the lesson's first one not asked yet, else the learner's idea's one asked longest ago.
 let private questionFor (s: StudyState) (concepts: Map<string, Concept>) (idea: string option) (concept: string option) (exclude: Set<string>) =
@@ -1144,37 +1195,53 @@ let private questionFor (s: StudyState) (concepts: Map<string, Concept>) (idea: 
 let private ideaOf (s: StudyState) (concept: string) =
     s.Progress.Links |> Map.tryFindKey (fun _ c -> c = concept)
 
-/// What the conversation with the tutor is about now.
-let private chatKey (now: StudyNow) =
+let private purposeName =
+    function
+    | QuizPurpose.Check -> "check"
+    | QuizPurpose.TestOut -> "testout"
+    | QuizPurpose.QuickCheck -> "quick"
+    | QuizPurpose.Again -> "again"
+
+/// Where the session is, as kept in the progress: a lesson, or a question not answered yet (with what it is about).
+let private placeOf (now: StudyNow) =
     match now with
-    | StudyNow.Teach i -> i
-    | StudyNow.Quiz q -> q.Idea |> Option.orElse q.Concept |> Option.defaultValue ""
+    | StudyNow.Teach i -> "teach|" + i
+    | StudyNow.Quiz ({ Choice = None } as q) ->
+        String.Join("|", [ "quiz"; q.Question.Id; purposeName q.Purpose; defaultArg q.Idea ""; defaultArg q.Concept "" ])
     | _ -> ""
 
-/// Moves the session on; the conversation with the tutor stays while it is about the same idea.
+/// Moves the session on. The conversation with the tutor stays: a question may be about what came just before.
 let private goTo (now: StudyNow) (s: StudyState) =
-    let key = chatKey now
-    let s = { s with Now = now; Error = None; Tries = 0; Heard = ""; Aside = None }
-    if key = "" || key = s.ChatAbout then s
-    else { s with ChatAbout = key; Chat = []; Followups = []; Pending = None; Input = "" }
+    { s with Now = now; Error = None; Tries = 0; Heard = ""; Aside = None; Progress = { s.Progress with At = placeOf now } }
 
-/// The tutor says something, then `next`. What it was saying, and the microphone, stop.
+/// The tutor says something, then `next`. What it was saying, and the microphone, stop. After the paper, it starts
+/// with its sound.
 let private say (settings: Settings) (r: ReaderState) (s: StudyState) (said: Study.Said list) (next: Then) : StudyState * Cmd<Msg> =
     voiceCancel.Cancel()
     voiceCancel <- CancellationTokenSource.CreateLinkedTokenSource s.Cancel.Token
     stopEar ()
     let id = Guid.NewGuid()
+    let said = if s.Cue && not said.IsEmpty then tutorCue :: said else said
     let ready =
         said
         |> List.indexed
         |> List.choose (fun (i, x) -> let path = clipPath settings r.Paper.Id x.Say in if File.Exists path then Some(i, path) else None)
         |> Map.ofList
     let v = { Id = id; Said = said; At = 0; Offset = 0; Ready = ready; Playing = s.Running; Then = next }
-    let s = { s with Voice = Some v; Ear = Ear.Off }
-    if said.IsEmpty then s, Cmd.ofMsg (StudyClipEnded(id, 0))
+    // what it says, kept for questions about it: the text on screen, or the words said when nothing is shown
+    let text = said |> List.map (fun x -> if x.Show <> "" then x.Show else x.Say) |> List.filter ((<>) "") |> String.concat " "
+    let s =
+        { s with
+            Voice = Some v
+            Ear = Ear.Off
+            Cue = false
+            Said = (if text = "" then s.Said else s.Said @ [ text ] |> List.rev |> List.truncate 4 |> List.rev) }
+    // kept at every step, so the session comes back to the same place
+    let keep = saveStudy r.Paper.Id s.Progress
+    if said.IsEmpty then s, Cmd.batch [ keep; Cmd.ofMsg (StudyClipEnded(id, 0)) ]
     else
         let make = if ready.Count = said.Length then Cmd.none else makeClips settings r.Paper.Id (Some id) said voiceCancel.Token
-        s, Cmd.batch [ make; (if s.Running then Cmd.batch [ playClip settings v; tutorPlayback r s true ] else stopAudio) ]
+        s, Cmd.batch [ keep; make; (if s.Running then Cmd.batch [ playClip settings v; tutorPlayback r s true ] else stopAudio) ]
 
 /// Says a question (after `intro`), then listens for the answer.
 let private askQuiz (settings: Settings) (r: ReaderState) (s: StudyState) (intro: string) (q: Quiz) =
@@ -1206,9 +1273,11 @@ let private listen (settings: Settings) (r: ReaderState) (s: StudyState) (first:
         match here with
         | Some l -> { r with Finished = false }, l
         | None -> { r with Current = first; Offset = 0; Finished = false; Held = None }, last
-    let s = goTo (StudyNow.Listening last) { s with Voice = None; Ear = Ear.Off }
+    // after the tutor, the paper's sound first
+    let fromTutor = tutorTurn s
+    let s = goTo (StudyNow.Listening last) { s with Voice = None; Ear = Ear.Off; Cue = false }
     if s.Running then
-        let r, cmd = play r settings
+        let r, cmd = if fromTutor then playAfterCue r (cuePath false) else play r settings
         r, s, cmd
     else r, s, Cmd.batch [ stopAudio; moveSynth r.Current ]
 
@@ -1226,7 +1295,8 @@ let rec private advance (settings: Settings) (r: ReaderState) (s: StudyState) (c
     | None -> r, s, Cmd.none
     | Some plan ->
         let step, progress = Study.next DateTime.UtcNow r.Script plan s.Progress concepts s.Last
-        let s = { s with Progress = progress; Feedback = None; RecapInput = ""; Grading = false }
+        // from the paper to the tutor: its sound, so it is clear who is talking
+        let s = { s with Progress = progress; Feedback = None; RecapInput = ""; Grading = false; Cue = s.Cue || not (tutorTurn s) }
         let r, s, cmd =
             match step with
             | Study.Step.Listen (first, last) -> listen settings r s first last
@@ -1312,8 +1382,56 @@ let private clipLengths = Collections.Concurrent.ConcurrentDictionary<string, in
 
 let private clipMs (path: string) = clipLengths.GetOrAdd(path, fun p -> try Wav.durationMs p with _ -> 0)
 
+/// Back past the start of what the tutor says: from a question to the end of its lesson, and from a lesson to the end
+/// of the paper heard before it, `overshoot` ms before their end. None where there is nothing to go back to.
+let private backInto (settings: Settings) (r: ReaderState) (s: StudyState) (overshoot: int) : (ReaderState * StudyState * Cmd<Msg>) option =
+    match s.Now, s.Plan with
+    | StudyNow.Quiz ({ Choice = None; Idea = Some i } as q), Some plan when q.Purpose = QuizPurpose.Check || q.Purpose = QuizPurpose.TestOut ->
+        match plan.Idea i, s.Lessons.TryFind i with
+        | Some idea, Some lesson ->
+            let said = Study.lessonSaid idea lesson
+            let ready =
+                said
+                |> List.indexed
+                |> List.choose (fun (k, x) -> let path = clipPath settings r.Paper.Id x.Say in if File.Exists path then Some(k, path) else None)
+                |> Map.ofList
+            // from the end, back through the clips whose length is known
+            let length (k: int) = ready.TryFind k |> Option.map clipMs |> Option.filter (fun d -> d > 0)
+            let mutable at = said.Length - 1
+            let mutable left = overshoot
+            let mutable offset = -1
+            while offset < 0 do
+                match length at with
+                | Some d when d >= left -> offset <- d - left
+                | Some d when at > 0 ->
+                    left <- left - d
+                    at <- at - 1
+                | _ -> offset <- 0
+            let v = { Id = Guid.NewGuid(); Said = said; At = max 0 at; Offset = offset; Ready = ready; Playing = false; Then = Then.Question }
+            stopEar ()
+            let s = { goTo (StudyNow.Teach i) s with Voice = Some v; Ear = Ear.Off }
+            if s.Running then
+                let s, cmd = sayOn settings r s v
+                Some(r, s, cmd)
+            else Some(r, s, stopAudio)
+        | _ -> None
+    | StudyNow.Teach _, _ when s.Progress.Heard > 0 ->
+        // the paper heard last; when it ends, the tutor comes in again with this lesson
+        let last = min (s.Progress.Heard - 1) (r.Script.Segments.Length - 1)
+        let pos = Timeline.back (fun k -> r.Durations.TryFind k) overshoot { Segment = last + 1; OffsetMs = 0 }
+        voiceCancel.Cancel()
+        stopEar ()
+        let r = { r with Current = pos.Segment; Offset = pos.OffsetMs; Finished = false; Held = None }
+        let s = goTo (StudyNow.Listening last) { s with Voice = None; Ear = Ear.Off; Cue = false }
+        if s.Running then
+            let r, cmd = playAfterCue r (cuePath false)
+            Some(r, s, cmd)
+        else Some(r, s, Cmd.batch [ stopAudio; moveSynth r.Current; tutorPlayback r s false ])
+    | _ -> None
+
 /// Moves what the tutor is saying back (negative) or ahead by `deltaMs`, like the paper's 15 s buttons: going on if
-/// the session was going, staying paused if it was paused. Ahead past the end is what comes after it.
+/// the session was going, staying paused if it was paused. Ahead past the end is what comes after it; back past the
+/// start is what came before it (see backInto).
 let private seekVoice (settings: Settings) (r: ReaderState) (s: StudyState) (concepts: Map<string, Concept>) (deltaMs: int) =
     match s.Voice with
     // all said already: nothing ahead
@@ -1328,10 +1446,12 @@ let private seekVoice (settings: Settings) (r: ReaderState) (s: StudyState) (con
             else v.At, v.Offset
         let mutable at = start
         let mutable pos = pos + deltaMs
+        let mutable overshoot = 0
         if deltaMs < 0 then
             while pos < 0 && at > 0 && (length (at - 1)).IsSome do
                 at <- at - 1
                 pos <- pos + (length at).Value
+            if pos < 0 && at = 0 then overshoot <- -pos
             pos <- max 0 pos
         else
             while at <= last && (match length at with Some d -> pos >= d | None -> false) do
@@ -1339,15 +1459,19 @@ let private seekVoice (settings: Settings) (r: ReaderState) (s: StudyState) (con
                 at <- at + 1
             // a clip not made yet: from its start
             if at <= last && (length at).IsNone then pos <- 0
-        stopEar ()
-        let s = { s with Ear = Ear.Off; Tries = 0 }
-        match at > last, s.Running with
-        | true, true -> voiceDone settings r { s with Voice = Some { v with At = at; Offset = 0; Playing = false } } concepts v.Then
-        | true, false -> r, { s with Voice = Some { v with At = at; Offset = 0; Playing = false } }, stopAudio
-        | false, true ->
-            let s, cmd = sayOn settings r s { v with At = at; Offset = pos }
-            r, s, cmd
-        | false, false -> r, { s with Voice = Some { v with At = at; Offset = pos; Playing = false } }, stopAudio
+        // (not from an answer in the Ask panel: the session behind it stays where it is)
+        match (if overshoot > 0 && not s.ShowTutor then backInto settings r s overshoot else None) with
+        | Some moved -> moved
+        | None ->
+            stopEar ()
+            let s = { s with Ear = Ear.Off; Tries = 0 }
+            match at > last, s.Running with
+            | true, true -> voiceDone settings r { s with Voice = Some { v with At = at; Offset = 0; Playing = false } } concepts v.Then
+            | true, false -> r, { s with Voice = Some { v with At = at; Offset = 0; Playing = false } }, stopAudio
+            | false, true ->
+                let s, cmd = sayOn settings r s { v with At = at; Offset = pos }
+                r, s, cmd
+            | false, false -> r, { s with Voice = Some { v with At = at; Offset = pos; Playing = false } }, stopAudio
     | _ -> r, s, Cmd.none
 
 /// Goes on from where the session was paused.
@@ -1367,14 +1491,50 @@ let private resume (settings: Settings) (r: ReaderState) (s: StudyState) (concep
     | (StudyNow.Teach _ | StudyNow.Finished), None -> r, s, Cmd.none
     | _ -> advance settings r s concepts
 
-/// What the tutor has in front of it now.
-let private momentOf (s: StudyState) (concepts: Map<string, Concept>) : Study.Moment option =
-    let ofIdea (idea: Study.Idea) answered : Study.Moment =
-        { Name = idea.Name; Goal = idea.Goal; Background = idea.Background; Section = idea.Section; Lesson = s.Lessons.TryFind idea.Id; Answered = answered }
+/// Comes back to where the session was left (see placeOf): the same lesson, or the same question with its options in
+/// the same order. None when that place is done, or gone.
+let private resumeAt (settings: Settings) (r: ReaderState) (s: StudyState) (concepts: Map<string, Concept>) : (ReaderState * StudyState * Cmd<Msg>) option =
+    let s = { s with Cue = true }
+    match s.Plan, s.Progress.At.Split('|') |> List.ofArray with
+    | Some plan, [ "teach"; idea ] when (plan.Idea idea).IsSome && not (s.Progress.Done.ContainsKey idea) ->
+        let s, cmd = teach settings r s idea
+        Some(r, s, cmd)
+    | Some plan, [ "quiz"; qid; purpose; idea; concept ] ->
+        let idea = if idea = "" then None else Some idea
+        let concept = if concept = "" then None else Some concept
+        let purpose =
+            match purpose with
+            | "testout" -> QuizPurpose.TestOut
+            | "quick" -> QuizPurpose.QuickCheck
+            | "again" -> QuizPurpose.Again
+            | _ -> QuizPurpose.Check
+        let asked =
+            (idea |> Option.bind s.Lessons.TryFind |> Option.map (fun l -> l.Checks) |> Option.defaultValue [])
+            @ (concept |> Option.bind concepts.TryFind |> Option.map (fun c -> c.Questions) |> Option.defaultValue [])
+            |> List.tryFind (fun q -> q.Id = qid && not q.Options.IsEmpty)
+        let open' =
+            match purpose, idea with
+            | (QuizPurpose.Check | QuizPurpose.TestOut), Some i -> (plan.Idea i).IsSome && not (s.Progress.Done.ContainsKey i)
+            | _ -> true
+        match asked with
+        | Some q when open' && not (s.Progress.Reported.Contains q.Id) ->
+            let intro = sprintf "Where we were: a question on %s." (ideaName s concepts idea concept)
+            let s, cmd = askQuiz settings r s intro (newQuiz idea concept purpose q)
+            Some(r, s, cmd)
+        | _ -> None
+    | _ -> None
+
+/// What the tutor has in front of it now: the idea (if any), the question just answered, what it said last, and the
+/// paper just heard.
+let private momentOf (r: ReaderState) (s: StudyState) (concepts: Map<string, Concept>) : Study.Moment =
+    let empty: Study.Moment =
+        { Name = ""; Goal = ""; Background = false; Section = 0; Lesson = None; Answered = None; Said = s.Said; Heard = [] }
+    let ofIdea (idea: Study.Idea) answered =
+        { empty with Name = idea.Name; Goal = idea.Goal; Background = idea.Background; Section = idea.Section; Lesson = s.Lessons.TryFind idea.Id; Answered = answered }
     match s.Now, s.Plan with
-    | StudyNow.Teach id, Some plan -> plan.Idea id |> Option.map (fun i -> ofIdea i None)
-    | StudyNow.Quiz q, Some plan ->
-        // the options as they were shown and said (shuffled), so the tutor's letters are the learner's
+    | StudyNow.Teach id, Some plan -> plan.Idea id |> Option.map (fun i -> ofIdea i None) |> Option.defaultValue empty
+    | StudyNow.Quiz q, plan ->
+        // the options as they were shown and said (mixed), so the tutor's numbers are the learner's
         let answered =
             q.Choice
             |> Option.map (fun c ->
@@ -1382,13 +1542,19 @@ let private momentOf (s: StudyState) (concepts: Map<string, Concept>) : Study.Mo
                 let shown (xs: string list) = if xs.Length = q.Order.Length then q.Order |> List.map (fun i -> xs.[i]) else xs
                 { q.Question with Options = shown q.Question.Options; Why = shown q.Question.Why; Correct = shownAt q.Question.Correct },
                 c |> Option.map shownAt)
-        match q.Idea |> Option.bind plan.Idea with
-        | Some i -> Some(ofIdea i answered)
+        match q.Idea |> Option.bind (fun i -> plan |> Option.bind (fun p -> p.Idea i)) with
+        | Some i -> ofIdea i answered
         | None ->
-            q.Concept
-            |> Option.bind concepts.TryFind
-            |> Option.map (fun c -> { Name = c.Name; Goal = c.Definition; Background = c.Background; Section = 0; Lesson = None; Answered = answered })
-    | _ -> None
+            match q.Concept |> Option.bind concepts.TryFind with
+            | Some c -> { empty with Name = c.Name; Goal = c.Definition; Background = c.Background; Answered = answered }
+            | None -> { empty with Answered = answered }
+    | StudyNow.Recap part, Some plan when part < plan.Parts.Length ->
+        { empty with Name = plan.Parts.[part].Title; Goal = "explaining this part in their own words: " + plan.Parts.[part].Recap }
+    | (StudyNow.Listening _ | StudyNow.Starting), _ ->
+        // the paper's last sentences heard, up to the one playing
+        let upTo = min r.Current (r.Script.Segments.Length - 1)
+        { empty with Heard = [ for i in max 0 (upTo - 6) .. upTo do if r.Script.Segments.[i].Say <> "" then yield r.Script.Segments.[i].Say ] }
+    | _ -> empty
 
 let private askTutor (settings: Settings) (r: ReaderState) (s: StudyState) (moment: Study.Moment) (question: string) (quick: bool) : StudyState * Cmd<Msg> =
     let askId = Guid.NewGuid()
@@ -1591,6 +1757,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
               Error = None
               Finished = false
               ShowOutline = false
+              ShowMenu = false
               ShowEquations = false
               Zoom = None
               Stops = Narration.equationStops script
@@ -1615,15 +1782,14 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         | _ -> model, Cmd.none
     | TogglePlay when (match model.Screen with Screen.Reader r -> r.Help.IsSome | _ -> false) -> update (CloseHelp true) model
     | TogglePlay when (match model.Screen with Screen.Reader r -> r.Cards.IsSome | _ -> false) -> update (CloseCards true) model
-    | TogglePlay when
-        (match model with
-         | Studying (_, s) ->
-             s.ShowTutor && s.Ear = Ear.Off
-             && (s.Aside.IsNone || s.Voice |> Option.forall (fun v -> not v.Playing && v.At >= v.Said.Length))
-         | _ -> false)
-        ->
-        // nothing answered yet, or the answer has been said: Continue goes back to the lesson
-        update ToggleTutor model
+    | TogglePlay when (match model with Studying (_, s) -> s.ShowTutor | _ -> false) ->
+        match model with
+        | Studying (r, s) when s.Voice |> Option.exists (fun v -> v.Playing) ->
+            // the answer being said: pause it
+            let r, s, cmd = hold r s
+            setStudy model r s, cmd
+        // otherwise Continue: back to where the session was
+        | _ -> update ToggleTutor model
     | TogglePlay when (match model with Studying _ -> true | _ -> false) ->
         match model with
         | Studying (r, s) ->
@@ -1664,13 +1830,17 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         let model, go = match model.Screen with Screen.Reader r when not r.Playing -> update TogglePlay model | _ -> model, Cmd.none
         model, Cmd.batch [ close; move; go ]
     | Back15
+    | Forward15 when (match model with Studying (_, s) -> s.ShowTutor | _ -> false) ->
+        match model with
+        | Studying (r, s) when s.Voice |> Option.map (fun v -> v.Id) <> (s.Aside |> Option.map (fun v -> v.Id)) ->
+            // the answer to a question
+            let amount = int (float jumpMs * model.Settings.Speed)
+            let r, s, cmd = seekVoice model.Settings r s model.Concepts (match msg with Back15 -> -amount | _ -> amount)
+            setStudy model r s, cmd
+        | _ -> model, Cmd.none
+    | Back15
     | Forward15 when (match model with Studying (_, s) -> tutorTurn s | _ -> false) ->
         match model with
-        | Studying (_, s) when s.ShowTutor && s.Aside.IsNone ->
-            // nothing asked yet: the buttons are the lesson's, so back to it
-            let model, close = update ToggleTutor model
-            let model, move = update msg model
-            model, Cmd.batch [ close; move ]
         | Studying (r, s) ->
             let amount = int (float jumpMs * model.Settings.Speed)
             let r, s, cmd = seekVoice model.Settings r s model.Concepts (match msg with Back15 -> -amount | _ -> amount)
@@ -1716,6 +1886,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         let settings = { model.Settings with Speed = speed }
         { model with Settings = settings },
         Cmd.batch [ saveSettings settings; Cmd.ofEffect (fun _ -> (platform ()).Player.SetSpeed speed) ]
+    | Minute -> { model with Clock = DateTime.UtcNow }, Cmd.none
     | Tick position ->
         withReader model (fun r -> (if r.Playing && not r.Waiting then { r with Offset = position } else r), Cmd.none)
     | ClipEnded gen when
@@ -1772,6 +1943,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                 { r with Playing = false; Waiting = false; Finished = true; Offset = 0 },
                 Cmd.batch [ playbackState r false; saveProgress { r with Current = 0 } ])
         |> fun (m, cmd) -> m, Cmd.batch [ cmd; keep ]
+    | CueEnded gen -> withReader model (fun r -> if gen = r.Generation && r.Playing then play r model.Settings else r, Cmd.none)
     | ClipReady (paperId, key, i, d) ->
         withReader model (fun r ->
             if r.Paper.Id <> paperId || r.VoiceKey <> key then r, Cmd.none
@@ -1784,7 +1956,8 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             else r, Cmd.none)
     | PlayerFailed message ->
         withReader model (fun r -> { r with Playing = false; Waiting = false; Error = Some("Playback failed: " + message) }, playbackState r false)
-    | ToggleOutline -> withReader model (fun r -> { r with ShowOutline = not r.ShowOutline; ShowEquations = false; Zoom = None }, Cmd.none)
+    | ToggleOutline -> withReader model (fun r -> { r with ShowOutline = not r.ShowOutline; ShowEquations = false; ShowMenu = false; Zoom = None }, Cmd.none)
+    | ToggleMenu -> withReader model (fun r -> { r with ShowMenu = not r.ShowMenu; Zoom = None }, Cmd.none)
     | ToggleEquations -> withReader model (fun r -> { r with ShowEquations = not r.ShowEquations; ShowOutline = false; Zoom = None }, Cmd.none)
     | ToggleZoom ->
         withReader model (fun r ->
@@ -1794,12 +1967,11 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
     | ZoomVisual v -> withReader model (fun r -> { r with Zoom = Some v }, Cmd.none)
 
     // ----- Ask
-    | OpenHelp _ when
-        (match model with
-         | Studying (_, s) -> (match s.Now with StudyNow.Listening _ | StudyNow.Starting -> false | _ -> true)
-         | _ -> false)
-        ->
-        update ToggleTutor model
+    | OpenHelp _ when (match model with Studying _ -> true | _ -> false) ->
+        // studying, questions go to the tutor, who knows the session: the paper just heard and what it said
+        match model with
+        | Studying (_, s) when s.ShowTutor -> model, Cmd.none
+        | _ -> update ToggleTutor model
     | OpenHelp about ->
         withReader model (fun r ->
             let wasPlaying = r.Playing
@@ -2307,7 +2479,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             { model with Notice = Some "Studying needs a Mistral API key (Settings): the tutor is a model that reads the whole paper." }, Cmd.none
         | Screen.Reader r ->
             let r, pauseCmd = if r.Playing then pause r else r, Cmd.none
-            let r = { r with Cards = None; Help = None; ShowOutline = false; ShowEquations = false; Zoom = None }
+            let r = { r with Cards = None; Help = None; ShowOutline = false; ShowEquations = false; ShowMenu = false; Zoom = None }
             let p = paths ()
             let id = r.Paper.Id
             let plan = Study.loadPlan p id r.Script
@@ -2344,7 +2516,8 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                   Ear = Ear.Off
                   Tries = 0
                   Heard = ""
-                  ChatAbout = ""
+                  Said = []
+                  Cue = false
                   Chat = []
                   Followups = []
                   Pending = None
@@ -2357,17 +2530,24 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                   Error = None
                   Last = None
                   Cancel = new CancellationTokenSource() }
+            let voice = pickTutorVoice model
             match plan with
             | Some plan ->
-                let r, s, cmd = advance model.Settings r s model.Concepts
-                setStudy { model with MakeError = None } r s, Cmd.batch [ pauseCmd; cmd; rematch model.Settings r plan progress model.Concepts ]
+                // back to the lesson or question it was left at, else the next step
+                let r, s, cmd =
+                    match resumeAt model.Settings r s model.Concepts with
+                    | Some (r, s, cmd) ->
+                        let s, write = prefetch model.Settings r s model.Concepts
+                        r, s, Cmd.batch [ cmd; write ]
+                    | None -> advance model.Settings r s model.Concepts
+                setStudy { model with MakeError = None } r s, Cmd.batch [ pauseCmd; cmd; voice; rematch model.Settings r plan progress model.Concepts ]
             | None ->
                 // the paper is read aloud from the start while the tutor reads it and plans
                 let concepts = model.Concepts |> Map.toList |> List.map snd
                 let r = { r with Current = min progress.Heard (r.Script.Segments.Length - 1); Offset = 0; Finished = false; Held = None }
                 let r, playCmd = play r model.Settings
                 let s = { s with Planning = Some("Getting ready", []) }
-                setStudy { model with MakeError = None } r s, Cmd.batch [ pauseCmd; playCmd; writePlan model.Settings r concepts s.Cancel.Token ]
+                setStudy { model with MakeError = None } r s, Cmd.batch [ pauseCmd; playCmd; voice; writePlan model.Settings r concepts s.Cancel.Token ]
         | _ -> model, Cmd.none
     | StudyPaper paper ->
         match model.Screen with
@@ -2542,6 +2722,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                     | _ -> p
                 let q = { q with Choice = Some choice; Spoken = spoken; Concept = Some concept.Id; Before = Some(before, s.Progress) }
                 let concepts = model.Concepts.Add(concept.Id, concept)
+                let p = { p with At = "" }
                 let s = { s with Now = StudyNow.Quiz q; Progress = p; Last = Some concept.Id; Ear = Ear.Off; Running = true }
                 let outro =
                     match q.Purpose, right with
@@ -2595,6 +2776,11 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         | _ -> model, Cmd.none
     | StudyAgain ->
         match model with
+        | Studying (r, ({ ShowTutor = true; Voice = Some v } as s)) when Some v.Id <> (s.Aside |> Option.map (fun a -> a.Id)) ->
+            // the tutor's answer in the Ask panel, from its start
+            let s, cmd = sayOn model.Settings r s { v with At = 0; Offset = 0 }
+            setStudy model r s, cmd
+        | Studying (_, { ShowTutor = true }) -> model, Cmd.none
         | Studying (_, { Now = StudyNow.Listening _ | StudyNow.Starting }) -> update Back15 model
         | Studying (r, ({ Voice = Some v } as s)) when not v.Said.IsEmpty ->
             // what the tutor is saying, from its start
@@ -2707,16 +2893,16 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
     | ToggleTutor ->
         match model with
         | Studying (r, s) when s.ShowTutor ->
-            // back to what the tutor was saying before the questions
+            // back to what the tutor was saying (or the paper) when the panel opened, from where it was
             let r, s, stop = hold r s
-            let s = { s with ShowTutor = false; Voice = (match s.Aside with Some v -> Some v | None -> s.Voice); Aside = None }
+            let s = { s with ShowTutor = false; Voice = s.Aside; Aside = None }
             let r, s, cmd = resume model.Settings r s model.Concepts
             setStudy model r s, Cmd.batch [ stop; cmd ]
         | Studying (r, s) ->
-            // the tutor waits; the microphone opens only when its button is pressed
+            // the tutor (or the paper) waits; the microphone opens only when its button is pressed
             let r, s, cmd = hold r s
-            let s = { s with ShowTutor = true; ShowPlan = false }
-            setStudy model r s, cmd
+            let s = { s with ShowTutor = true; ShowPlan = false; Aside = s.Voice; Error = None }
+            setStudy model { r with ShowMenu = false } s, cmd
         | _ -> model, Cmd.none
     | StudyMic ->
         match model with
@@ -2736,12 +2922,9 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         | Studying (r, s) when s.Pending.IsNone && question.Trim() <> "" ->
             if not (Settings.hasKey model.Settings) then setStudy model r { s with Error = Some "Asking the tutor needs a Mistral API key (Settings)." }, Cmd.none
             else
-                match momentOf s model.Concepts with
-                | Some m ->
-                    stopEar ()
-                    let s, cmd = askTutor model.Settings r { s with Ear = Ear.Off; ShowTutor = true } m (question.Trim()) quick
-                    setStudy model r s, cmd
-                | None -> model, Cmd.none
+                stopEar ()
+                let s, cmd = askTutor model.Settings r { s with Ear = Ear.Off; ShowTutor = true } (momentOf r s model.Concepts) (question.Trim()) quick
+                setStudy model r s, cmd
         | _ -> model, Cmd.none
     | StudyAskText (askId, text) ->
         match model with
@@ -2755,13 +2938,13 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                 let s =
                     { s with
                         Pending = None
-                        Chat = s.Chat @ [ { Question = q; Answer = reply.Answer } ]
+                        Chat = s.Chat @ [ { Question = q; Answer = reply.Answer; Followups = reply.Followups } ]
                         Followups = reply.Followups
-                        Running = true
-                        Aside = (match s.Aside with Some v -> Some v | None -> s.Voice |> Option.map (fun v -> { v with Playing = false })) }
-                // the answer is said; the session waits in the panel until the learner goes on
-                let s, cmd = say model.Settings r s (Study.said reply.Answer) Then.Wait
-                setStudy model r s, cmd
+                        Running = true }
+                // the answer is said (it is in the conversation, not among what the tutor said in the session); the
+                // session waits in the panel until the learner goes on
+                let s', cmd = say model.Settings r { s with Cue = false } (Study.said reply.Answer) Then.Wait
+                setStudy model r { s' with Said = s.Said; Cue = s.Cue }, cmd
             | Error e -> setStudy model r { s with Pending = None; Error = (if e = "Cancelled." then None else Some e) }, Cmd.none
         | _ -> model, Cmd.none
     | SetStudyInput text ->
@@ -2844,9 +3027,6 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
     | SetStopAtFigures on ->
         let settings = { model.Settings with StopAtFigures = on }
         { model with Settings = settings }, saveSettings settings
-    | SetWalking on ->
-        let settings = { model.Settings with WalkingMode = on }
-        { model with Settings = settings }, saveSettings settings
     | SetTurnSideways on ->
         let settings = { model.Settings with TurnSideways = on }
         { model with Settings = settings }, saveSettings settings
@@ -2862,6 +3042,9 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         model, Cmd.batch [ saveSettings settings; cmd ]
     | PickVoice v ->
         let settings = { model.Settings with VoiceId = v.Id; VoiceName = v.Name }
+        { model with Settings = settings }, saveSettings settings
+    | PickTutorVoice v ->
+        let settings = { model.Settings with TutorVoiceId = v.Id; TutorVoiceName = v.Name }
         { model with Settings = settings }, saveSettings settings
     | LoadVoices ->
         if not (Settings.hasKey model.Settings) then { model with VoicesStatus = Some "Enter an API key first." }, Cmd.none
@@ -2884,14 +3067,13 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         else
             match model.Screen with
             | Screen.Reader r when r.Zoom.IsSome -> update ToggleZoom model
+            | Screen.Reader r when r.ShowMenu -> update ToggleMenu model
             | Screen.Reader { Study = Some s } when s.ShowTutor -> update ToggleTutor model
             | Screen.Reader { Study = Some s } when s.ShowPlan -> update ToggleStudyPlan model
             | Screen.Reader r when r.Help.IsSome -> update (CloseHelp false) model
             | Screen.Reader r when r.Cards.IsSome -> update (CloseCards false) model
             | Screen.Reader r when r.ShowOutline -> update ToggleOutline model
             | Screen.Reader r when r.ShowEquations -> update ToggleEquations model
-            // a stray back press on a walk leaves the simple player, it doesn't stop the paper
-            | Screen.Reader _ when model.Settings.WalkingMode -> update (SetWalking false) model
             | Screen.Reader _ -> update CloseReader model
             | Screen.Importing _ -> update CancelImport model
             | Screen.Discover -> update CloseDiscover model
@@ -2903,12 +3085,21 @@ let canGoBack (model: Model) =
     model.ShowSettings || model.Review.IsSome || (match model.Screen with Screen.Library -> false | _ -> true)
 
 let subscriptions (model: Model) : Sub<Msg> =
-    match model.Screen with
-    | Screen.Reader r when r.Playing && not r.Waiting ->
-        [ [ "tick" ],
+    let minute: Sub<Msg> =
+        [ [ "minute" ],
           fun (dispatch: Dispatch<Msg>) ->
-              let timer = DispatcherTimer(Interval = TimeSpan.FromMilliseconds 250.0)
-              timer.Tick.Add(fun _ -> dispatch (Tick (platform ()).Player.PositionMs))
+              let timer = DispatcherTimer(Interval = TimeSpan.FromMinutes 1.0)
+              timer.Tick.Add(fun _ -> dispatch Minute)
               timer.Start()
               { new IDisposable with member _.Dispose() = timer.Stop() } ]
-    | _ -> []
+    let playing: Sub<Msg> =
+        match model.Screen with
+        | Screen.Reader r when r.Playing && not r.Waiting ->
+            [ [ "tick" ],
+              fun (dispatch: Dispatch<Msg>) ->
+                  let timer = DispatcherTimer(Interval = TimeSpan.FromMilliseconds 250.0)
+                  timer.Tick.Add(fun _ -> dispatch (Tick (platform ()).Player.PositionMs))
+                  timer.Start()
+                  { new IDisposable with member _.Dispose() = timer.Stop() } ]
+        | _ -> []
+    minute @ playing

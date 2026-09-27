@@ -43,8 +43,10 @@ on the Linux desktop and in the browser (WebAssembly).
   Background the next section needs comes before it. An idea you got wrong comes back a few minutes later with a
   different question. At the end of each part you explain it in your own words and hear feedback. What you learn is
   remembered across papers: the next paper skips the ideas you still know and checks the fading ones with one
-  question. It works in the full player and in walking mode. The cap button in the reader shows the plan, and turns
-  the tutor off to just listen (Settings: *Study with a tutor*). See [How studying works](#how-studying-works).
+  question. It is always clear who is talking: the tutor has its own voice, a short rising sound when it comes in and a
+  falling one when the paper goes on, a *Tutor* badge and a tinted screen (the paper: a *Paper* badge). The ⋯ menu shows
+  the plan and turns the tutor off to just listen (Settings: *Study with a tutor*). See
+  [How studying works](#how-studying-works).
 - **Learn** (flashcards with spaced repetition): the cards button in the reader opens *Learn*, where one tap makes
   cards about the equation or figure on screen, what you just heard, or the section's main points, or you type what you
   want to remember ("why divide by √d_k"). *Make a deck* writes about one card per page covering the whole paper
@@ -62,15 +64,15 @@ on the Linux desktop and in the browser (WebAssembly).
   preprint servers first, since some publishers only serve their PDFs to a browser) and prepares it like an
   opened file; if no copy can be downloaded, *Web page* opens it in the browser. Both services are free and need
   no key; OpenAlex allows about 100 searches a day without one, and a free OpenAlex key (Settings) raises that.
-- **Walking mode** (the walker button in the reader, or W): a simple full-screen player for listening on the move.
-  A huge Play / Pause / Continue button at the bottom, Back 15 s, Ask and Skip 15 s above it, speed and Exit at
-  the top, and the equation or figure being discussed as large as the screen allows, with the sentence being said
-  under it (*Full screen*, or tap it, for larger). A switch under it turns *Stop at equations* (or *Stop at figures and
-  tables*) on and off. When playback stops at one, it is ringed and marked *Paused at Equation (n)*, the last
-  sentence heard stays under it, and the buttons become *Hear it again*, *Ask* and *Continue*. With the phone on its
-  side, the equation takes the left of the screen and the buttons the right. It stays on for the next paper until you
-  tap Exit; the back button leaves walking mode rather than closing the paper.
-- Controls: play/pause, back and forward 15 s, speed, contents list. Playback continues in the
+- **The player** is made for listening on the move, the same for listening and studying: a huge Play / Pause /
+  Continue button at the bottom, Back 15 s, Ask and Skip 15 s above it, and the equation or figure being discussed as
+  large as the screen allows, with the sentence being said under it (*Full screen*, or tap it, for larger). At the top:
+  who is talking (*Paper* or *Tutor*), the speed, and ⋯ for everything else: contents, equations and figures,
+  flashcards, the study plan, the tutor on or off, *Stop at equations*, *Stop at figures and tables*, and Settings.
+  When playback stops at an equation, it is ringed and marked *Paused at Equation (n)*, the last sentence heard stays
+  under it, and the buttons become *Hear it again*, *Ask* and *Continue*. With the phone on its side, the equation
+  takes the left of the screen and the buttons the right.
+- Playback continues in the
   background, with a media notification, lock-screen and headset controls; it pauses for calls
   and when headphones are unplugged.
 
@@ -236,30 +238,38 @@ A session:
    `same as known`, and one that only builds on one is marked `uses known`. Each `same as known` claim is checked by a
    second, quick call, and dropped when in doubt. A wrong match would skip something you never learned.
 2. **Listen**. The paper's narration plays as usual, up to the end of the section that covers the next ideas. A strip
-   over the player says what the tutor will go over after it. Jumping elsewhere in the paper is fine: the tutor comes
+   under the paper says what the tutor will go over after it. Jumping elsewhere in the paper is fine: the tutor comes
    in at the end of the stretch you're hearing, and still covers what you skipped.
-3. **Teach**. The tutor's lesson is spoken (Voxtral, the voice you picked), with its equation or figure on screen and
+3. **Teach**. The tutor's lesson is spoken (Voxtral, in the tutor's voice: another speaker than the paper's, chosen
+   when you first study and changeable in Settings), with its equation or figure on screen and
    the sentence being said under it. It connects to what you know ("You already know that…"), explains what the section
    meant rather than retelling it, and ends with an example. Lessons are written two ahead while you listen, and their
-   first words are spoken ahead, so the tutor starts at once. *Go to the question* asks the lesson's question first and
-   teaches it only if you get it wrong.
+   first words are spoken ahead, so the tutor starts at once. *Know it? Skip to the question* asks the lesson's question
+   first and teaches it only if you get it wrong.
 4. **Check**. One multiple-choice question, read with its three numbered options. After a chime the microphone
    listens. Say "option 2", "two", "the second one", the answer in your own words, or "I don't know"; it stops
    listening when you stop talking. Or tap an option. Options are numbered, not lettered, because transcription mixes
    up lone letters ("B" came back empty, "Bee" as "a"). The tutor says what it heard ("You said option 2"), whether it
    is right and why, and goes on; *Misheard? Answer again* under the question takes a misheard answer back. Unheard or
-   unclear answers get one reminder, then it waits for a tap. *Ask* opens the tutor, where you can type and, with the
-   microphone button, ask out loud (what you say joins what you typed); its answer is spoken, with the player's pause
-   and 15 s buttons, and *Continue* returns to where the lesson was.
+   unclear answers get one reminder, then it waits for a tap. A question's options are mixed, but always in the same
+   order for the same question, and a session left on a question comes back to that question.
 5. **Recap** at the end of each part: explain it back out loud (or type it), and hear *Got it* / *Partly there* /
    *Not yet* with feedback. Saying nothing skips it.
 6. **Known ideas**. If you studied an idea in another paper and FSRS says you still know it, it is skipped. If it is
    fading, one quick question checks it, and that counts as its review. If you've forgotten it, it is taught here.
 
-The buttons are the player's everywhere: Back 15 s and Skip 15 s move through what the tutor is saying as through the
-paper, and Pause stops the tutor, the microphone and the narration; Continue goes on from the same word. *Listen again*
-says the lesson (or question) from its start. The headset's play/pause
-button does the same. On Android the phone can be locked in a pocket: once the microphone is allowed, the playback
+**Ask**, in a session, always goes to the tutor, while the paper is read too. You can type and, with the microphone
+button, ask out loud (what you say joins what you typed), or tap a question. The tutor is given the conversation so far
+as a conversation, what it said last (the lesson, the question and its options, the feedback on your answer, even when
+the session has moved on) and, during the paper, the sentences just heard, so "why is that the answer?" means the last
+question, and a follow-up builds on the answer instead of repeating it. Its answer is spoken; one button pauses it or
+goes back to where you were (*Continue the paper*, *Back to the question*, *Continue with the tutor*).
+
+The buttons are the same everywhere, and time runs one way through the session: Back 15 s and Skip 15 s move through
+what the tutor is saying as through the paper. Back from the start of a question goes to the end of its lesson, and
+back from the start of a lesson goes to the end of the paper heard before it (the tutor comes in again after it).
+Skip past the end of a lesson goes to its question. Pause stops the tutor, the microphone and the narration; Continue
+goes on from the same word. The headset's play/pause button does the same. On Android the phone can be locked in a pocket: once the microphone is allowed, the playback
 service also runs as a microphone service, so the tutor hears answers with the screen off. The screen stays on while
 the tutor talks, for the equation; lock it if you don't need it. Answering aloud can be turned off (Settings: *Answer out loud*): the tutor then waits for a tap.
 What the tutor says is cached per voice in the paper's `study/audio/` folder, so nothing is spoken twice by the API.

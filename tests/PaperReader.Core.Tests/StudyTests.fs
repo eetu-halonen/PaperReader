@@ -290,6 +290,48 @@ let ``a question is read with its options in the order shown, and feedback says 
     Assert.StartsWith("The answer is option 2", unknown)
 
 [<Fact>]
+let ``a question's options are mixed, and in the same order every time it is asked`` () =
+    let q = (Study.parseLesson (script ()) "p" "c3" lessonText).Checks.[0]
+    let order = Study.optionOrder q
+    Assert.Equal<int list>([ 0 .. q.Options.Length - 1 ], List.sort order)
+    Assert.Equal<int list>(order, Study.optionOrder q)
+    // not all the same order: where the right one sits gives nothing away
+    let orders = [ for i in 1 .. 20 -> Study.optionOrder { q with Id = sprintf "p:c%d:1" i } ] |> List.distinct
+    Assert.True(orders.Length > 1)
+
+[<Fact>]
+let ``a question to the tutor comes with the conversation as turns and what the tutor just said`` () =
+    let s = script ()
+    let m: Study.Moment =
+        { Name = "Scaled dot-product attention"; Goal = "Equation 1."; Background = false; Section = 2; Lesson = None; Answered = None
+          Said = [ "Why divide by the square root of d_k? Option 1: To speed it up."; "Not quite. The answer is option 2: to keep large dot products from saturating the softmax." ]
+          Heard = [] }
+    let history: Study.TutorTurn list = [ { Question = "What is a key?"; Answer = "A vector each position offers."; Followups = [ "And a query?" ] } ]
+    let k: Help.Knowledge = { PaperText = "The paper."; FigureNotes = Map.empty }
+    let msgs = Study.tutorMessages Settings.defaults s k m history "Why does saturation matter?"
+    Assert.Equal<string list>([ "system"; "user"; "assistant"; "user" ], msgs |> List.map fst)
+    Assert.Equal("What is a key?", snd msgs.[1])
+    Assert.StartsWith("A vector each position offers.\n---", snd msgs.[2])
+    let last = snd (List.last msgs)
+    // the feedback just said, so a question about "the answer" is understood, and no lesson repeated
+    Assert.Contains("to keep large dot products from saturating the softmax", last)
+    Assert.Contains("Never repeat an explanation", last)
+    Assert.EndsWith("QUESTION: Why does saturation matter?", last)
+    // while the paper is read: what was just heard
+    let listening = Study.tutorPrompt s { m with Name = ""; Said = []; Heard = [ "s3"; "s4" ] } "What was that?"
+    Assert.Contains("they just heard:\n  s3\n  s4", listening)
+    Assert.DoesNotContain("Idea being studied", listening)
+
+[<Fact>]
+let ``the tutor gets another speaker's voice in the paper's language`` () =
+    let v id : Mistral.Voice = { Id = id; Name = id; Languages = [ "en" ] }
+    let voices = [ v "en_paul_neutral"; v "en_paul_cheerful"; v "fr_marie_neutral"; v "en_jane_sad"; v "en_jane_neutral" ]
+    Assert.Equal(Some "en_jane_neutral", Study.tutorVoice "en_paul_neutral" voices |> Option.map (fun x -> x.Id))
+    // only the narrator's speaker: another of their styles
+    Assert.Equal(Some "en_paul_cheerful", Study.tutorVoice "en_paul_neutral" (voices |> List.take 3) |> Option.map (fun x -> x.Id))
+    Assert.Equal(None, Study.tutorVoice "en_paul_neutral" [ v "en_paul_neutral" ])
+
+[<Fact>]
 let ``a spoken answer is a number, the words of an option, or I don't know`` () =
     let options = [ "A matrix of dot products between queries and keys"; "The gradients of the loss"; "The positional encodings" ]
     let heard = Study.heardAnswer options
@@ -404,7 +446,8 @@ let ``what the learner knows and how far a paper's study is are saved and read b
           Teach = set [ "c3" ]
           Reported = set [ "abc:c2:1" ]
           Matched = t0
-          Heard = 42 }
+          Heard = 42
+          At = "quiz|abc:c2:1|check|c2|" }
     Study.saveProgress p "abc" progress
     Assert.Equal(Some progress, Study.loadProgress p "abc")
     Study.savePlan p "abc" planText

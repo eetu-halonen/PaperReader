@@ -216,7 +216,7 @@ let newPerSession = 20
 /// The cards due now, as (paper id, card): learning steps first, then reviews by how overdue they are, then new
 /// cards in the order they were made (a paper's deck follows the paper).
 let dueQueue (now: DateTime) (decks: (string * Card list) list) : (string * Card) list =
-    let all = [ for id, cards in decks do for c in cards do if Fsrs.isDue now c.Memory then yield id, c ]
+    let all = [ for id, cards in decks do for c in cards do if Fsrs.isDueForReview now c.Memory then yield id, c ]
     let learning, rest = all |> List.partition (fun (_, c) -> c.Memory.Stage = CardStage.Learning || c.Memory.Stage = CardStage.Relearning)
     let reviews, fresh = rest |> List.partition (fun (_, c) -> c.Memory.Stage = CardStage.Review)
     let byRecall =

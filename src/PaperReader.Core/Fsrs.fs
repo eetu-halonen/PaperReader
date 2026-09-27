@@ -166,6 +166,17 @@ let isDue (now: DateTime) (m: Memory) =
     | CardStage.Review -> m.Due.ToLocalTime().Date <= now.ToLocalTime().Date
     | _ -> m.Due <= now
 
+/// How far ahead a review takes cards in their short steps, as Anki does: closing a review and opening it again
+/// keeps the card that was coming back at its end, instead of hiding it until its minutes are up.
+let learnAhead = TimeSpan.FromMinutes 20.0
+
+/// Due in a review session: due now, or in a short step that ends within `learnAhead`.
+let isDueForReview (now: DateTime) (m: Memory) =
+    match m.Stage with
+    | CardStage.Learning
+    | CardStage.Relearning -> m.Due <= now + learnAhead
+    | _ -> isDue now m
+
 /// "1 min", "10 min", "3 h", "4 d", "2.5 mo", "1.2 y".
 let formatInterval (t: TimeSpan) =
     let inv (x: float) = x.ToString("0.#", Globalization.CultureInfo.InvariantCulture)

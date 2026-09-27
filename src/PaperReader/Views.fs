@@ -37,6 +37,8 @@ module Palette =
     let badBg = "#3A2222"
     /// Panels that suggest something to do (a review, a key, studying).
     let note = "#1A2436"
+    /// The screen while the tutor speaks, so it is plain it is the tutor and not the paper.
+    let tutorBg = "#141D30"
 
 // ---------------------------------------------------------------------------------------------
 // Images: equation crops are decoded once and kept while they are likely to be shown again.
@@ -89,6 +91,9 @@ module Icons =
     let cards = "M8 4.5 H19 A1.5 1.5 0 0 1 20.5 6 V15.5 M4.5 8 H15 A1.5 1.5 0 0 1 16.5 9.5 V18.5 A1.5 1.5 0 0 1 15 20 H4.5 A1.5 1.5 0 0 1 3 18.5 V9.5 A1.5 1.5 0 0 1 4.5 8 Z"
     let study = "M2.5 9 L12 4.5 L21.5 9 L12 13.5 Z M6.5 11 V15.8 C6.5 17.3 9 18.8 12 18.8 C15 18.8 17.5 17.3 17.5 15.8 V11 M21.5 9 V14.5"
     let check = "M5 12.5 L10 17.5 L19 7"
+    /// A page: the paper being read.
+    let paper = "M7 3 H14 L18 7 V21 H7 Z M14 3 V7 H18 M9.5 11 H15.5 M9.5 14.5 H15.5 M9.5 18 H13.5"
+    let more = "M3.8 12 A2 2 0 1 0 7.8 12 A2 2 0 1 0 3.8 12 Z M10 12 A2 2 0 1 0 14 12 A2 2 0 1 0 10 12 Z M16.2 12 A2 2 0 1 0 20.2 12 A2 2 0 1 0 16.2 12 Z"
     /// A phone on its side, and upright: which way the full-screen view turns.
     let phoneSideways = "M4.5 7 H19.5 A1.5 1.5 0 0 1 21 8.5 V15.5 A1.5 1.5 0 0 1 19.5 17 H4.5 A1.5 1.5 0 0 1 3 15.5 V8.5 A1.5 1.5 0 0 1 4.5 7 Z M18 12 H18.1"
     let phoneUpright = "M8.5 3 H15.5 A1.5 1.5 0 0 1 17 4.5 V19.5 A1.5 1.5 0 0 1 15.5 21 H8.5 A1.5 1.5 0 0 1 7 19.5 V4.5 A1.5 1.5 0 0 1 8.5 3 Z M12 18 H12.1"
@@ -773,14 +778,6 @@ let private visualName (v: Visual) =
     | VisualKind.Inline -> "From the text"
     | _ -> Help.visualName v
 
-let private visualCaption (script: Script) (seg: Segment) (v: Visual) =
-    let name = visualName v
-    let where = sprintf "page %d" (v.Page + 1)
-    match seg.Reason with
-    | ShowReason.Own -> sprintf "%s · %s" name where
-    | ShowReason.Reference -> sprintf "%s · referred to now · %s" name where
-    | ShowReason.Recent -> sprintf "%s · still discussed · %s" name where
-
 let private remainingMs (r: ReaderState) (speed: float) =
     let segs = r.Script.Segments
     let mutable total = 0
@@ -792,150 +789,9 @@ let private remainingMs (r: ReaderState) (speed: float) =
                | None -> Timeline.estimateMs segs.[i].Say + segs.[i].PauseAfterMs)
     int (float (total - r.Offset) / speed)
 
-/// Display size of a crop pixel, in dp.
-let private mathScale = 0.9
-
 /// The segment where an equation is first read, for "hear it again".
 let private firstReading (script: Script) (id: string) =
     Narration.equationOrder script |> Array.tryFind (fun (v, _) -> v.Id = id) |> Option.map snd
-
-let private stage (r: ReaderState) (seg: Segment) (dispatch: Msg -> unit) : IView =
-    let paths = Store.Paths((Services.get ()).DataDir)
-    let visual = (match r.Held with Some v -> Some v | None -> seg.Show) |> Option.bind r.Script.Visual
-    let image = visual |> Option.bind (fun v -> bitmap (paths.Image(r.Paper.Id, v.Id)) |> Option.map (fun b -> v, b))
-    match image with
-    | Some (v, bmp) ->
-        // math mode: the image fills the stage, the spoken sentence is the caption underneath
-        Grid.create [
-            Grid.rowDefinitions "*,Auto"
-            Grid.children [
-                Border.create [
-                    Grid.row 0
-                    Border.margin (Thickness(14.0, 6.0, 14.0, 10.0))
-                    Border.padding (Thickness(14.0, 10.0, 14.0, 14.0))
-                    Border.cornerRadius 18.0
-                    Border.background Palette.paper
-                    Border.verticalAlignment VerticalAlignment.Center
-                    Border.onTapped ((fun _ -> dispatch ToggleZoom), SubPatchOptions.Never)
-                    Border.child (
-                        Grid.create [
-                            Grid.rowDefinitions "Auto,*"
-                            Grid.children [
-                                Grid.create [
-                                    Grid.row 0
-                                    Grid.columnDefinitions "*,Auto"
-                                    Grid.margin (Thickness(0.0, 0.0, 0.0, 8.0))
-                                    Grid.children [
-                                        TextBlock.create [
-                                            Grid.column 0
-                                            TextBlock.text (
-                                                if r.Held.IsSome then sprintf "%s · page %d · stopped here" (visualName v) (v.Page + 1)
-                                                else visualCaption r.Script seg v)
-                                            TextBlock.fontSize 12.0
-                                            TextBlock.foreground Palette.ink
-                                            TextBlock.textTrimming TextTrimming.CharacterEllipsis
-                                        ]
-                                        Border.create [ Grid.column 1; Border.child (icon Icons.expand Palette.ink 16.0 false) ]
-                                    ]
-                                ]
-                                Image.create [
-                                    Grid.row 1
-                                    Image.source bmp
-                                    Image.stretch Stretch.Uniform
-                                    smooth
-                                    // one size for all math: crops are 3 px per point, so 10 pt text shows at
-                                    // about 27 dp; only crops too big for the card are scaled down
-                                    Image.maxWidth (float bmp.PixelSize.Width * mathScale)
-                                    Image.maxHeight (float bmp.PixelSize.Height * mathScale)
-                                    Image.horizontalAlignment HorizontalAlignment.Center
-                                    Image.verticalAlignment VerticalAlignment.Center
-                                ]
-                            ]
-                        ]
-                    )
-                ]
-                if r.Held.IsSome then
-                    // stopped at an equation: take time with it, then carry on from the next sentence
-                    StackPanel.create [
-                        Grid.row 1
-                        StackPanel.margin (Thickness(22.0, 0.0, 22.0, 14.0))
-                        StackPanel.spacing 12.0
-                        StackPanel.children [
-                            label "Take your time with it. Continue when you're ready." 16.0 Palette.muted
-                            StackPanel.create [
-                                StackPanel.orientation Orientation.Horizontal
-                                StackPanel.spacing 10.0
-                                StackPanel.children [
-                                    pill "Continue" (fun () -> dispatch TogglePlay) true
-                                    match firstReading r.Script v.Id with
-                                    | Some i -> pill "Hear it again" (fun () -> dispatch (JumpToSegment i)) false
-                                    | None -> ()
-                                    pill "Ask" (fun () -> dispatch (OpenHelp(Some v.Id))) false
-                                ]
-                            ]
-                        ]
-                    ]
-                else
-                Border.create [
-                    Grid.row 1
-                    Border.padding (Thickness(22.0, 0.0, 22.0, 14.0))
-                    Border.child (
-                        TextBlock.create [
-                            TextBlock.text seg.Say
-                            TextBlock.fontSize 18.0
-                            TextBlock.lineHeight 26.0
-                            TextBlock.foreground Palette.text
-                            TextBlock.textWrapping TextWrapping.Wrap
-                            TextBlock.maxLines 6
-                            TextBlock.textTrimming TextTrimming.WordEllipsis
-                        ]
-                    )
-                ]
-            ]
-        ]
-    | None ->
-        // reading mode: large text of the sentence being spoken, the previous one faded above it
-        let prev = if r.Current > 0 then Some r.Script.Segments.[r.Current - 1] else None
-        let heading = seg.Kind = UnitKind.Heading || seg.Kind = UnitKind.Title
-        ScrollViewer.create [
-            ScrollViewer.content (
-                StackPanel.create [
-                    StackPanel.margin (Thickness(24.0, 24.0, 24.0, 16.0))
-                    StackPanel.verticalAlignment VerticalAlignment.Center
-                    StackPanel.spacing 18.0
-                    StackPanel.children [
-                        match prev with
-                        | Some p ->
-                            plainButton "Transparent" [
-                                Button.horizontalAlignment HorizontalAlignment.Stretch
-                                Button.horizontalContentAlignment HorizontalAlignment.Left
-                                Button.padding 0.0
-                                Button.onClick ((fun _ -> dispatch (JumpToSegment(r.Current - 1))), SubPatchOptions.OnChangeOf r.Current)
-                                Button.content (
-                                    TextBlock.create [
-                                        TextBlock.text p.Say
-                                        TextBlock.fontSize 16.0
-                                        TextBlock.lineHeight 23.0
-                                        TextBlock.foreground Palette.faint
-                                        TextBlock.textWrapping TextWrapping.Wrap
-                                        TextBlock.maxLines 3
-                                        TextBlock.textTrimming TextTrimming.WordEllipsis
-                                    ]
-                                )
-                            ]
-                        | None -> ()
-                        TextBlock.create [
-                            TextBlock.text seg.Say
-                            TextBlock.fontSize (if heading then 30.0 else 25.0)
-                            TextBlock.lineHeight (if heading then 38.0 else 35.0)
-                            TextBlock.fontWeight (if heading then FontWeight.Bold else FontWeight.Medium)
-                            TextBlock.foreground (if heading then Palette.accent else Palette.text)
-                            TextBlock.textWrapping TextWrapping.Wrap
-                        ]
-                    ]
-                ]
-            )
-        ]
 
 let private roundControl (data: string) (onClick: unit -> unit) (caption: string) : IView =
     Grid.create [
@@ -973,7 +829,7 @@ let private playerStatus (model: Model) (r: ReaderState) (dispatch: Msg -> unit)
               StackPanel.children [
                   label e 13.0 Palette.danger
                   if usingMistralVoice then
-                      // wraps in the narrow column of the walking player on its side
+                      // wraps in the narrow column of the player on its side
                       WrapPanel.create [
                           WrapPanel.children [
                               Border.create [ Border.margin (Thickness(0.0, 0.0, 8.0, 8.0)); Border.child (pill "Use the device's voice" (fun () -> dispatch UsePhoneVoice) false) ]
@@ -1060,47 +916,6 @@ let private transportRow (model: Model) (playing: bool) (sides: bool) (onPlay: u
                     Border.child (iconButton Icons.list 22.0 (fun () -> dispatch ToggleOutline) "outline")
                 ]
         ]
-    ]
-
-let private transport (model: Model) (playing: bool) (dispatch: Msg -> unit) : IView =
-    transportRow model playing true (fun () -> dispatch TogglePlay) dispatch
-
-let private controls (model: Model) (r: ReaderState) (dispatch: Msg -> unit) : IView =
-    let seg = r.Script.Segments.[r.Current]
-    let sectionCount = max 1 (r.Script.Sections.Length - 1)
-    Border.create [
-        Border.background Palette.surface
-        Border.cornerRadius (24.0, 24.0, 0.0, 0.0)
-        Border.padding (Thickness(18.0, 14.0, 18.0, 18.0))
-        Border.child (
-            StackPanel.create [
-                StackPanel.spacing 10.0
-                StackPanel.children [
-                    yield! playerStatus model r dispatch
-                    progressBar r
-                    Grid.create [
-                        Grid.columnDefinitions "*,Auto"
-                        Grid.children [
-                            TextBlock.create [
-                                Grid.column 0
-                                TextBlock.text (
-                                    if r.Finished then "Finished"
-                                    else sprintf "Section %d of %d · %s %d of %d" (max 1 seg.Section) sectionCount (Formats.pageNoun r.Paper.Format) (seg.Page + 1) r.Script.PageCount)
-                                TextBlock.fontSize 12.0
-                                TextBlock.foreground Palette.muted
-                            ]
-                            TextBlock.create [
-                                Grid.column 1
-                                TextBlock.text (formatMinutes (remainingMs r model.Settings.Speed))
-                                TextBlock.fontSize 12.0
-                                TextBlock.foreground Palette.muted
-                            ]
-                        ]
-                    ]
-                    transport model r.Playing dispatch
-                ]
-            ]
-        )
     ]
 
 let private outlineOverlay (r: ReaderState) (dispatch: Msg -> unit) : IView =
@@ -3039,13 +2854,8 @@ let private tutorTeach (model: Model) (r: ReaderState) (s: StudyState) (idea: St
       | None when s.Failed.ContainsKey idea.Id -> ()
       | None when not (Settings.hasKey model.Settings) -> label "Writing this lesson needs a Mistral API key (Settings)." 15.0 Palette.muted
       | None -> spinnerLine "The tutor is writing the lesson…"
-      WrapPanel.create [
-          WrapPanel.children [
-              match Study.segmentOf r.Script idea with
-              | Some seg -> textLink "Hear it in the paper" (fun () -> dispatch (JumpToSegment seg)) ("listen", idea.Id)
-              | None -> ()
-          ]
-      ] ]
+      if not isDone && lesson |> Option.exists (fun l -> not l.Checks.IsEmpty) then
+          WrapPanel.create [ WrapPanel.children [ textLink "Know it? Skip to the question" (fun () -> dispatch StudySkip) ("skip", idea.Id) ] ] ]
 
 /// A question: its options big enough to tap while walking; after the answer, why each is right or wrong.
 let private tutorQuiz (model: Model) (r: ReaderState) (s: StudyState) (q: Quiz) (dispatch: Msg -> unit) : IView list =
@@ -3165,7 +2975,9 @@ let private tutorRecap (model: Model) (s: StudyState) (plan: Study.Plan) (part: 
                   Border.child (StackPanel.create [ StackPanel.spacing 6.0; StackPanel.children [ sectionLabel "A GOOD ANSWER COVERS"; richText p.Points 15.0 Palette.muted ] ])
               ]
       | None when s.Grading -> spinnerLine "Reading your answer…"
-      | None -> () ]
+      | None -> ()
+      if not s.Grading && s.Feedback.IsNone then
+          WrapPanel.create [ WrapPanel.children [ textLink "Skip this" (fun () -> dispatch StudySkip) ("skip-recap", part) ] ] ]
 
 let private tutorFinished (model: Model) (r: ReaderState) (s: StudyState) (plan: Study.Plan) (dispatch: Msg -> unit) : IView list =
     let now = DateTime.UtcNow
@@ -3245,152 +3057,58 @@ let private tutorStage (model: Model) (r: ReaderState) (s: StudyState) (large: b
         )
     ]
 
-/// While the paper is read in a session: what the tutor does after this stretch (tap for the plan).
-let private studyStrip (model: Model) (r: ReaderState) (s: StudyState) (dispatch: Msg -> unit) : IView =
-    let text =
-        match s.Now, s.Plan with
-        | StudyNow.Starting, _ when s.Planning.IsSome -> "The tutor is reading the paper to plan your study…"
-        | StudyNow.Starting, _ -> "Studying"
-        | StudyNow.Listening last, Some plan ->
-            match Study.stops r.Script plan |> List.tryFind (fun st -> st.Last = last) with
-            | Some st when not st.After.IsEmpty ->
-                let names = st.After |> List.filter (fun i -> not (s.Progress.Done.ContainsKey i.Id)) |> List.map (fun i -> i.Name)
-                if names.IsEmpty then "Studying · listen on" else "After this part, the tutor: " + String.Join(" · ", names)
-            | _ -> "Studying · listen on"
-        | _ -> "Studying"
-    Border.create [
-        Border.margin (Thickness(16.0, 2.0, 16.0, 6.0))
-        Border.padding (Thickness(14.0, 10.0))
-        Border.cornerRadius 14.0
-        Border.background Palette.note
-        Border.onTapped ((fun _ -> dispatch ToggleStudyPlan), SubPatchOptions.Never)
-        Border.child (
-            StackPanel.create [
-                StackPanel.spacing 6.0
-                StackPanel.children [
-                    Grid.create [
-                        Grid.columnDefinitions "Auto,*"
-                        Grid.children [
-                            Border.create [ Grid.column 0; Border.verticalAlignment VerticalAlignment.Top; Border.child (icon Icons.study Palette.accent 20.0 false) ]
-                            TextBlock.create [
-                                Grid.column 1
-                                TextBlock.margin (Thickness(10.0, 0.0, 0.0, 0.0))
-                                TextBlock.text text
-                                TextBlock.fontSize 14.0
-                                TextBlock.foreground Palette.text
-                                TextBlock.textWrapping TextWrapping.Wrap
-                                TextBlock.maxLines 3
-                                TextBlock.textTrimming TextTrimming.CharacterEllipsis
-                            ]
-                        ]
+/// A line under the paper about the tutor: tap it for what it says.
+let private tutorLine (text: string) (onTap: unit -> unit) : IView =
+    plainButton Palette.note [
+        Button.horizontalAlignment HorizontalAlignment.Stretch
+        Button.horizontalContentAlignment HorizontalAlignment.Stretch
+        Button.padding (Thickness(12.0, 9.0))
+        Button.cornerRadius 14.0
+        Button.onClick ((fun _ -> onTap ()), SubPatchOptions.OnChangeOf text)
+        Button.content (
+            Grid.create [
+                Grid.columnDefinitions "Auto,*"
+                Grid.children [
+                    Border.create [ Grid.column 0; Border.verticalAlignment VerticalAlignment.Top; Border.child (icon Icons.study Palette.accent 18.0 false) ]
+                    TextBlock.create [
+                        Grid.column 1
+                        TextBlock.margin (Thickness(10.0, 0.0, 0.0, 0.0))
+                        TextBlock.text text
+                        TextBlock.fontSize 14.0
+                        TextBlock.foreground Palette.muted
+                        TextBlock.textWrapping TextWrapping.Wrap
+                        TextBlock.maxLines 2
+                        TextBlock.textTrimming TextTrimming.CharacterEllipsis
                     ]
-                    yield! studyErrors s dispatch
                 ]
             ]
         )
+    ]
+
+/// While the paper is read in a study session: that the tutor comes in after this part, and about what (tap for the
+/// plan).
+let private tutorNext (r: ReaderState) (s: StudyState) (dispatch: Msg -> unit) : IView =
+    let text =
+        match s.Now, s.Plan with
+        | StudyNow.Starting, _ when s.Planning.IsSome -> "The tutor is reading the paper to plan your study. The paper plays meanwhile."
+        | StudyNow.Listening last, Some plan ->
+            match Study.stops r.Script plan |> List.tryFind (fun st -> st.Last = last) with
+            | Some st ->
+                let names = st.After |> List.filter (fun i -> not (s.Progress.Done.ContainsKey i.Id)) |> List.map (fun i -> i.Name)
+                if names.IsEmpty then "The tutor comes in after this part." else "After this part, the tutor: " + String.Join(" · ", names)
+            | None -> "The tutor comes in after this part."
+        | _ -> "The tutor comes in after this part."
+    StackPanel.create [
+        StackPanel.spacing 6.0
+        StackPanel.children [
+            tutorLine text (fun () -> dispatch ToggleStudyPlan)
+            yield! studyErrors s dispatch
+        ]
     ]
 
 /// The session is going on by itself (the tutor speaking or listening, or the paper being read).
 let private studyGoing (r: ReaderState) (s: StudyState) =
     if tutorTurn s then s.Running && (s.Voice |> Option.exists (fun v -> v.Playing) || s.Ear <> Ear.Off) else r.Playing
-
-/// The tutor's extra steps, in a row of their own so the 15 s buttons stay the same as the player's: hear what it
-/// is saying from the start, and go on to the question (or past it).
-let private tutorSteps (s: StudyState) (dispatch: Msg -> unit) : IView =
-    let skip =
-        match s.Now with
-        | StudyNow.Teach _ -> Some "Go to the question"
-        | StudyNow.Quiz _ -> Some "Next"
-        | StudyNow.Recap _ when not s.Grading -> Some "Skip"
-        | _ -> None
-    let again = s.Voice |> Option.exists (fun v -> not v.Said.IsEmpty)
-    let step (column: int) (text: string) (enabled: bool) (msg: Msg) : IView =
-        Button.create [
-            Grid.column column
-            Button.height 44.0
-            Button.margin (Thickness(5.0, 0.0))
-            Button.cornerRadius 22.0
-            Button.horizontalAlignment HorizontalAlignment.Stretch
-            Button.horizontalContentAlignment HorizontalAlignment.Center
-            Button.verticalContentAlignment VerticalAlignment.Center
-            Button.background Palette.surfaceHigh
-            Button.foreground Palette.text
-            Button.fontSize 15.0
-            Button.fontWeight FontWeight.SemiBold
-            Button.isEnabled enabled
-            Button.content text
-            Button.onClick ((fun _ -> dispatch msg), SubPatchOptions.OnChangeOf text)
-        ]
-    Grid.create [
-        Grid.columnDefinitions "*,*"
-        Grid.children [
-            step 0 "Listen again" again StudyAgain
-            match skip with
-            | Some text -> step 1 text true StudySkip
-            | None -> ()
-        ]
-    ]
-
-/// The tutor's buttons: its steps, then the same as the walking player's: back 15 s, ask, ahead 15 s, and pause or go on.
-let private tutorButtons (s: StudyState) (going: bool) (small: float) (big: float) (dispatch: Msg -> unit) : IView =
-    StackPanel.create [
-        StackPanel.spacing 12.0
-        StackPanel.children [
-            tutorSteps s dispatch
-            Grid.create [
-                Grid.columnDefinitions "*,*,*"
-                Grid.children [
-                    walkButton 0 small Icons.back "Back 15 s" false (box "back") (fun () -> dispatch Back15)
-                    walkButton 1 small Icons.ask "Ask" false (box "ask") (fun () -> dispatch ToggleTutor)
-                    walkButton 2 small Icons.forward "Skip 15 s" false (box "forward") (fun () -> dispatch Forward15)
-                ]
-            ]
-            Grid.create [
-                Grid.children [
-                    walkButton 0 big (if going then Icons.pause else Icons.play) (if going then "Pause" else "Continue") true (box "play") (fun () -> dispatch TogglePlay)
-                ]
-            ]
-        ]
-    ]
-
-/// The full player's controls in the tutor's turn.
-let private tutorControls (model: Model) (r: ReaderState) (s: StudyState) (dispatch: Msg -> unit) : IView =
-    let title, subtitle = studyWhere model r s
-    Border.create [
-        Border.background Palette.surface
-        Border.cornerRadius (24.0, 24.0, 0.0, 0.0)
-        Border.padding (Thickness(18.0, 14.0, 18.0, 18.0))
-        Border.child (
-            StackPanel.create [
-                StackPanel.spacing 10.0
-                StackPanel.children [
-                    Grid.create [
-                        Grid.columnDefinitions "*,Auto"
-                        Grid.margin (Thickness(6.0, 0.0))
-                        Grid.children [
-                            TextBlock.create [
-                                Grid.column 0
-                                TextBlock.text title
-                                TextBlock.fontSize 13.0
-                                TextBlock.fontWeight FontWeight.SemiBold
-                                TextBlock.foreground Palette.accent
-                                TextBlock.textTrimming TextTrimming.CharacterEllipsis
-                            ]
-                            TextBlock.create [
-                                Grid.column 1
-                                TextBlock.text subtitle
-                                TextBlock.fontSize 12.0
-                                TextBlock.foreground Palette.muted
-                                TextBlock.margin (Thickness(10.0, 0.0, 0.0, 0.0))
-                            ]
-                        ]
-                    ]
-                    tutorSteps s dispatch
-                    transport model (studyGoing r s) dispatch
-                ]
-            ]
-        )
-    ]
 
 /// A sheet over the reader with a title, a close button and a scrolling body.
 let private studySheet (title: string) (subtitle: string) (close: unit -> unit) (closeKey: string) (body: IView list) (footer: IView option) : IView =
@@ -3455,6 +3173,7 @@ let private tutorOverlay (model: Model) (r: ReaderState) (s: StudyState) (dispat
         match s.Now, s.Plan with
         | StudyNow.Teach i, Some plan -> plan.Idea i |> Option.map (fun i -> i.Name) |> Option.defaultValue ""
         | StudyNow.Quiz q, _ -> q.Idea |> Option.bind (fun i -> s.Plan |> Option.bind (fun p -> p.Idea i)) |> Option.map (fun i -> i.Name) |> Option.defaultValue ""
+        | (StudyNow.Listening _ | StudyNow.Starting), _ -> "About the paper you just heard, or anything the tutor said"
         | _ -> ""
     /// Always in view under the conversation, like a chat's input.
     let input: IView =
@@ -3504,11 +3223,19 @@ let private tutorOverlay (model: Model) (r: ReaderState) (s: StudyState) (dispat
                     ]
             ]
         ]
+    // the answer being said, or said and paused: it can be heard again
+    let answer = s.Voice |> Option.filter (fun v -> Some v.Id <> (s.Aside |> Option.map (fun a -> a.Id)))
+    let going = s.Running && answer |> Option.exists (fun v -> v.Playing)
     let body: IView list =
-        [ for t in s.Chat do
+        [ for i, t in List.indexed s.Chat do
               StackPanel.create [
                   StackPanel.spacing 8.0
-                  StackPanel.children [ label t.Question 15.0 Palette.accent; richText t.Answer 17.0 Palette.text ]
+                  StackPanel.children [
+                      label t.Question 15.0 Palette.accent
+                      richText t.Answer 17.0 Palette.text
+                      if i = s.Chat.Length - 1 && answer.IsSome && not going && s.Pending.IsNone then
+                          WrapPanel.create [ WrapPanel.children [ textLink "Hear it again" (fun () -> dispatch StudyAgain) ("again", i) ] ]
+                  ]
               ]
           match s.Pending with
           | Some (_, q, partial) ->
@@ -3522,25 +3249,51 @@ let private tutorOverlay (model: Model) (r: ReaderState) (s: StudyState) (dispat
           if hasKey && not busy then
               WrapPanel.create [ WrapPanel.children [ for t in taps -> chip (t.Replace("$", "")) (fun () -> dispatch (StudyAsk(t, true))) ] ]
           yield! studyErrors s dispatch ]
-    // the answer being said: pause, go on, and 15 s back or ahead, as in the player; once said, back to the lesson
-    let answering = s.Aside.IsSome && s.Voice |> Option.exists (fun v -> v.Playing || v.At < v.Said.Length)
-    let going = s.Running && s.Voice |> Option.exists (fun v -> v.Playing)
+    // one button: pause the answer being said, or go back to the session where it was
+    let back =
+        match s.Now with
+        | StudyNow.Listening _ | StudyNow.Starting -> "Continue the paper"
+        | StudyNow.Quiz { Choice = None } -> "Back to the question"
+        | _ -> "Continue with the tutor"
     let footer: IView =
         StackPanel.create [
             StackPanel.spacing 12.0
             StackPanel.children [
                 if hasKey then input
-                transportRow model going false (fun () -> dispatch TogglePlay) dispatch
-                if not going && not answering then label "▶ goes back to the lesson" 12.0 Palette.faint |> fun v -> Border.create [ Border.horizontalAlignment HorizontalAlignment.Center; Border.child v ]
+                Button.create [
+                    Button.height 60.0
+                    Button.cornerRadius 24.0
+                    Button.horizontalAlignment HorizontalAlignment.Stretch
+                    Button.horizontalContentAlignment HorizontalAlignment.Center
+                    Button.verticalContentAlignment VerticalAlignment.Center
+                    Button.background Palette.accent
+                    Button.onClick ((fun _ -> dispatch TogglePlay), SubPatchOptions.Never)
+                    Button.content (
+                        StackPanel.create [
+                            StackPanel.orientation Orientation.Horizontal
+                            StackPanel.spacing 10.0
+                            StackPanel.children [
+                                icon (if going then Icons.pause else Icons.play) Palette.onAccent 24.0 true
+                                TextBlock.create [
+                                    TextBlock.text (if going then "Pause" else back)
+                                    TextBlock.fontSize 19.0
+                                    TextBlock.fontWeight FontWeight.SemiBold
+                                    TextBlock.foreground Palette.onAccent
+                                    TextBlock.verticalAlignment VerticalAlignment.Center
+                                ]
+                            ]
+                        ]
+                    )
+                ]
             ]
         ]
     studySheet "Ask the tutor" about (fun () -> dispatch ToggleTutor) "close-tutor" body (Some footer)
 
 // ---------------------------------------------------------------------------------------------
-// Walking mode: the simple player, big buttons and the equation large
+// The player: big buttons and the equation large, for listening and studying on the move
 // ---------------------------------------------------------------------------------------------
 
-/// Display size of a crop pixel in walking mode: larger than the full player, glanced at from arm's length.
+/// Display size of a crop pixel in the player: glanced at from arm's length.
 let private walkMathScale = 1.3
 
 let private sectionName (r: ReaderState) (seg: Segment) =
@@ -3568,17 +3321,9 @@ let private switchMark (on: bool) : IView =
         )
     ]
 
-/// The setting that stops playback once this kind of visual has been explained: its name, whether it is on, and
-/// the message that changes it.
-let private stopSetting (settings: Settings) (v: Visual) : (string * bool * (bool -> Msg)) option =
-    match v.Kind with
-    | VisualKind.Equation | VisualKind.Algorithm -> Some("Stop at equations", settings.StopAtEquations, SetStopAtEquations)
-    | VisualKind.Figure | VisualKind.Table -> Some("Stop at figures and tables", settings.StopAtFigures, SetStopAtFigures)
-    | VisualKind.Inline -> None
-
 /// The equation or figure as large as fits, with what is being said about it underneath (tap it for full screen);
 /// or else the sentence being spoken, in large type.
-let private walkingStage (model: Model) (r: ReaderState) (seg: Segment) (dispatch: Msg -> unit) : IView =
+let private playerStage (model: Model) (r: ReaderState) (seg: Segment) (dispatch: Msg -> unit) : IView =
     let paths = Store.Paths((Services.get ()).DataDir)
     let vw, vh = viewport model
     let visual = (match r.Held with Some v -> Some v | None -> seg.Show) |> Option.bind r.Script.Visual
@@ -3589,7 +3334,7 @@ let private walkingStage (model: Model) (r: ReaderState) (seg: Segment) (dispatc
         // stopped at it: the sentence just heard (the next isn't said yet); playing: the one being said
         let caption = if held then (if r.Current > 0 then r.Script.Segments.[r.Current - 1].Say else "") else seg.Say
         Grid.create [
-            Grid.rowDefinitions "Auto,*,Auto,Auto"
+            Grid.rowDefinitions "Auto,*,Auto"
             Grid.verticalAlignment VerticalAlignment.Center
             Grid.children [
                 // what it is, and a way to see it larger
@@ -3680,33 +3425,6 @@ let private walkingStage (model: Model) (r: ReaderState) (seg: Segment) (dispatc
                         TextBlock.maxLines (if vw > vh then 2 elif vh < 760.0 then 3 else 5)
                         TextBlock.textTrimming TextTrimming.WordEllipsis
                     ]
-                // whether playback waits at the next one, where the question comes up
-                match stopSetting model.Settings v with
-                | Some (name, on, set) ->
-                    plainButton "Transparent" [
-                        Grid.row 3
-                        Button.margin (Thickness(2.0, 10.0, 0.0, 0.0))
-                        Button.padding (Thickness(6.0, 8.0, 12.0, 8.0))
-                        Button.cornerRadius 16.0
-                        Button.horizontalAlignment HorizontalAlignment.Left
-                        Button.onClick ((fun _ -> dispatch (set (not on))), SubPatchOptions.OnChangeOf(name, on))
-                        Button.content (
-                            StackPanel.create [
-                                StackPanel.orientation Orientation.Horizontal
-                                StackPanel.spacing 12.0
-                                StackPanel.children [
-                                    switchMark on
-                                    TextBlock.create [
-                                        TextBlock.text name
-                                        TextBlock.fontSize 15.0
-                                        TextBlock.foreground (if on then Palette.text else Palette.muted)
-                                        TextBlock.verticalAlignment VerticalAlignment.Center
-                                    ]
-                                ]
-                            ]
-                        )
-                    ]
-                | None -> ()
             ]
         ]
     | None ->
@@ -3726,82 +3444,146 @@ let private walkingStage (model: Model) (r: ReaderState) (seg: Segment) (dispatc
             )
         ]
 
-/// The simple player for listening on the move: one huge play / pause / continue button within thumb's reach, three
-/// large ones above it, and the equation on screen as big as it goes. With the phone on its side, the equation takes
-/// the left and the buttons stack on the right.
-let private walkingOverlay (model: Model) (r: ReaderState) (dispatch: Msg -> unit) : IView =
+/// Who is talking, at the top of the player: the tutor (in its colour, over a tinted screen) or the paper.
+let private whoBadge (tutor: bool) : IView =
+    Border.create [
+        Border.cornerRadius 16.0
+        Border.padding (Thickness(10.0, 6.0, 14.0, 6.0))
+        Border.verticalAlignment VerticalAlignment.Center
+        Border.horizontalAlignment HorizontalAlignment.Left
+        Border.background (if tutor then Palette.accent else Palette.surfaceHigh)
+        Border.child (
+            StackPanel.create [
+                StackPanel.orientation Orientation.Horizontal
+                StackPanel.spacing 7.0
+                StackPanel.children [
+                    icon (if tutor then Icons.study else Icons.paper) (if tutor then Palette.onAccent else Palette.text) 18.0 false
+                    TextBlock.create [
+                        TextBlock.text (if tutor then "TUTOR" else "PAPER")
+                        TextBlock.fontSize 14.0
+                        TextBlock.fontWeight FontWeight.Bold
+                        TextBlock.foreground (if tutor then Palette.onAccent else Palette.text)
+                        TextBlock.verticalAlignment VerticalAlignment.Center
+                    ]
+                ]
+            ]
+        )
+    ]
+
+/// A row of the reader's menu: an icon and what it does, or a switch.
+let private menuRow (data: string) (text: string) (on: bool option) (key: obj) (onClick: unit -> unit) : IView =
+    plainButton Palette.surface [
+        Button.horizontalAlignment HorizontalAlignment.Stretch
+        Button.horizontalContentAlignment HorizontalAlignment.Stretch
+        Button.padding (Thickness(16.0, 14.0))
+        Button.cornerRadius 16.0
+        Button.onClick ((fun _ -> onClick ()), SubPatchOptions.OnChangeOf(key, on))
+        Button.content (
+            Grid.create [
+                Grid.columnDefinitions "Auto,*,Auto"
+                Grid.children [
+                    Border.create [ Grid.column 0; Border.child (icon data Palette.accent 22.0 false) ]
+                    TextBlock.create [
+                        Grid.column 1
+                        TextBlock.margin (Thickness(14.0, 0.0, 10.0, 0.0))
+                        TextBlock.text text
+                        TextBlock.fontSize 17.0
+                        TextBlock.foreground Palette.text
+                        TextBlock.verticalAlignment VerticalAlignment.Center
+                        TextBlock.textWrapping TextWrapping.Wrap
+                    ]
+                    match on with
+                    | Some v -> Border.create [ Grid.column 2; Border.child (switchMark v) ]
+                    | None -> ()
+                ]
+            ]
+        )
+    ]
+
+/// Everything but playing: the contents, equations, cards, the tutor, when to stop, settings.
+let private menuOverlay (model: Model) (r: ReaderState) (dispatch: Msg -> unit) : IView =
+    let s = model.Settings
+    let go (msg: Msg) () =
+        dispatch ToggleMenu
+        dispatch msg
+    studySheet r.Script.Title "" (fun () -> dispatch ToggleMenu) "close-menu"
+        [ menuRow Icons.list "Contents" None "contents" (go ToggleOutline)
+          menuRow Icons.sigma "Equations and figures" None "equations" (go ToggleEquations)
+          menuRow Icons.cards "Flashcards" None "cards" (go (OpenCards None))
+          match r.Study with
+          | Some _ ->
+              menuRow Icons.study "Study plan: the ideas, and how far you are" None "plan" (go ToggleStudyPlan)
+              menuRow Icons.paper "Turn the tutor off: just listen" None "tutor-off" (go CloseStudy)
+          | None -> menuRow Icons.study "Study with the tutor" None "tutor-on" (go OpenStudy)
+          menuRow Icons.pause "Stop at equations" (Some s.StopAtEquations) "stop-eq" (fun () -> dispatch (SetStopAtEquations(not s.StopAtEquations)))
+          menuRow Icons.pause "Stop at figures and tables" (Some s.StopAtFigures) "stop-fig" (fun () -> dispatch (SetStopAtFigures(not s.StopAtFigures)))
+          menuRow Icons.sliders "Settings" None "settings" (go (SetShowSettings true)) ]
+        None
+
+/// The player, for listening and studying alike (made for the move: big buttons, the equation large): who is talking
+/// at the top, the equation or figure (or what the tutor shows) as large as it goes, and one huge play / pause button
+/// within thumb's reach with back 15 s, Ask and ahead 15 s above it. The tutor's turn tints the screen. With the
+/// phone on its side, the stage takes the left and the buttons stack on the right.
+let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) : IView =
     let seg = r.Script.Segments.[r.Current]
     let again = r.Held |> Option.bind (firstReading r.Script)
     let vw, vh = viewport model
     let landscape = vw > vh
+    let tutor = match r.Study with Some s -> tutorTurn s | None -> false
     // lower buttons where height is short, so the equation keeps its room
     let small, big = if landscape then 68.0, 92.0 elif vh < 760.0 then 76.0, 104.0 else 88.0, 128.0
-    let exit =
+    let topButton (column: int) (content: IView) (onClick: unit -> unit) : IView =
         Button.create [
-            Grid.column 0
-            Button.height 52.0
-            Button.cornerRadius 26.0
-            Button.padding (Thickness(14.0, 0.0, 18.0, 0.0))
-            Button.verticalAlignment VerticalAlignment.Center
-            Button.verticalContentAlignment VerticalAlignment.Center
-            Button.background Palette.surfaceHigh
-            Button.onClick ((fun _ -> dispatch (SetWalking false)), SubPatchOptions.Never)
-            Button.content (
-                StackPanel.create [
-                    StackPanel.orientation Orientation.Horizontal
-                    StackPanel.spacing 8.0
-                    StackPanel.children [
-                        icon Icons.close Palette.text 20.0 false
-                        TextBlock.create [
-                            TextBlock.text "Exit"
-                            TextBlock.fontSize 16.0
-                            TextBlock.fontWeight FontWeight.SemiBold
-                            TextBlock.foreground Palette.text
-                            TextBlock.verticalAlignment VerticalAlignment.Center
-                        ]
-                    ]
-                ]
-            )
-        ]
-    let speed =
-        Button.create [
-            Grid.column 2
-            Button.height 52.0
-            Button.minWidth 76.0
-            Button.cornerRadius 26.0
+            Grid.column column
+            Button.height 48.0
+            Button.minWidth 48.0
+            Button.cornerRadius 24.0
+            Button.padding (Thickness(10.0, 0.0))
+            Button.margin (Thickness(6.0, 0.0, 0.0, 0.0))
             Button.verticalAlignment VerticalAlignment.Center
             Button.horizontalContentAlignment HorizontalAlignment.Center
             Button.verticalContentAlignment VerticalAlignment.Center
             Button.background Palette.surfaceHigh
             Button.foreground Palette.text
-            Button.fontSize 18.0
+            Button.fontSize 17.0
             Button.fontWeight FontWeight.SemiBold
-            Button.content (sprintf "%g×" model.Settings.Speed)
-            Button.onClick ((fun _ -> dispatch CycleSpeed), SubPatchOptions.Never)
+            Button.content content
+            Button.onClick ((fun _ -> onClick ()), SubPatchOptions.Never)
         ]
-    // the section, and how far through the paper
+    let top =
+        Grid.create [
+            Grid.columnDefinitions "Auto,*,Auto,Auto"
+            Grid.children [
+                Border.create [ Grid.column 0; Border.child (iconButton Icons.chevronLeft 24.0 (fun () -> dispatch CloseReader) "close-reader") ]
+                Border.create [ Grid.column 1; Border.margin (Thickness(4.0, 0.0, 0.0, 0.0)); Border.child (whoBadge tutor) ]
+                topButton 2 (TextBlock.create [ TextBlock.text (sprintf "%g×" model.Settings.Speed) ]) (fun () -> dispatch CycleSpeed)
+                topButton 3 (icon Icons.more Palette.text 22.0 true) (fun () -> dispatch ToggleMenu)
+            ]
+        ]
+    // the part of the paper, or the tutor's idea, and how far
     let where =
+        let title, detail =
+            match r.Study with
+            | Some s when tutorTurn s -> studyWhere model r s
+            | _ ->
+                sectionName r seg,
+                (if r.Finished then "Finished"
+                 else sprintf "%s %d of %d · %s" (capitalize (Formats.pageNoun r.Paper.Format)) (seg.Page + 1) r.Script.PageCount (formatMinutes (remainingMs r model.Settings.Speed)))
         StackPanel.create [
-            Grid.column 1
-            StackPanel.margin (if landscape then Thickness(6.0, 14.0, 6.0, 0.0) else Thickness(12.0, 0.0))
-            StackPanel.verticalAlignment VerticalAlignment.Center
+            StackPanel.margin (Thickness(8.0, 8.0, 8.0, 4.0))
             StackPanel.spacing 2.0
             StackPanel.children [
                 TextBlock.create [
-                    TextBlock.text (match r.Study with Some s when tutorTurn s -> fst (studyWhere model r s) | _ -> sectionName r seg)
+                    TextBlock.text title
                     TextBlock.fontSize 16.0
                     TextBlock.fontWeight FontWeight.SemiBold
-                    TextBlock.foreground Palette.accent
+                    TextBlock.foreground (if tutor then Palette.accent else Palette.text)
                     TextBlock.textWrapping (if landscape then TextWrapping.Wrap else TextWrapping.NoWrap)
                     TextBlock.maxLines 2
                     TextBlock.textTrimming TextTrimming.CharacterEllipsis
                 ]
                 TextBlock.create [
-                    TextBlock.text (
-                        match r.Study with
-                        | Some s when tutorTurn s -> snd (studyWhere model r s)
-                        | _ when r.Finished -> "Finished"
-                        | _ -> sprintf "%s %d of %d · %s" (capitalize (Formats.pageNoun r.Paper.Format)) (seg.Page + 1) r.Script.PageCount (formatMinutes (remainingMs r model.Settings.Speed)))
+                    TextBlock.text detail
                     TextBlock.fontSize 13.0
                     TextBlock.foreground Palette.muted
                     TextBlock.textTrimming TextTrimming.CharacterEllipsis
@@ -3810,214 +3592,119 @@ let private walkingOverlay (model: Model) (r: ReaderState) (dispatch: Msg -> uni
         ]
     // a playback error or "preparing the voice": over the progress bar, or on its side under the equation, where the
     // narrow column of buttons has no room for it
-    let status = playerStatus model r dispatch
-    // in a study session: the tutor's stage and buttons in its turn; the plan's strip over the paper otherwise
+    let status = if tutor then [] else playerStatus model r dispatch
     let stageView =
         match r.Study with
         | Some s when tutorTurn s -> tutorStage model r s true dispatch
         | Some s ->
             DockPanel.create [
                 DockPanel.children [
-                    Border.create [ DockPanel.dock Dock.Top; Border.margin (Thickness(-16.0, 0.0, -16.0, 0.0)); Border.child (studyStrip model r s dispatch) ]
-                    walkingStage model r seg dispatch
+                    Border.create [ DockPanel.dock Dock.Bottom; Border.margin (Thickness(0.0, 8.0, 0.0, 4.0)); Border.child (tutorNext r s dispatch) ]
+                    playerStage model r seg dispatch
                 ]
             ]
             :> IView
-        | None -> walkingStage model r seg dispatch
+        | None when Settings.hasKey model.Settings ->
+            // the tutor off: said as plainly as when it is on
+            DockPanel.create [
+                DockPanel.children [
+                    Border.create [
+                        DockPanel.dock Dock.Bottom
+                        Border.margin (Thickness(0.0, 8.0, 0.0, 4.0))
+                        Border.child (tutorLine "The tutor is off: just the paper. Tap to study it with the tutor." (fun () -> dispatch OpenStudy))
+                    ]
+                    playerStage model r seg dispatch
+                ]
+            ]
+            :> IView
+        | None -> playerStage model r seg dispatch
     let buttons =
-        match r.Study with
-        | Some s when tutorTurn s -> tutorButtons s (studyGoing r s) small big dispatch
-        | _ ->
+        let going, playText =
+            match r.Study with
+            | Some s when tutorTurn s -> (let g = studyGoing r s in g, (if g then "Pause" else "Continue"))
+            | _ when r.Playing -> true, "Pause"
+            | _ when r.Held.IsSome -> false, "Continue"
+            | _ when r.Finished -> false, "Play again"
+            | _ -> false, "Play"
         StackPanel.create [
             StackPanel.spacing 12.0
             StackPanel.children [
-                Border.create [
-                    Border.margin (Thickness(5.0, 0.0))
-                    Border.child (
-                        StackPanel.create [
-                            StackPanel.spacing 10.0
-                            StackPanel.children [
-                                if not landscape then yield! status
-                                progressBar r
+                if not tutor then
+                    Border.create [
+                        Border.margin (Thickness(5.0, 0.0))
+                        Border.child (
+                            StackPanel.create [
+                                StackPanel.spacing 10.0
+                                StackPanel.children [
+                                    if not landscape then yield! status
+                                    progressBar r
+                                ]
                             ]
-                        ]
-                    )
-                ]
+                        )
+                    ]
                 Grid.create [
-                    Grid.columnDefinitions (if again.IsSome then "*,*" else "*,*,*")
+                    Grid.columnDefinitions (if again.IsSome && not tutor then "*,*" else "*,*,*")
                     Grid.children [
                         match again with
-                        | Some i ->
+                        | Some i when not tutor ->
                             // stopped at an equation: hear it once more, or ask about it
                             walkButton 0 small Icons.back "Hear it again" false (box ("again", i)) (fun () -> dispatch (JumpToSegment i))
                             walkButton 1 small Icons.ask "Ask" false (box "ask") (fun () -> dispatch (OpenHelp r.Held))
-                        | None ->
+                        | _ ->
                             walkButton 0 small Icons.back "Back 15 s" false (box "back") (fun () -> dispatch Back15)
                             walkButton 1 small Icons.ask "Ask" false (box "ask") (fun () -> dispatch (OpenHelp r.Held))
                             walkButton 2 small Icons.forward "Skip 15 s" false (box "forward") (fun () -> dispatch Forward15)
                     ]
                 ]
                 Grid.create [
-                    Grid.children [
-                        let data, text =
-                            if r.Playing then Icons.pause, "Pause"
-                            elif r.Held.IsSome then Icons.play, "Continue"
-                            elif r.Finished then Icons.play, "Play again"
-                            else Icons.play, "Play"
-                        walkButton 0 big data text true (box "play") (fun () -> dispatch TogglePlay)
-                    ]
+                    Grid.children [ walkButton 0 big (if going then Icons.pause else Icons.play) playText true (box "play") (fun () -> dispatch TogglePlay) ]
                 ]
             ]
         ]
-    Border.create [
-        Border.background Palette.bg
-        Border.padding (Thickness(11.0, 8.0, 11.0, (if landscape then 12.0 else 16.0)))
-        Border.child (
-            if landscape then
-                Grid.create [
-                    Grid.columnDefinitions (sprintf "*,%g" (Math.Clamp(Math.Round(0.34 * vw), 240.0, 320.0)))
-                    Grid.children [
-                        DockPanel.create [
-                            Grid.column 0
-                            DockPanel.margin (Thickness(5.0, 0.0, 16.0, 0.0))
-                            DockPanel.children [
-                                if not status.IsEmpty then
-                                    StackPanel.create [ DockPanel.dock Dock.Bottom; StackPanel.margin (Thickness(6.0, 8.0, 0.0, 4.0)); StackPanel.children status ]
-                                stageView
-                            ]
-                        ]
-                        DockPanel.create [
-                            Grid.column 1
-                            DockPanel.children [
-                                StackPanel.create [
-                                    DockPanel.dock Dock.Top
-                                    StackPanel.margin (Thickness(5.0, 0.0))
-                                    StackPanel.children [
-                                        Grid.create [ Grid.columnDefinitions "Auto,*,Auto"; Grid.children [ exit; speed ] ]
-                                        where
-                                    ]
+    let player =
+        Border.create [
+            Border.background (if tutor then Palette.tutorBg else Palette.bg)
+            Border.padding (Thickness(11.0, 8.0, 11.0, (if landscape then 12.0 else 16.0)))
+            Border.child (
+                if landscape then
+                    Grid.create [
+                        Grid.columnDefinitions (sprintf "*,%g" (Math.Clamp(Math.Round(0.34 * vw), 240.0, 320.0)))
+                        Grid.children [
+                            DockPanel.create [
+                                Grid.column 0
+                                DockPanel.margin (Thickness(5.0, 0.0, 16.0, 0.0))
+                                DockPanel.children [
+                                    if not status.IsEmpty then
+                                        StackPanel.create [ DockPanel.dock Dock.Bottom; StackPanel.margin (Thickness(6.0, 8.0, 0.0, 4.0)); StackPanel.children status ]
+                                    stageView
                                 ]
-                                // the last child fills the rest: the buttons sit at its bottom, within thumb's reach
-                                Border.create [ Border.verticalAlignment VerticalAlignment.Bottom; Border.child buttons ]
+                            ]
+                            DockPanel.create [
+                                Grid.column 1
+                                DockPanel.children [
+                                    StackPanel.create [ DockPanel.dock Dock.Top; StackPanel.children [ top; where ] ]
+                                    // the last child fills the rest: the buttons sit at its bottom, within thumb's reach
+                                    Border.create [ Border.verticalAlignment VerticalAlignment.Bottom; Border.child buttons ]
+                                ]
                             ]
                         ]
                     ]
-                ]
-                :> IView
-            else
-                DockPanel.create [
-                    DockPanel.children [
-                        Grid.create [
-                            DockPanel.dock Dock.Top
-                            Grid.columnDefinitions "Auto,*,Auto"
-                            Grid.margin (Thickness(5.0, 0.0, 5.0, 4.0))
-                            Grid.children [ exit; where; speed ]
+                    :> IView
+                else
+                    DockPanel.create [
+                        DockPanel.children [
+                            StackPanel.create [ DockPanel.dock Dock.Top; StackPanel.children [ top; where ] ]
+                            Border.create [ DockPanel.dock Dock.Bottom; Border.child buttons ]
+                            Border.create [ Border.margin (Thickness(5.0, 0.0)); Border.child stageView ]
                         ]
-                        Border.create [ DockPanel.dock Dock.Bottom; Border.child buttons ]
-                        Border.create [ Border.margin (Thickness(5.0, 0.0)); Border.child stageView ]
                     ]
-                ]
-                :> IView
-        )
-    ]
-
-let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) : IView =
-    let seg = r.Script.Segments.[r.Current]
-    let vw, vh = viewport model
-    // upright, the title gets a row of its own: beside the buttons it is cut to a word
-    let titleRow = vw <= vh
-    let title =
-        StackPanel.create [
-            Grid.column 1
-            StackPanel.verticalAlignment VerticalAlignment.Center
-            StackPanel.margin (if titleRow then Thickness(20.0, 0.0, 20.0, 4.0) else Thickness(0.0))
-            StackPanel.spacing 2.0
-            StackPanel.children [
-                TextBlock.create [
-                    TextBlock.text (match r.Study with Some s when tutorTurn s -> "Tutor" | _ -> sectionName r seg)
-                    TextBlock.fontSize (if titleRow then 16.0 else 14.0)
-                    TextBlock.fontWeight FontWeight.SemiBold
-                    TextBlock.foreground Palette.accent
-                    TextBlock.textTrimming TextTrimming.CharacterEllipsis
-                ]
-                TextBlock.create [
-                    TextBlock.text r.Script.Title
-                    TextBlock.fontSize (if titleRow then 13.0 else 12.0)
-                    TextBlock.foreground Palette.muted
-                    TextBlock.textTrimming TextTrimming.CharacterEllipsis
-                ]
-            ]
+                    :> IView
+            )
         ]
     Grid.create [
         Grid.children [
-            DockPanel.create [
-                DockPanel.children [
-                    StackPanel.create [
-                        DockPanel.dock Dock.Top
-                        StackPanel.children [
-                            Grid.create [
-                                Grid.columnDefinitions "Auto,*,Auto,Auto,Auto,Auto,Auto,Auto"
-                                Grid.margin (Thickness(4.0, 6.0, 4.0, 2.0))
-                                Grid.children [
-                                    Border.create [ Grid.column 0; Border.child (iconButton Icons.chevronLeft 24.0 (fun () -> dispatch CloseReader) "close-reader") ]
-                                    if not titleRow then title
-                                    Button.create [
-                                        Grid.column 2
-                                        Button.height 38.0
-                                        Button.cornerRadius 19.0
-                                        Button.padding (Thickness(12.0, 0.0, 14.0, 0.0))
-                                        Button.margin (Thickness(6.0, 0.0, 2.0, 0.0))
-                                        Button.verticalAlignment VerticalAlignment.Center
-                                        Button.verticalContentAlignment VerticalAlignment.Center
-                                        Button.background Palette.surfaceHigh
-                                        Button.onClick ((fun _ -> dispatch (OpenHelp None)), SubPatchOptions.Never)
-                                        Button.content (
-                                            StackPanel.create [
-                                                StackPanel.orientation Orientation.Horizontal
-                                                StackPanel.spacing 6.0
-                                                StackPanel.children [
-                                                    icon Icons.ask Palette.accent 20.0 false
-                                                    TextBlock.create [
-                                                        TextBlock.text "Ask"
-                                                        TextBlock.fontSize 15.0
-                                                        TextBlock.fontWeight FontWeight.SemiBold
-                                                        TextBlock.foreground Palette.text
-                                                        TextBlock.verticalAlignment VerticalAlignment.Center
-                                                    ]
-                                                ]
-                                            ]
-                                        )
-                                    ]
-                                    // the tutor on (lit) or off
-                                    Border.create [
-                                        Grid.column 3
-                                        Border.cornerRadius 22.0
-                                        Border.background (if r.Study.IsSome then Palette.note else "Transparent")
-                                        Border.child (iconButton Icons.study 22.0 (fun () -> dispatch (if r.Study.IsSome then ToggleStudyPlan else OpenStudy)) "study")
-                                    ]
-                                    Border.create [ Grid.column 4; Border.child (iconButton Icons.walk 22.0 (fun () -> dispatch (SetWalking true)) "walking") ]
-                                    Border.create [ Grid.column 5; Border.child (iconButton Icons.cards 22.0 (fun () -> dispatch (OpenCards None)) "cards") ]
-                                    Border.create [ Grid.column 6; Border.child (iconButton Icons.sigma 22.0 (fun () -> dispatch ToggleEquations) "equations") ]
-                                    Border.create [ Grid.column 7; Border.child (iconButton Icons.sliders 22.0 (fun () -> dispatch (SetShowSettings true)) "reader-settings") ]
-                                ]
-                            ]
-                            if titleRow then title
-                        ]
-                    ]
-                    match r.Study with
-                    | Some s when tutorTurn s ->
-                        Border.create [ DockPanel.dock Dock.Bottom; Border.child (tutorControls model r s dispatch) ]
-                        tutorStage model r s false dispatch
-                    | Some s ->
-                        Border.create [ DockPanel.dock Dock.Top; Border.child (studyStrip model r s dispatch) ]
-                        Border.create [ DockPanel.dock Dock.Bottom; Border.child (controls model r dispatch) ]
-                        stage r seg dispatch
-                    | None ->
-                        Border.create [ DockPanel.dock Dock.Bottom; Border.child (controls model r dispatch) ]
-                        stage r seg dispatch
-                ]
-            ]
-            if model.Settings.WalkingMode then walkingOverlay model r dispatch
+            player
+            if r.ShowMenu then menuOverlay model r dispatch
             if r.ShowOutline then outlineOverlay r dispatch
             if r.ShowEquations then equationsOverlay r dispatch
             match r.Help with
@@ -4200,22 +3887,46 @@ let private settingsView (model: Model) (dispatch: Msg -> unit) : IView =
                                         match model.VoicesStatus with
                                         | Some st -> label st 13.0 Palette.muted
                                         | None -> ()
+                                        label
+                                            ("The tutor: " + (if s.TutorVoiceId = "" then "chosen when you first study, different from the paper's" else s.TutorVoiceName)
+                                             + ". A different voice, so you always know whether the paper or the tutor is talking.")
+                                            13.0 Palette.muted
+                                        // each voice: tap it for the paper, or Tutor for the tutor
                                         for v in model.Voices do
                                             let selected = v.Id = s.VoiceId
-                                            plainButton (if selected then Palette.surfaceHigh else Palette.surface) [
-                                                Button.horizontalAlignment HorizontalAlignment.Stretch
-                                                Button.horizontalContentAlignment HorizontalAlignment.Left
-                                                Button.padding (Thickness(14.0, 10.0))
-                                                Button.cornerRadius 12.0
-                                                Button.onClick ((fun _ -> dispatch (PickVoice v)), SubPatchOptions.OnChangeOf v.Id)
-                                                Button.content (
-                                                    StackPanel.create [
-                                                        StackPanel.children [
-                                                            label v.Name 15.0 (if selected then Palette.accent else Palette.text)
-                                                            label (String.Join(", ", v.Languages)) 12.0 Palette.faint
-                                                        ]
+                                            let tutor = v.Id = s.TutorVoiceId
+                                            Grid.create [
+                                                Grid.columnDefinitions "*,Auto"
+                                                Grid.children [
+                                                    plainButton (if selected then Palette.surfaceHigh else Palette.surface) [
+                                                        Grid.column 0
+                                                        Button.horizontalAlignment HorizontalAlignment.Stretch
+                                                        Button.horizontalContentAlignment HorizontalAlignment.Left
+                                                        Button.padding (Thickness(14.0, 10.0))
+                                                        Button.cornerRadius 12.0
+                                                        Button.onClick ((fun _ -> dispatch (PickVoice v)), SubPatchOptions.OnChangeOf v.Id)
+                                                        Button.content (
+                                                            StackPanel.create [
+                                                                StackPanel.children [
+                                                                    label (if selected then v.Name + " · the paper" else v.Name) 15.0 (if selected then Palette.accent else Palette.text)
+                                                                    label (String.Join(", ", v.Languages)) 12.0 Palette.faint
+                                                                ]
+                                                            ]
+                                                        )
                                                     ]
-                                                )
+                                                    Button.create [
+                                                        Grid.column 1
+                                                        Button.margin (Thickness(8.0, 0.0, 0.0, 0.0))
+                                                        Button.padding (Thickness(12.0, 8.0))
+                                                        Button.cornerRadius 16.0
+                                                        Button.verticalAlignment VerticalAlignment.Center
+                                                        Button.background (if tutor then Palette.accent else Palette.surfaceHigh)
+                                                        Button.foreground (if tutor then Palette.onAccent else Palette.text)
+                                                        Button.fontSize 13.0
+                                                        Button.content "Tutor"
+                                                        Button.onClick ((fun _ -> dispatch (PickTutorVoice v)), SubPatchOptions.OnChangeOf v.Id)
+                                                    ]
+                                                ]
                                             ]
                                     sectionTitle "ABOUT THE CACHE"
                                     label "Each paper is analysed and narrated once. Audio is generated just ahead of where you listen and kept per voice, so replays, jumps back and re-opening never generate it again." 13.0 Palette.muted
@@ -4254,9 +3965,8 @@ let mutable canGoBack = false
 /// Set on every render: a review is open, so keys answer cards instead of controlling playback.
 let mutable reviewing = false
 
-/// Set on every render, for the W key: a paper is open, and whether it shows the walking player.
+/// Set on every render, for the S key: a paper is open.
 let mutable inReader = false
-let mutable walking = false
 
 /// Set on every render: a study session is on screen, so keys answer its questions instead of controlling playback.
 let mutable studying = false
@@ -4265,7 +3975,6 @@ let view (model: Model) (dispatch: Msg -> unit) : IView =
     canGoBack <- State.canGoBack model
     reviewing <- model.Review.IsSome
     inReader <- (match model.Screen with Screen.Reader _ -> true | _ -> false)
-    walking <- model.Settings.WalkingMode
     studying <- (match model.Screen with Screen.Reader { Study = Some s } -> tutorTurn s && not s.ShowTutor && model.Review.IsNone | _ -> false)
     Grid.create [
         Grid.background Palette.bg

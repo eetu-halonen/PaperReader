@@ -115,17 +115,18 @@ let durationMs (path: string) : int =
     if rate <= 0 || byteRate <= 0 then 0
     else int ((fs.Length - 44L) * 1000L / int64 byteRate)
 
-/// Writes the short rising two-note chime played when the microphone opens.
-let writeChime (destination: string) =
+/// Writes a few soft notes (frequency in Hz, length in ms), with a short gap between them.
+let writeNotes (destination: string) (notes: (float * int) list) =
     let rate = 24000
-    let note (hz: float) (ms: int) =
+    let note (hz: float, ms: int) =
         let n = rate * ms / 1000
         [| for i in 0 .. n - 1 do
                let t = float i / float rate
                // soft attack and release, so it doesn't click
                let envelope = min 1.0 (min (float i / 240.0) (float (n - i) / 480.0))
                yield int16 (0.28 * 32767.0 * envelope * sin (2.0 * Math.PI * hz * t)) |]
-    let samples = Array.concat [ note 660.0 90; Array.zeroCreate (rate * 30 / 1000); note 990.0 120 ]
+    let gap = Array.zeroCreate<int16> (rate * 30 / 1000)
+    let samples = notes |> List.map note |> List.reduce (fun a b -> Array.concat [ a; gap; b ])
     let pcm = Array.zeroCreate<byte> (samples.Length * 2)
     Buffer.BlockCopy(samples, 0, pcm, 0, pcm.Length)
     Directory.CreateDirectory(Path.GetDirectoryName destination) |> ignore
@@ -135,3 +136,6 @@ let writeChime (destination: string) =
         out.Write(header 1 rate pcm.Length)
         out.Write(pcm, 0, pcm.Length)
     File.Move(tmp, destination, true)
+
+/// Writes the short rising two-note chime played when the microphone opens.
+let writeChime (destination: string) = writeNotes destination [ 660.0, 90; 990.0, 120 ]

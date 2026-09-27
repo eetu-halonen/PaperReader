@@ -261,6 +261,45 @@ type OcrBlock = { X0: float; Y0: float; X1: float; Y1: float; Kind: string; Cont
 /// pictures found on the page (their id as the markdown names them, and the encoded image), when asked for.
 type OcrPage = { Index: int; Width: float; Height: float; Markdown: string; Blocks: OcrBlock list; Images: (string * byte[]) list }
 
+/// The pages of a Mistral OCR response.
+let parseOcr (body: string) : OcrPage list =
+    use d = JsonDocument.Parse body
+    let num (e: JsonElement) (name: string) =
+        match e.TryGetProperty name with
+        | true, v when v.ValueKind = JsonValueKind.Number -> v.GetDouble()
+        | _ -> 0.0
+    let str (e: JsonElement) (name: string) =
+        match e.TryGetProperty name with
+        | true, v when v.ValueKind = JsonValueKind.String -> v.GetString()
+        | _ -> ""
+    [ for p in d.RootElement.GetProperty("pages").EnumerateArray() do
+          let dims = match p.TryGetProperty "dimensions" with | true, x when x.ValueKind = JsonValueKind.Object -> Some x | _ -> None
+          let blocks =
+              match p.TryGetProperty "blocks" with
+              | true, bs when bs.ValueKind = JsonValueKind.Array ->
+                  [ for b in bs.EnumerateArray() ->
+                        { X0 = num b "top_left_x"; Y0 = num b "top_left_y"; X1 = num b "bottom_right_x"; Y1 = num b "bottom_right_y"
+                          Kind = str b "type"; Content = str b "content" } ]
+              | _ -> []
+          let images =
+              match p.TryGetProperty "images" with
+              | true, xs when xs.ValueKind = JsonValueKind.Array ->
+                  [ for x in xs.EnumerateArray() do
+                        let data = str x "image_base64"
+                        let data = match data.IndexOf "base64," with -1 -> data | k -> data.Substring(k + 7)
+                        if data <> "" then
+                            match (try Some(Convert.FromBase64String data) with _ -> None) with
+                            | Some bytes -> yield str x "id", bytes
+                            | None -> () ]
+              | _ -> []
+          yield
+              { Index = int (num p "index")
+                Width = dims |> Option.map (fun x -> num x "width") |> Option.defaultValue 0.0
+                Height = dims |> Option.map (fun x -> num x "height") |> Option.defaultValue 0.0
+                Markdown = str p "markdown"
+                Blocks = blocks
+                Images = images } ]
+
 let ocrModel = "mistral-ocr-latest"
 
 /// Mistral OCR on a document (a PDF, "application/pdf") or an image ("image/png", "image/jpeg", ...); returns
@@ -278,43 +317,7 @@ let ocrDocument (key: string) (mime: string) (bytes: byte[]) (withImages: bool) 
         if withImages then payload.["include_image_base64"] <- JsonValue.Create true
         let! body =
             send key (fun () -> new HttpRequestMessage(HttpMethod.Post, baseUrl + "/v1/ocr", Content = jsonContent payload)) ct
-        use d = JsonDocument.Parse body
-        let num (e: JsonElement) (name: string) =
-            match e.TryGetProperty name with
-            | true, v when v.ValueKind = JsonValueKind.Number -> v.GetDouble()
-            | _ -> 0.0
-        let str (e: JsonElement) (name: string) =
-            match e.TryGetProperty name with
-            | true, v when v.ValueKind = JsonValueKind.String -> v.GetString()
-            | _ -> ""
-        return
-            [ for p in d.RootElement.GetProperty("pages").EnumerateArray() do
-                  let dims = match p.TryGetProperty "dimensions" with | true, x when x.ValueKind = JsonValueKind.Object -> Some x | _ -> None
-                  let blocks =
-                      match p.TryGetProperty "blocks" with
-                      | true, bs when bs.ValueKind = JsonValueKind.Array ->
-                          [ for b in bs.EnumerateArray() ->
-                                { X0 = num b "top_left_x"; Y0 = num b "top_left_y"; X1 = num b "bottom_right_x"; Y1 = num b "bottom_right_y"
-                                  Kind = str b "type"; Content = str b "content" } ]
-                      | _ -> []
-                  let images =
-                      match p.TryGetProperty "images" with
-                      | true, xs when xs.ValueKind = JsonValueKind.Array ->
-                          [ for x in xs.EnumerateArray() do
-                                let data = str x "image_base64"
-                                let data = match data.IndexOf "base64," with -1 -> data | k -> data.Substring(k + 7)
-                                if data <> "" then
-                                    match (try Some(Convert.FromBase64String data) with _ -> None) with
-                                    | Some bytes -> yield str x "id", bytes
-                                    | None -> () ]
-                      | _ -> []
-                  yield
-                      { Index = int (num p "index")
-                        Width = dims |> Option.map (fun x -> num x "width") |> Option.defaultValue 0.0
-                        Height = dims |> Option.map (fun x -> num x "height") |> Option.defaultValue 0.0
-                        Markdown = str p "markdown"
-                        Blocks = blocks
-                        Images = images } ]
+        return parseOcr body
     }
 
 /// Mistral OCR without the pictures: the text and the layout blocks.

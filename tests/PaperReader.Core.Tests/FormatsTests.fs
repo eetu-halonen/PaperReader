@@ -274,3 +274,53 @@ let ``captions next to pictures and tables are attached to them`` () =
 let ``a Markdown picture whose alt text is a caption is captioned by it`` () =
     let resolve (_: string) = Some(Data(pngOf 300 200))
     Assert.Equal<string list>([ "IMG |Figure 1: Weights." ], texts (Markup.markdownBlocks "![Figure 1: Weights.](x.png)" resolve))
+
+// ---- PDFs read by Mistral OCR
+
+let private block kind (x0, y0, x1, y1) content : Mistral.OcrBlock =
+    { X0 = x0; Y0 = y0; X1 = x1; Y1 = y1; Kind = kind; Content = content }
+
+let private ocrPage index blocks : Mistral.OcrPage =
+    { Index = index; Width = 612.0; Height = 792.0; Markdown = ""; Blocks = blocks; Images = [] }
+
+[<Fact>]
+let ``OCR's spaced-out LaTeX is compacted, commands and text kept apart`` () =
+    Assert.Equal(@"PE _ {(pos, 2i)} = \sin (pos / 10000 ^ {2i})", MathText.compactLatex @"P E _ {(p o s, 2 i)} = \sin (p o s / 1 0 0 0 0 ^ {2 i})")
+    Assert.Equal(@"d ^ {- 0.5} \cdot x", MathText.compactLatex @"d ^ {- 0. 5} \cdot x")
+    Assert.Equal(@"\text{where head}_i = a", MathText.compactLatex @"\text{where head}_i = a")
+
+[<Fact>]
+let ``a PDF read by OCR keeps the running text, equations and figures and leaves out the rest`` () =
+    let pages =
+        [ ocrPage 0
+              [ block "aside_text" (0.0, 200.0, 20.0, 500.0) "arXiv:1706.03762v7"
+                block "title" (100.0, 50.0, 500.0, 70.0) "# A Paper"
+                block "title" (100.0, 80.0, 300.0, 90.0) "## Jane Doe*"
+                block "text" (100.0, 92.0, 300.0, 100.0) "jane@example.org"
+                block "title" (100.0, 120.0, 300.0, 130.0) "## Abstract"
+                block "text" (100.0, 140.0, 500.0, 400.0) "We compute the score as"
+                block "equation" (200.0, 410.0, 400.0, 430.0) @"\[ s = q k \tag {1} \]"
+                block "text" (100.0, 440.0, 500.0, 700.0) "and use it for"
+                block "footer" (100.0, 720.0, 500.0, 740.0) @"\( ^{1} \) A footnote."
+                block "footer" (300.0, 760.0, 310.0, 770.0) "1" ]
+          ocrPage 1
+              [ block "image" (100.0, 50.0, 500.0, 300.0) "![img-0.jpeg](img-0.jpeg)"
+                block "caption" (100.0, 310.0, 500.0, 330.0) "Figure 1: The model."
+                block "text" (100.0, 340.0, 500.0, 400.0) "ranking the answers."
+                block "references" (100.0, 500.0, 500.0, 700.0) "[1] A. Author. A book." ] ]
+    let doc = Formats.fromOcr pages (Some [| (612.0, 792.0); (612.0, 792.0) |]) "fallback" "test"
+    Assert.Equal("A Paper", doc.Title)
+    Assert.Equal<string list>(
+        [ "BREAK"; "H1 A Paper"; "H2 Abstract"; "P We compute the score as"; "M s = q k \\tag {1} None"
+          "P and use it for ranking the answers."
+          "BREAK"; "IMG |Figure 1: The model." ],
+        texts doc.Blocks)
+    // the figure is cut out of the PDF, caption included
+    match doc.Blocks |> List.tryPick (function Block.Image (Region r, _, _) -> Some r | _ -> None) with
+    | Some r -> Assert.True(r.Page = 1 && r.Y < 50.0 && r.Y + r.H > 330.0)
+    | None -> Assert.Fail "the figure should be a region of the page"
+    let a, _ = Blocks.analyze doc
+    let eq = a.Visuals |> Array.find (fun v -> v.Kind = VisualKind.Equation)
+    Assert.Equal(Some "1", eq.EqNumber)
+    Assert.Equal(Some "s = qk", eq.Latex)
+    Assert.Equal(1, (a.Visuals |> Array.find (fun v -> v.Id = "Fig1")).Page)
