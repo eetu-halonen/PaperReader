@@ -921,7 +921,12 @@ type Moment =
       /// The paper's sentences heard last, when the paper is being read.
       Heard: string list }
 
-type TutorTurn = { Question: string; Answer: string; Followups: string list }
+type TutorTurn =
+    { Question: string
+      Answer: string
+      /// An equation, figure or table the answer points to, shown with it.
+      Show: string option
+      Followups: string list }
 
 let private questionBlock (q: Question) (choice: int option) =
     let sb = StringBuilder()
@@ -963,7 +968,7 @@ let tutorPrompt (script: Script) (m: Moment) (question: string) =
     if not m.Said.IsEmpty then
         sb.Append("\nWHAT THE TUTOR JUST SAID ALOUD (oldest first; \"this\", \"that\" and \"the answer\" usually mean the last of it):\n") |> ignore
         for x in m.Said do sb.Append("\"\"\"\n").Append(x.Trim()).Append("\n\"\"\"\n") |> ignore
-    sb.Append("\nQUESTION: ").Append(question) |> ignore
+    sb.Append('\n').Append(Help.showsVisuals).Append("QUESTION: ").Append(question) |> ignore
     sb.ToString()
 
 /// The whole request: the paper, the conversation (the latest turns, as turns), and the question.
@@ -972,7 +977,7 @@ let tutorMessages (settings: Settings) (script: Script) (k: Help.Knowledge) (m: 
       for t in history |> List.rev |> List.truncate 6 |> List.rev do
           yield "user", t.Question
           // with the reply's tail, so the model keeps writing it
-          yield "assistant", sprintf "%s\n---\nSHOW: none\nNEXT: %s" t.Answer (String.Join(" | ", t.Followups))
+          yield "assistant", sprintf "%s\n---\nSHOW: %s\nNEXT: %s" t.Answer (defaultArg t.Show "none") (String.Join(" | ", t.Followups))
       yield "user", tutorPrompt script m question ]
 
 /// The one-tap questions to the tutor: about the lesson, or about a question answered wrong.

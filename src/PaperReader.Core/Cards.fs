@@ -110,7 +110,7 @@ let userPrompt (script: Script) (position: int) (existing: Card list) (request: 
     | Request.Answer turn ->
         atPosition
             (sprintf "The listener asked \"%s\" and was answered:\n\"\"\"\n%s\n\"\"\"\nMake 1 or 2 cards that keep what they learned \
-                      from this answer." turn.Question turn.Answer)
+                      from this answer." turn.Question (Help.withoutIds turn.Answer))
             (turn.About |> Option.bind script.Visual)
     | Request.Paper count ->
         sprintf "TASK: this time don't answer a question. Make a deck of about %d flashcards that covers the whole paper, for \

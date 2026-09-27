@@ -159,8 +159,8 @@ HOW TO ANSWER
 - Math: write every symbol with a subscript or superscript, and every short expression, as inline LaTeX between
   single dollars: $W_i^Q$, $d_k$, $\sqrt{d_k}$, $\mathbb{R}^{d \times k}$. Never write ^ or _ outside dollars.
   A longer formula that matters goes alone on its own line as $$LaTeX$$ (at most two such lines).
-- Never write the bracketed ids (like [E3]) in the answer; they are only for SHOW. Say "the equation on
-  screen" or use the paper's own numbering.
+- The bracketed ids (like [E3]) are for the app: write them only where the question says how. Say "the
+  equation on screen" or use the paper's own numbering.
 - For a recap, cover only what comes before the listener's position. Don't spoil what is ahead unless asked.
 - Answer in the language of the question.
 
@@ -184,6 +184,11 @@ FULL TEXT (Mistral OCR: markdown, formulas in LaTeX)
 let private sectionTitle (script: Script) (section: int) =
     if section > 0 && section < script.Sections.Length then script.Sections.[section].Title else "the beginning"
 
+/// How an answer shows the equations, figures and tables it names (see `referenced`).
+let showsVisuals =
+    "When the answer names an equation, figure or table of the paper, write its id in brackets right after the name the \
+     first time, like \"equation (3) [E3]\": the app shows it there, and never reads the id aloud.\n"
+
 /// Where the listener is and what the question is about.
 let userPrompt (script: Script) (position: int) (about: Visual option) (question: string) =
     let segs = script.Segments
@@ -203,7 +208,7 @@ let userPrompt (script: Script) (position: int) (about: Visual option) (question
     match about with
     | Some v -> sb.AppendFormat("The question is about [{0}] {1}.\n", v.Id, visualName v) |> ignore
     | None -> sb.Append("The question is about what they just heard.\n") |> ignore
-    sb.Append("\nQUESTION: ").Append(question) |> ignore
+    sb.Append(showsVisuals).Append("\nQUESTION: ").Append(question) |> ignore
     sb.ToString()
 
 /// The conversation for one question: earlier questions about the paper (the latest few) and this one.
@@ -227,6 +232,8 @@ let visibleAnswer (partial: string) =
     let text = if cut >= 0 then partial.Substring(0, cut) else partial
     // a separator just starting to arrive
     let text = Regex.Replace(text, @"\n-{0,2}$", "")
+    // an id still arriving ("[E1")
+    let text = Regex.Replace(text, @"\s*\[[A-Za-z][\w.,\s]*$", "")
     text.Trim()
 
 let parseReply (script: Script) (text: string) : Reply =
@@ -250,6 +257,58 @@ let parseReply (script: Script) (text: string) : Reply =
             |> List.ofArray
         | None -> []
     { Answer = answer; Show = show; Followups = next }
+
+// ---------------------------------------------------------------------------------------------
+// The equations, figures and tables an answer points to
+// ---------------------------------------------------------------------------------------------
+
+/// Ids written after a visual's name ("equation (3) [E3]", "[E3, E4]"); citations like [12] are left alone.
+let private idsRx = Regex(@"\s*\[([A-Za-z]+\d[\w.]*(?:\s*,\s*[A-Za-z]+\d[\w.]*)*)\]", RegexOptions.Compiled)
+
+/// A visual named by the paper's numbering: "Equation (1.9)", "Eq. 3", "Figure 2", "Table A.1", "Algorithm 1".
+let private numberedRx =
+    Regex(@"\b(Eq(?:uation)?s?\.?|Fig(?:ure)?s?\.?|Tab(?:le)?s?\.?|Alg(?:orithm)?s?\.?)\s*\(?([A-Z]?\d+(?:\.\d+)*)\)?",
+          RegexOptions.Compiled ||| RegexOptions.IgnoreCase)
+
+/// The text without the ids the model writes for the app.
+let withoutIds (text: string) = idsRx.Replace(text, "")
+
+/// Whether a visual has the paper's number `n`, or is a group of equations ("3–5") that includes it.
+let private numbered (n: string) (v: Visual) =
+    match v.EqNumber with
+    | Some e when e = n -> true
+    | Some e ->
+        match e.Split([| '–'; '-' |]) with
+        | [| a; b |] ->
+            match Int32.TryParse a, Int32.TryParse b, Int32.TryParse n with
+            | (true, a), (true, b), (true, n) -> a <= n && n <= b
+            | _ -> a.Trim() = n || b.Trim() = n
+        | _ -> false
+    | None -> false
+
+/// The equations, figures and tables a piece of an answer points to, in order: by the ids written after their names,
+/// or by the paper's own numbering ("Figure 2", "equation (1.9)").
+let referenced (script: Script) (text: string) : string list =
+    let byId =
+        [ for m in idsRx.Matches text do
+              for id in m.Groups.[1].Value.Split(',') do
+                  match script.Visual(id.Trim()) with
+                  | Some v when v.Kind <> VisualKind.Inline -> yield m.Index, v.Id
+                  | _ -> () ]
+    // numbers inside formulas aren't mentions
+    let prose = Regex.Replace(text, @"\$[^$]*\$", fun m -> String(' ', m.Length))
+    let byNumber =
+        [ for m in numberedRx.Matches prose do
+              let kind =
+                  match Char.ToLowerInvariant m.Groups.[1].Value.[0] with
+                  | 'e' -> VisualKind.Equation
+                  | 'f' -> VisualKind.Figure
+                  | 't' -> VisualKind.Table
+                  | _ -> VisualKind.Algorithm
+              match script.Visuals |> Array.tryFind (fun v -> v.Kind = kind && numbered m.Groups.[2].Value v) with
+              | Some v -> yield m.Index, v.Id
+              | None -> () ]
+    byId @ byNumber |> List.sortBy fst |> List.map snd |> List.distinct
 
 /// Answer text split into prose and display formulas ($$…$$), for showing formulas typeset.
 [<RequireQualifiedAccess>]
@@ -317,7 +376,7 @@ let spoken (answer: string) =
     pieces answer
     |> List.map (function
         | Piece.Prose p ->
-            let p = Regex.Replace(p, @"(?m)^\s*[-*•]\s+", "")
+            let p = Regex.Replace(withoutIds p, @"(?m)^\s*[-*•]\s+", "")
             let p = Regex.Replace(p, @"\*\*(.+?)\*\*|__(.+?)__|(?<![\w*])\*(?![\s*])(.+?)(?<![\s*])\*(?![\w*])", "$1$2$3")
             Regex.Replace(p, @"\$([^$\n]+)\$", fun m -> speakLatex m.Groups.[1].Value)
         | Piece.Formula f -> speakLatex f + ".")

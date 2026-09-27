@@ -96,6 +96,8 @@ module Icons =
     let more = "M3.8 12 A2 2 0 1 0 7.8 12 A2 2 0 1 0 3.8 12 Z M10 12 A2 2 0 1 0 14 12 A2 2 0 1 0 10 12 Z M16.2 12 A2 2 0 1 0 20.2 12 A2 2 0 1 0 16.2 12 Z"
     /// A phone on its side, and upright: which way the full-screen view turns.
     let phoneSideways = "M4.5 7 H19.5 A1.5 1.5 0 0 1 21 8.5 V15.5 A1.5 1.5 0 0 1 19.5 17 H4.5 A1.5 1.5 0 0 1 3 15.5 V8.5 A1.5 1.5 0 0 1 4.5 7 Z M18 12 H18.1"
+    let history = "M5 12 A7 7 0 1 0 7.05 7.05 M6.5 3.5 V7.5 H10.5 M12 8.5 V12 L14.5 13.5"
+    let newChat = "M5 4.5 H19 A2 2 0 0 1 21 6.5 V15 A2 2 0 0 1 19 17 H10.5 L6.5 20.5 V17 H5 A2 2 0 0 1 3 15 V6.5 A2 2 0 0 1 5 4.5 Z M12 7.5 V14 M8.75 10.75 H15.25"
     let phoneUpright = "M8.5 3 H15.5 A1.5 1.5 0 0 1 17 4.5 V19.5 A1.5 1.5 0 0 1 15.5 21 H8.5 A1.5 1.5 0 0 1 7 19.5 V4.5 A1.5 1.5 0 0 1 8.5 3 Z M12 18 H12.1"
 
 let icon (data: string) (color: string) (size: float) (filled: bool) : IView =
@@ -1374,19 +1376,39 @@ let private mathImage (latex: string) (display: bool) (emDp: float) : (Bitmap * 
                 if not (isNull painter.ErrorMessage) then None
                 else
                     let r = painter.Measure(0.0f)
-                    let pad = 2.0f
-                    let w, h = int (ceil (r.Width + 2.0f * pad + 4.0f)), int (ceil (r.Height + 2.0f * pad))
-                    if w <= 0 || h <= 0 then None
+                    // the measure is short for some layouts (rows of an aligned block): drawn with room to spare,
+                    // then cut to what was drawn
+                    let spare = painter.FontSize * 2.0f
+                    let w, h = int (ceil (r.Width * 1.5f + 2.0f * spare)), int (ceil (r.Height * 1.5f + 2.0f * spare))
+                    if r.Width <= 0.0f || r.Height <= 0.0f then None
                     else
-                        use bmp = new SkiaSharp.SKBitmap(w, h)
+                        use canvasBmp = new SkiaSharp.SKBitmap(w, h)
+                        let x0, baseline = spare - r.X, spare - r.Y
+                        do
+                            use c = new SkiaSharp.SKCanvas(canvasBmp)
+                            c.Clear SkiaSharp.SKColors.Transparent
+                            painter.Draw(c, x0, baseline)
+                        // what was drawn, and at least the measured box
+                        let mutable left, top, right, bottom = int x0, int spare, int (ceil (x0 + r.Width)), int (ceil (spare + r.Height))
+                        let pixels = canvasBmp.Pixels
+                        for y in 0 .. h - 1 do
+                            for x in 0 .. w - 1 do
+                                if pixels.[y * w + x].Alpha > 0uy then
+                                    if x < left then left <- x
+                                    if x > right then right <- x
+                                    if y < top then top <- y
+                                    if y > bottom then bottom <- y
+                        let pad = 2
+                        let left, top = max 0 (left - pad), max 0 (top - pad)
+                        let right, bottom = min (w - 1) (right + pad), min (h - 1) (bottom + pad)
+                        use bmp = new SkiaSharp.SKBitmap(right - left + 1, bottom - top + 1)
                         do
                             use c = new SkiaSharp.SKCanvas(bmp)
                             c.Clear SkiaSharp.SKColors.Transparent
-                            painter.Draw(c, pad - r.X, pad - r.Y)
+                            c.DrawBitmap(canvasBmp, float32 -left, float32 -top)
                         use data = bmp.Encode(SkiaSharp.SKEncodedImageFormat.Png, 100)
                         use ms = new MemoryStream(data.ToArray())
-                        // r.Y is the top relative to the baseline, so the part below it is the rest of the height
-                        let depth = float (r.Height + r.Y + pad) / mathDensity
+                        let depth = float (bottom + 1 - int baseline) / mathDensity
                         Some(new Bitmap(ms), depth)
             with _ -> None
         mathImages.[key] <- made
@@ -1418,9 +1440,18 @@ let private richParagraph (text: string) (size: float) (color: string) : IView =
               else yield m.Groups.[2].Value, false, true
               last <- m.Index + m.Length
           if last < text.Length then yield text.Substring last, false, false ]
+    // lines don't grow around inline images: they are all made tall enough for the tallest formula (a fraction,
+    // a sum), which would otherwise spill over the lines above and below it. The extra height is shared above and
+    // below the text, so the baseline sits (em) ascent + half the extra from the top.
+    let ascent, descent = 0.97 * size, 0.25 * size
+    let above, below =
+        Text.RegularExpressions.Regex.Matches(text, @"\$([^$\n]+)\$")
+        |> Seq.choose (fun m -> mathImage m.Groups.[1].Value false size)
+        |> Seq.fold (fun (a, b) (bmp, depth) -> max a (float bmp.PixelSize.Height / mathDensity - depth), max b depth) (ascent, descent)
+    let lineHeight = max (size * 1.5) (ascent + descent + 2.0 * max (above - ascent) (below - descent) + 4.0)
     TextBlock.create [
         TextBlock.fontSize size
-        TextBlock.lineHeight (size * 1.5)
+        TextBlock.lineHeight lineHeight
         TextBlock.foreground color
         TextBlock.textWrapping TextWrapping.Wrap
         TextBlock.inlines [
@@ -1441,8 +1472,8 @@ let private richParagraph (text: string) (size: float) (color: string) : IView =
         ]
     ]
 
-/// Paragraphs, bullet lists and formulas.
-let private richText (text: string) (size: float) (color: string) : IView =
+/// Paragraphs, bullet lists and formulas; `after` adds what goes under a paragraph (the equations it names).
+let private richTextWith (after: string -> IView list) (text: string) (size: float) (color: string) : IView =
     StackPanel.create [
         StackPanel.spacing 10.0
         StackPanel.children [
@@ -1451,26 +1482,39 @@ let private richText (text: string) (size: float) (color: string) : IView =
                 | Help.Piece.Prose text ->
                     for para in Text.RegularExpressions.Regex.Split(text, @"\n\s*\n") do
                         let para = Text.RegularExpressions.Regex.Replace(para.Trim(), @"(?m)^\s*[-*]\s+", "• ")
-                        if para <> "" then richParagraph para size color
+                        let shown = Help.withoutIds para
+                        if shown <> "" then richParagraph shown size color
+                        yield! after para
                 | Help.Piece.Formula latex ->
                     match mathImage latex true (size + 1.0) with
                     | Some (bmp, depth) ->
-                        ScrollViewer.create [
-                            ScrollViewer.horizontalScrollBarVisibility ScrollBarVisibility.Auto
-                            ScrollViewer.verticalScrollBarVisibility ScrollBarVisibility.Disabled
-                            ScrollViewer.content (mathControl bmp depth false)
+                        // too wide for the screen: smaller, whole
+                        Viewbox.create [
+                            Viewbox.stretch Stretch.Uniform
+                            Viewbox.stretchDirection StretchDirection.DownOnly
+                            Viewbox.horizontalAlignment HorizontalAlignment.Center
+                            Viewbox.child (mathControl bmp depth false)
                         ]
                     | None -> label latex 15.0 Palette.muted
         ]
     ]
 
-/// An answer in Ask.
-let private answerBody (answer: string) : IView = richText answer 16.0 Palette.text
+/// Paragraphs, bullet lists and formulas.
+let private richText (text: string) (size: float) (color: string) : IView = richTextWith (fun _ -> []) text size color
 
-/// A small image of an equation or figure, tapped to see it full size.
+/// A small image of an equation or figure, tapped to see it full size (an equation without one: its LaTeX, typeset).
 let private visualThumb (r: ReaderState) (id: string) (maxHeight: float) (dispatch: Msg -> unit) : IView =
     let paths = Store.Paths((Services.get ()).DataDir)
     match r.Script.Visual id, bitmap (paths.Image(r.Paper.Id, id)) with
+    | Some v, None when v.Latex.IsSome ->
+        StackPanel.create [
+            StackPanel.spacing 4.0
+            StackPanel.children [
+                label (sprintf "%s · page %d" (visualName v) (v.Page + 1)) 11.0 Palette.muted
+                // the paper's number is in the label
+                richText ("$$" + Text.RegularExpressions.Regex.Replace(v.Latex.Value, @"\\(?:tag|label)\s*\{[^{}]*\}|\\(?:nonumber|notag)", "") + "$$") 15.0 Palette.text
+            ]
+        ]
     | Some v, Some bmp ->
         Border.create [
             Border.background Palette.paper
@@ -1501,34 +1545,128 @@ let private visualThumb (r: ReaderState) (id: string) (maxHeight: float) (dispat
         ]
     | _ -> Border.create []
 
-/// One question and its answer.
-let private turnView (model: Model) (r: ReaderState) (h: HelpState) (t: HelpTurn) (earlier: bool) (dispatch: Msg -> unit) : IView =
-    let speaking = h.Speaking = Some t.AskedUtc
+/// An answer, with each equation, figure or table it names under the paragraph that names it, and the one it points
+/// to after it (unless that is what the question was about, or already shown).
+let private answerView (r: ReaderState) (answer: string) (size: float) (show: string option) (about: string option) (dispatch: Msg -> unit) : IView =
+    let shown = HashSet<string>()
+    let after (para: string) = [ for id in Help.referenced r.Script para do if shown.Add id then visualThumb r id 180.0 dispatch ]
+    StackPanel.create [
+        StackPanel.spacing 10.0
+        StackPanel.children [
+            richTextWith after answer size Palette.text
+            match show with
+            | Some v when about <> Some v && not (shown.Contains v) -> visualThumb r v 180.0 dispatch
+            | _ -> ()
+        ]
+    ]
+
+/// "Make a card" from an answer, or how it went.
+let private cardLink (model: Model) (r: ReaderState) (t: HelpTurn) (dispatch: Msg -> unit) : IView =
     let making = model.Making |> Option.exists (fun m -> m.PaperId = r.Paper.Id && m.What = t.Question)
     let made =
         match model.Made with
         | Some (p, cards) when p = r.Paper.Id -> cards |> List.filter (fun c -> c.Origin = t.Question) |> List.length
         | _ -> 0
+    if making then label "Making a card…" 14.0 Palette.muted
+    elif made > 0 then label (if made = 1 then "Card added" else sprintf "%d cards added" made) 14.0 Palette.muted
+    else textLink "Make a card" (fun () -> dispatch (MakeCards(r.Paper.Id, Cards.Request.Answer t))) ("card", t.AskedUtc)
+
+/// An answer in Ask, and what can be done with it.
+let private turnAnswer (model: Model) (r: ReaderState) (h: HelpState) (t: HelpTurn) (earlier: bool) (dispatch: Msg -> unit) : IView =
+    let speaking = h.Speaking = Some t.AskedUtc
     StackPanel.create [
         StackPanel.spacing 10.0
         StackPanel.children [
-            label t.Question 15.0 Palette.accent
-            answerBody t.Answer
-            match t.Show with
-            | Some v when t.About <> Some v -> visualThumb r v 180.0 dispatch
-            | _ -> ()
-            StackPanel.create [
-                StackPanel.orientation Orientation.Horizontal
-                StackPanel.children [
+            answerView r t.Answer 16.0 t.Show t.About dispatch
+            WrapPanel.create [
+                WrapPanel.children [
                     textLink (if speaking then "Stop reading" else "Read it to me") (fun () -> dispatch (if speaking then StopSpeaking else SpeakAnswer t)) (t.AskedUtc, speaking)
                     if earlier then textLink "Listen from there" (fun () -> dispatch (JumpToSegment(max 0 (t.Segment - 1)))) t.AskedUtc
-                    if making then label "Making a card…" 14.0 Palette.muted
-                    elif made > 0 then label (if made = 1 then "Card added" else sprintf "%d cards added" made) 14.0 Palette.muted
-                    else textLink "Make a card" (fun () -> dispatch (MakeCards(r.Paper.Id, Cards.Request.Answer t))) ("card", t.AskedUtc)
+                    cardLink model r t dispatch
                 ]
             ]
         ]
     ]
+
+/// One question and its answer.
+let private turnView (model: Model) (r: ReaderState) (h: HelpState) (t: HelpTurn) (dispatch: Msg -> unit) : IView =
+    StackPanel.create [
+        StackPanel.spacing 10.0
+        StackPanel.children [ label t.Question 15.0 Palette.accent; turnAnswer model r h t false dispatch ]
+    ]
+
+/// When a question was asked, briefly: the time today, the day this year, or the date.
+let private askedWhen (utc: DateTime) =
+    let t, now = utc.ToLocalTime(), DateTime.Now
+    if t.Date = now.Date then t.ToString "HH:mm"
+    elif t.Year = now.Year then t.ToString "d MMM"
+    else t.ToString "d MMM yyyy"
+
+/// The earlier questions about the paper, newest first, each opened by a tap to its answer (`answer`); and a way to
+/// delete them all.
+let private pastView (p: Past) (answer: HelpTurn -> IView) (dispatch: Msg -> unit) : IView list =
+    [ textLink "‹ Back to the conversation" (fun () -> dispatch (ShowPast false)) "past-back"
+      if p.Turns.IsEmpty then label "No questions about this paper yet." 15.0 Palette.muted
+      for t in List.rev p.Turns do
+          let opened = p.Opened = Some t.AskedUtc
+          Border.create [
+              Border.background (if opened then Palette.surface else Palette.bg)
+              Border.cornerRadius 14.0
+              Border.padding (Thickness(12.0, 10.0))
+              Border.child (
+                  StackPanel.create [
+                      StackPanel.spacing 10.0
+                      StackPanel.children [
+                          Grid.create [
+                              Grid.columnDefinitions "*,Auto"
+                              Grid.background "Transparent"
+                              Grid.onTapped ((fun _ -> dispatch (OpenPast t.AskedUtc)), SubPatchOptions.OnChangeOf t.AskedUtc)
+                              Grid.children [
+                                  TextBlock.create [
+                                      Grid.column 0
+                                      TextBlock.text t.Question
+                                      TextBlock.fontSize 15.0
+                                      TextBlock.foreground (if opened then Palette.accent else Palette.text)
+                                      TextBlock.textWrapping TextWrapping.Wrap
+                                      if not opened then TextBlock.maxLines 2
+                                      TextBlock.textTrimming TextTrimming.WordEllipsis
+                                  ]
+                                  TextBlock.create [
+                                      Grid.column 1
+                                      TextBlock.text (askedWhen t.AskedUtc)
+                                      TextBlock.fontSize 12.0
+                                      TextBlock.foreground Palette.faint
+                                      TextBlock.margin (Thickness(12.0, 2.0, 0.0, 0.0))
+                                  ]
+                              ]
+                          ]
+                          if opened then answer t
+                      ]
+                  ]
+              )
+          ]
+      if not p.Turns.IsEmpty then
+          if p.ConfirmClear then
+              StackPanel.create [
+                  StackPanel.spacing 10.0
+                  StackPanel.children [
+                      label (if p.Turns.Length = 1 then "Delete the question and its answer?" else sprintf "Delete all %d questions and their answers?" p.Turns.Length) 15.0 Palette.text
+                      StackPanel.create [
+                          StackPanel.orientation Orientation.Horizontal
+                          StackPanel.spacing 10.0
+                          StackPanel.children [
+                              pill "Delete" (fun () -> dispatch (ClearPast true)) true
+                              pill "Keep" (fun () -> dispatch (ShowPast true)) false
+                          ]
+                      ]
+                  ]
+              ]
+          else textLink "Clear history" (fun () -> dispatch (ClearPast false)) "past-clear" ]
+
+/// The buttons at the top of a conversation: the history, and a new conversation when this one has begun.
+let private conversationButtons (started: bool) (past: bool) (dispatch: Msg -> unit) : IView list =
+    [ if started && not past then iconButton Icons.newChat 22.0 (fun () -> dispatch NewConversation) "new-chat"
+      iconButton Icons.history 22.0 (fun () -> dispatch (ShowPast(not past))) ("history", past) ]
 
 /// A button big enough to hit while walking, icon above its word; smaller type on the lower buttons of short screens.
 let private walkButton (column: int) (height: float) (data: string) (text: string) (primary: bool) (key: obj) (onClick: unit -> unit) : IView =
@@ -1588,7 +1726,6 @@ let private helpOverlay (model: Model) (r: ReaderState) (h: HelpState) (dispatch
     let about = h.About |> Option.bind r.Script.Visual
     let seg = r.Script.Segments.[max 0 (min h.Position (r.Script.Segments.Length - 1))]
     let session = h.History |> List.skip (min h.Earlier h.History.Length) |> List.rev
-    let earlier = h.History |> List.truncate h.Earlier |> List.rev
     let hasKey = Settings.hasKey model.Settings
     let busy = h.Pending.IsSome || h.Mic = Mic.Transcribing
     let taps =
@@ -1628,15 +1765,23 @@ let private helpOverlay (model: Model) (r: ReaderState) (h: HelpState) (dispatch
                                 StackPanel.verticalAlignment VerticalAlignment.Center
                                 StackPanel.children [
                                     TextBlock.create [
-                                        TextBlock.text "Ask"
+                                        TextBlock.text (if h.Past.IsSome then "Earlier questions" else "Ask")
                                         TextBlock.fontSize 22.0
                                         TextBlock.fontWeight FontWeight.Bold
                                         TextBlock.foreground Palette.text
                                     ]
-                                    label "Answers come from the paper, about where you are in it." 12.0 Palette.muted
+                                    label (if h.Past.IsSome then "Everything asked about this paper." else "Answers come from the paper, about where you are in it.") 12.0 Palette.muted
                                 ]
                             ]
-                            Border.create [ Grid.column 1; Border.child (iconButton Icons.close 22.0 (fun () -> dispatch (CloseHelp false)) "close-help") ]
+                            StackPanel.create [
+                                Grid.column 1
+                                StackPanel.orientation Orientation.Horizontal
+                                StackPanel.verticalAlignment VerticalAlignment.Top
+                                StackPanel.children [
+                                    yield! conversationButtons (not session.IsEmpty && h.Pending.IsNone) h.Past.IsSome dispatch
+                                    iconButton Icons.close 22.0 (fun () -> dispatch (CloseHelp false)) "close-help"
+                                ]
+                            ]
                         ]
                     ]
                     // taps, typing, the microphone, and back to listening
@@ -1652,7 +1797,7 @@ let private helpOverlay (model: Model) (r: ReaderState) (h: HelpState) (dispatch
                                     match h.Error with
                                     | Some e -> label e 14.0 Palette.danger
                                     | None -> ()
-                                    if hasKey && not busy then
+                                    if hasKey && not busy && h.Past.IsNone then
                                         WrapPanel.create [
                                             WrapPanel.children [ for a, text in taps -> chip text (fun () -> dispatch (AskHelp(a, false))) ]
                                         ]
@@ -1717,13 +1862,16 @@ let private helpOverlay (model: Model) (r: ReaderState) (h: HelpState) (dispatch
                         )
                     ]
                     // a new question starts a fresh scroll view, at the top where the newest exchange is
-                    View.withKey (sprintf "help-%d-%b" h.History.Length h.Pending.IsSome) (
+                    View.withKey (sprintf "help-%d-%b-%d-%b" h.History.Length h.Pending.IsSome h.Earlier h.Past.IsSome) (
                     ScrollViewer.create [
                         ScrollViewer.content (
                             StackPanel.create [
                                 StackPanel.margin (Thickness(20.0, 8.0, 20.0, 20.0))
-                                StackPanel.spacing 18.0
+                                StackPanel.spacing (if h.Past.IsSome then 8.0 else 18.0)
                                 StackPanel.children [
+                                  match h.Past with
+                                  | Some past -> yield! pastView past (fun t -> turnAnswer model r h t true dispatch) dispatch
+                                  | None ->
                                     // what the questions are about
                                     StackPanel.create [
                                         StackPanel.spacing 8.0
@@ -1778,17 +1926,11 @@ let private helpOverlay (model: Model) (r: ReaderState) (h: HelpState) (dispatch
                                                             label (match h.Preparing with Some step -> step + "…" | None -> "Thinking…") 14.0 Palette.muted
                                                         ]
                                                     ]
-                                                else answerBody p.Partial
+                                                else answerView r p.Partial 16.0 None None dispatch
                                             ]
                                         ]
                                     | None -> ()
-                                    for t in session do turnView model r h t false dispatch
-                                    if not earlier.IsEmpty then
-                                        textLink
-                                            (if h.ShowEarlier then "Hide earlier questions" else sprintf "Earlier questions about this paper (%d)" earlier.Length)
-                                            (fun () -> dispatch ToggleEarlier) h.ShowEarlier
-                                        if h.ShowEarlier then
-                                            for t in earlier do turnView model r h t true dispatch
+                                    for t in session do turnView model r h t dispatch
                                 ]
                             ]
                         )
@@ -3188,7 +3330,11 @@ let private studyGoing (r: ReaderState) (s: StudyState) =
     if tutorTurn s then s.Running && (s.Voice |> Option.exists (fun v -> v.Playing) || s.Ear <> Ear.Off) else r.Playing
 
 /// A sheet over the reader with a title, a close button and a scrolling body.
-let private studySheet (title: string) (subtitle: string) (close: unit -> unit) (closeKey: string) (body: IView list) (footer: IView option) : IView =
+let rec private studySheet (title: string) (subtitle: string) (close: unit -> unit) (closeKey: string) (body: IView list) (footer: IView option) : IView =
+    studySheetWith [] title subtitle close closeKey body footer
+
+/// A sheet with more buttons in its header, before the close button.
+and private studySheetWith (buttons: IView list) (title: string) (subtitle: string) (close: unit -> unit) (closeKey: string) (body: IView list) (footer: IView option) : IView =
     Border.create [
         Border.background Palette.bg
         Border.child (
@@ -3213,7 +3359,12 @@ let private studySheet (title: string) (subtitle: string) (close: unit -> unit) 
                                     if subtitle <> "" then label subtitle 13.0 Palette.muted
                                 ]
                             ]
-                            Border.create [ Grid.column 1; Border.child (iconButton Icons.close 22.0 close closeKey) ]
+                            StackPanel.create [
+                                Grid.column 1
+                                StackPanel.orientation Orientation.Horizontal
+                                StackPanel.verticalAlignment VerticalAlignment.Top
+                                StackPanel.children [ yield! buttons; iconButton Icons.close 22.0 close closeKey ]
+                            ]
                         ]
                     ]
                     match footer with
@@ -3304,12 +3455,23 @@ let private tutorOverlay (model: Model) (r: ReaderState) (s: StudyState) (dispat
     let answer = s.Voice |> Option.filter (fun v -> Some v.Id <> (s.Aside |> Option.map (fun a -> a.Id)))
     let going = s.Running && answer |> Option.exists (fun v -> v.Playing)
     let body: IView list =
+      match s.Past with
+      | Some past ->
+          pastView past (fun t ->
+              StackPanel.create [
+                  StackPanel.spacing 10.0
+                  StackPanel.children [
+                      answerView r t.Answer 17.0 t.Show t.About dispatch
+                      WrapPanel.create [ WrapPanel.children [ cardLink model r t dispatch ] ]
+                  ]
+              ]) dispatch
+      | None ->
         [ for i, t in List.indexed s.Chat do
               StackPanel.create [
                   StackPanel.spacing 8.0
                   StackPanel.children [
                       label t.Question 15.0 Palette.accent
-                      richText t.Answer 17.0 Palette.text
+                      answerView r t.Answer 17.0 t.Show None dispatch
                       if i = s.Chat.Length - 1 && answer.IsSome && not going && s.Pending.IsNone then
                           WrapPanel.create [ WrapPanel.children [ textLink "Hear it again" (fun () -> dispatch StudyAgain) ("again", i) ] ]
                   ]
@@ -3318,7 +3480,7 @@ let private tutorOverlay (model: Model) (r: ReaderState) (s: StudyState) (dispat
           | Some (_, q, partial) ->
               StackPanel.create [
                   StackPanel.spacing 8.0
-                  StackPanel.children [ label q 15.0 Palette.accent; (if partial = "" then spinnerLine "Thinking…" else richText partial 17.0 Palette.text) ]
+                  StackPanel.children [ label q 15.0 Palette.accent; (if partial = "" then spinnerLine "Thinking…" else answerView r partial 17.0 None None dispatch) ]
               ]
           | None -> ()
           yield! earLine s "ask your question"
@@ -3364,7 +3526,10 @@ let private tutorOverlay (model: Model) (r: ReaderState) (s: StudyState) (dispat
                 ]
             ]
         ]
-    studySheet "Ask the tutor" about (fun () -> dispatch ToggleTutor) "close-tutor" body (Some footer)
+    let buttons = conversationButtons (not s.Chat.IsEmpty && s.Pending.IsNone) s.Past.IsSome dispatch
+    if s.Past.IsSome then
+        studySheetWith buttons "Earlier questions" "Everything asked about this paper." (fun () -> dispatch ToggleTutor) "close-tutor" body (Some footer)
+    else studySheetWith buttons "Ask the tutor" about (fun () -> dispatch ToggleTutor) "close-tutor" body (Some footer)
 
 // ---------------------------------------------------------------------------------------------
 // The player: big buttons and the equation large, for listening and studying on the move

@@ -25,6 +25,15 @@ type Mic =
 /// A question on its way: the answer so far streams into Partial.
 type PendingAnswer = { Id: Guid; Question: string; Partial: string; ByVoice: bool }
 
+/// Earlier questions about a paper (asked in Ask and to the tutor), shown in place of the conversation.
+type Past =
+    { /// Every question asked about the paper, oldest first.
+      Turns: HelpTurn list
+      /// The one opened to show its answer (by when it was asked).
+      Opened: DateTime option
+      /// "Clear history" was tapped: the next tap deletes them.
+      ConfirmClear: bool }
+
 /// The Ask panel: questions about the paper while listening.
 type HelpState =
     { /// Segment the questions are about (where the listener paused).
@@ -33,9 +42,11 @@ type HelpState =
       About: string option
       /// Every question asked about this paper, oldest first.
       History: HelpTurn list
-      /// How many of History were asked before the panel opened (shown under "Earlier questions").
+      /// How many of History came before this conversation: it starts empty when the panel opens, and again when
+      /// a new one is started.
       Earlier: int
-      ShowEarlier: bool
+      /// The earlier questions, when shown.
+      Past: Past option
       /// The paper text and figure notes; None while they are prepared.
       Knowledge: Help.Knowledge option
       Preparing: string option
@@ -211,8 +222,10 @@ type StudyState =
       Said: string list
       /// The tutor comes in after the paper: its next words start with its sound.
       Cue: bool
-      /// The conversation with the tutor in this session.
+      /// The conversation with the tutor: it starts empty each time the panel opens (earlier ones are in Past).
       Chat: Study.TutorTurn list
+      /// The earlier questions about the paper, when shown.
+      Past: Past option
       Followups: string list
       /// A question to the tutor on its way: its id, the question, and the answer so far.
       Pending: (Guid * string * string) option
@@ -411,7 +424,14 @@ type Msg =
     | HelpAnswered of askId: Guid * Result<HelpTurn, string>
     | SetHelpInput of string
     | SendHelpInput
-    | ToggleEarlier
+    /// Starts a new conversation in Ask or with the tutor (the one before stays in the history).
+    | NewConversation
+    /// Shows the earlier questions about the paper in place of the conversation, or goes back to it.
+    | ShowPast of bool
+    /// Opens (or closes) an earlier question to show its answer.
+    | OpenPast of asked: DateTime
+    /// Deletes every question asked about the paper; false asks first.
+    | ClearPast of confirmed: bool
     | MicPressed
     | MicStarted of Result<unit, string>
     | Transcribed of Result<string, string>
@@ -790,7 +810,8 @@ let private startAsk (settings: Settings) (r: ReaderState) (h: HelpState) (k: He
     let askId = Guid.NewGuid()
     let pending = { Id = askId; Question = Help.questionText ask about; Partial = ""; ByVoice = byVoice }
     let ct = h.Cancel.Token
-    let history = h.History
+    // this conversation, which starts empty
+    let history = h.History |> List.skip (min h.Earlier h.History.Length)
     let work =
         Cmd.ofEffect (fun dispatch ->
             Task.Run(fun () ->
@@ -804,7 +825,7 @@ let private startAsk (settings: Settings) (r: ReaderState) (h: HelpState) (k: He
                 }
                 :> Task)
             |> ignore)
-    { h with Pending = Some pending; Error = None; Queued = None; Input = (match ask with Help.Ask.Free _ -> "" | _ -> h.Input) }, work
+    { h with Pending = Some pending; Error = None; Queued = None; Past = None; Input = (match ask with Help.Ask.Free _ -> "" | _ -> h.Input) }, work
 
 /// Synthesis of the answer being read aloud.
 let mutable private speakCancel = new CancellationTokenSource()
@@ -1998,7 +2019,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                   About = about
                   History = history
                   Earlier = history.Length
-                  ShowEarlier = false
+                  Past = None
                   Knowledge = known
                   Preparing = (if known.IsNone && hasKey then Some "Getting ready" else None)
                   Queued = None
@@ -2076,11 +2097,54 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             | Some p, Error e when p.Id = askId -> { h with Pending = None; Error = Some e }, Cmd.none
             | _ -> h, Cmd.none)
     | SetHelpInput text -> withHelp model (fun _ h -> { h with Input = text }, Cmd.none)
+    | NewConversation ->
+        match model with
+        | Studying (r, s) when s.ShowTutor ->
+            if s.Pending.IsSome then model, Cmd.none
+            else
+                // the answer being said stops with it
+                let r, s, cmd = if s.Voice |> Option.exists (fun v -> v.Playing) then hold r s else r, s, Cmd.none
+                setStudy model r { s with Chat = []; Followups = []; Past = None; Error = None }, cmd
+        | _ ->
+            withHelp model (fun _ h ->
+                if h.Pending.IsSome then h, Cmd.none
+                else { notSpeaking h with Earlier = h.History.Length; Past = None; Error = None }, stopAnswerAudio h)
+    | ShowPast show ->
+        let past (turns: HelpTurn list) (p: Past option) =
+            if not show then None
+            else
+                match p with
+                | Some p -> Some { p with ConfirmClear = false }
+                | None -> Some { Turns = turns; Opened = None; ConfirmClear = false }
+        match model with
+        | Studying (r, s) when s.ShowTutor ->
+            let turns = if show && s.Past.IsNone then (try Store.loadHelp (paths ()) r.Paper.Id with _ -> []) else []
+            setStudy model r { s with Past = past turns s.Past }, Cmd.none
+        | _ -> withHelp model (fun _ h -> { h with Past = past h.History h.Past }, Cmd.none)
+    | OpenPast asked ->
+        let toggle (p: Past) = { p with Opened = (if p.Opened = Some asked then None else Some asked); ConfirmClear = false }
+        match model with
+        | Studying (r, ({ ShowTutor = true } as s)) -> setStudy model r { s with Past = s.Past |> Option.map toggle }, Cmd.none
+        | _ -> withHelp model (fun _ h -> { h with Past = h.Past |> Option.map toggle }, Cmd.none)
+    | ClearPast false ->
+        match model with
+        | Studying (r, ({ ShowTutor = true } as s)) -> setStudy model r { s with Past = s.Past |> Option.map (fun p -> { p with ConfirmClear = true }) }, Cmd.none
+        | _ -> withHelp model (fun _ h -> { h with Past = h.Past |> Option.map (fun p -> { p with ConfirmClear = true }) }, Cmd.none)
+    | ClearPast true ->
+        let clear (id: string) = Cmd.ofEffect (fun _ -> try Store.saveHelp (paths ()) id [] with _ -> ())
+        match model with
+        | Studying (r, s) when s.ShowTutor && s.Pending.IsNone ->
+            let r, s, cmd = if s.Voice |> Option.exists (fun v -> v.Playing) then hold r s else r, s, Cmd.none
+            setStudy model r { s with Chat = []; Followups = []; Past = None }, Cmd.batch [ cmd; clear r.Paper.Id ]
+        | Studying _ -> model, Cmd.none
+        | _ ->
+            withHelp model (fun r h ->
+                if h.Pending.IsSome then h, Cmd.none
+                else { notSpeaking h with History = []; Earlier = 0; Past = None }, Cmd.batch [ stopAnswerAudio h; clear r.Paper.Id ])
     | SendHelpInput ->
         match model.Screen with
         | Screen.Reader { Help = Some h } when h.Input.Trim() <> "" -> update (AskHelp(Help.Ask.Free h.Input, false)) model
         | _ -> model, Cmd.none
-    | ToggleEarlier -> withHelp model (fun _ h -> { h with ShowEarlier = not h.ShowEarlier }, Cmd.none)
     | MicPressed ->
         withHelp model (fun _ h ->
             match (platform ()).Recorder, h.Mic with
@@ -2522,6 +2586,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                   Said = []
                   Cue = false
                   Chat = []
+                  Past = None
                   Followups = []
                   Pending = None
                   Input = ""
@@ -2918,9 +2983,10 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             let r, s, cmd = resume model.Settings r s model.Concepts
             setStudy model r s, Cmd.batch [ stop; cmd ]
         | Studying (r, s) ->
-            // the tutor (or the paper) waits; the microphone opens only when its button is pressed
+            // the tutor (or the paper) waits; the microphone opens only when its button is pressed. A new
+            // conversation: the last one is in the history
             let r, s, cmd = hold r s
-            let s = { s with ShowTutor = true; ShowPlan = false; Aside = s.Voice; Error = None }
+            let s = { s with ShowTutor = true; ShowPlan = false; Aside = s.Voice; Error = None; Chat = []; Followups = []; Past = None }
             setStudy model { r with ShowMenu = false } s, cmd
         | _ -> model, Cmd.none
     | StudyMic ->
@@ -2942,7 +3008,9 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             if not (Settings.hasKey model.Settings) then setStudy model r { s with Error = Some "Asking the tutor needs a Mistral API key (Settings)." }, Cmd.none
             else
                 stopEar ()
-                let s, cmd = askTutor model.Settings r { s with Ear = Ear.Off; ShowTutor = true } (momentOf r s model.Concepts) (question.Trim()) quick
+                // asked aloud with the panel closed: a new conversation
+                let s = if s.ShowTutor then s else { s with Chat = []; Followups = [] }
+                let s, cmd = askTutor model.Settings r { s with Ear = Ear.Off; ShowTutor = true; Past = None } (momentOf r s model.Concepts) (question.Trim()) quick
                 setStudy model r s, cmd
         | _ -> model, Cmd.none
     | StudyAskText (askId, text) ->
@@ -2957,13 +3025,18 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                 let s =
                     { s with
                         Pending = None
-                        Chat = s.Chat @ [ { Question = q; Answer = reply.Answer; Followups = reply.Followups } ]
+                        Chat = s.Chat @ [ { Question = q; Answer = reply.Answer; Show = reply.Show; Followups = reply.Followups } ]
                         Followups = reply.Followups
                         Running = true }
+                // kept with the questions asked in Ask, for the history
+                let turn =
+                    { Question = q; Answer = reply.Answer; Segment = r.Current; About = None; Show = reply.Show
+                      Followups = reply.Followups; AskedUtc = DateTime.UtcNow }
+                let keep = Cmd.ofEffect (fun _ -> try Store.saveHelp (paths ()) r.Paper.Id (Store.loadHelp (paths ()) r.Paper.Id @ [ turn ]) with _ -> ())
                 // the answer is said (it is in the conversation, not among what the tutor said in the session); the
                 // session waits in the panel until the learner goes on
                 let s', cmd = say model.Settings r { s with Cue = false } (Study.said reply.Answer) Then.Wait
-                setStudy model r { s' with Said = s.Said; Cue = s.Cue }, cmd
+                setStudy model r { s' with Said = s.Said; Cue = s.Cue }, Cmd.batch [ keep; cmd ]
             | Error e -> setStudy model r { s with Pending = None; Error = (if e = "Cancelled." then None else Some e) }, Cmd.none
         | _ -> model, Cmd.none
     | SetStudyInput text ->

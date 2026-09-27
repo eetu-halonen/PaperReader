@@ -567,3 +567,18 @@ let ``the review queue puts steps first, then the most forgotten, then a few new
     let queue = Cards.dueQueue now [ "p", deck ] |> List.map (fun (_, c) -> c.Front)
     Assert.Equal<string list>([ "step"; "very late"; "slightly late"; "new 01" ], queue |> List.truncate 4)
     Assert.Equal(3 + Cards.newPerSession, queue.Length)
+
+[<Fact>]
+let ``an answer shows the equations and figures it names, by id or by the paper's number`` () =
+    let s =
+        scriptWith [| seg 0 None ShowReason.Own |]
+            [| { eq "E1" with EqNumber = Some "1.9" }; { eq "E2" with EqNumber = Some "3–5" }
+               { eq "Fig1" with Kind = VisualKind.Figure; EqNumber = Some "2" }; { eq "S4" with Kind = VisualKind.Inline } |]
+    Assert.Equal<string list>([ "E1"; "Fig1" ], Help.referenced s "As equation (1.9) [E1] says, and Figure 2 shows.")
+    Assert.Equal<string list>([ "E1" ], Help.referenced s "By Eq. 1.9, the rest follows.")
+    Assert.Equal<string list>([ "E2" ], Help.referenced s "Equation (4) is one of a group.")
+    // citations, inline math and unknown ids aren't visuals
+    Assert.Equal<string list>([], Help.referenced s "As shown in [12], $x_2$ grows [S4] [Fig9].")
+    Assert.Equal("As equation (1.9) says, see [12].", Help.withoutIds "As equation (1.9) [E1] says, see [12].")
+    Assert.Equal("Both hold.", Help.spoken "Both hold [E1, Fig1].")
+    Assert.Equal("As in equation (3)", Help.visibleAnswer "As in equation (3) [E")

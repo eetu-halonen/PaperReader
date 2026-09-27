@@ -306,7 +306,7 @@ let ``a question to the tutor comes with the conversation as turns and what the 
         { Name = "Scaled dot-product attention"; Goal = "Equation 1."; Background = false; Section = 2; Lesson = None; Answered = None
           Said = [ "Why divide by the square root of d_k? Option 1: To speed it up."; "Not quite. The answer is option 2: to keep large dot products from saturating the softmax." ]
           Heard = [] }
-    let history: Study.TutorTurn list = [ { Question = "What is a key?"; Answer = "A vector each position offers."; Followups = [ "And a query?" ] } ]
+    let history: Study.TutorTurn list = [ { Question = "What is a key?"; Answer = "A vector each position offers."; Show = None; Followups = [ "And a query?" ] } ]
     let k: Help.Knowledge = { PaperText = "The paper."; FigureNotes = Map.empty }
     let msgs = Study.tutorMessages Settings.defaults s k m history "Why does saturation matter?"
     Assert.Equal<string list>([ "system"; "user"; "assistant"; "user" ], msgs |> List.map fst)
