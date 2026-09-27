@@ -140,7 +140,7 @@ to the application menu and to *Open with* for the documents it reads. It can al
 
 Keys: Space play/pause, ← / → 15 seconds, A ask, S turns the tutor on, Esc back. In a review: Space or Enter shows the
 answer (then answers Good), 1–4 answer Again / Hard / Good / Easy, or pick an option of an idea's question. When the
-tutor speaks: Space or Enter pause and go on, ← says it again, → skips, 1–4 pick an option.
+tutor speaks: Space or Enter pause and go on, ← / → 15 seconds of what it says, 1–4 pick an option.
 
 ## Browser (WebAssembly)
 
@@ -241,21 +241,24 @@ A session:
 3. **Teach**. The tutor's lesson is spoken (Voxtral, the voice you picked), with its equation or figure on screen and
    the sentence being said under it. It connects to what you know ("You already know that…"), explains what the section
    meant rather than retelling it, and ends with an example. Lessons are written two ahead while you listen, and their
-   first words are spoken ahead, so the tutor starts at once. *Skip* asks the lesson's question first and teaches it
-   only if you get it wrong.
+   first words are spoken ahead, so the tutor starts at once. *Go to the question* asks the lesson's question first and
+   teaches it only if you get it wrong.
 4. **Check**. One multiple-choice question, read with its three numbered options. After a chime the microphone
    listens. Say "option 2", "two", "the second one", the answer in your own words, or "I don't know"; it stops
    listening when you stop talking. Or tap an option. Options are numbered, not lettered, because transcription mixes
    up lone letters ("B" came back empty, "Bee" as "a"). The tutor says what it heard ("You said option 2"), whether it
    is right and why, and goes on; *Misheard? Answer again* under the question takes a misheard answer back. Unheard or
-   unclear answers get one reminder, then it waits for a tap. *Ask* opens the tutor, where you can ask out loud or type; its answer is spoken,
-   and *Continue* returns to where the lesson was.
+   unclear answers get one reminder, then it waits for a tap. *Ask* opens the tutor, where you can type and, with the
+   microphone button, ask out loud (what you say joins what you typed); its answer is spoken, with the player's pause
+   and 15 s buttons, and *Continue* returns to where the lesson was.
 5. **Recap** at the end of each part: explain it back out loud (or type it), and hear *Got it* / *Partly there* /
    *Not yet* with feedback. Saying nothing skips it.
 6. **Known ideas**. If you studied an idea in another paper and FSRS says you still know it, it is skipped. If it is
    fading, one quick question checks it, and that counts as its review. If you've forgotten it, it is taught here.
 
-Pause stops the tutor, the microphone and the narration; Continue goes on where it was. The headset's play/pause
+The buttons are the player's everywhere: Back 15 s and Skip 15 s move through what the tutor is saying as through the
+paper, and Pause stops the tutor, the microphone and the narration; Continue goes on from the same word. *Listen again*
+says the lesson (or question) from its start. The headset's play/pause
 button does the same. On Android the phone can be locked in a pocket: once the microphone is allowed, the playback
 service also runs as a microphone service, so the tutor hears answers with the screen off. The screen stays on while
 the tutor talks, for the equation; lock it if you don't need it. Answering aloud can be turned off (Settings: *Answer out loud*): the tutor then waits for a tap.

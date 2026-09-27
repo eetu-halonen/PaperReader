@@ -74,7 +74,18 @@ type MainView() as this =
                         d m
                     | _ -> ()),
                 Interactivity.RoutingStrategies.Tunnel)
-            // Avalonia keeps the content clear of the status and navigation bars itself
+            // Avalonia keeps the content clear of the status and navigation bars itself, but not of the on-screen
+            // keyboard: the part of the app it covers becomes padding, so what is typed (at the bottom) stays in view
+            match top.InputPane with
+            | null -> ()
+            | pane ->
+                pane.StateChanged.Add(fun e ->
+                    let covered =
+                        if e.NewState <> Platform.InputPaneState.Open || e.EndRect.Height <= 0.0 then 0.0
+                        else
+                            let bottom = this.TranslatePoint(Point(0.0, this.Bounds.Height), top)
+                            if bottom.HasValue then max 0.0 (bottom.Value.Y - e.EndRect.Top) else e.EndRect.Height
+                    this.Padding <- Thickness(0.0, 0.0, 0.0, covered))
 
 type App() =
     inherit Application()
