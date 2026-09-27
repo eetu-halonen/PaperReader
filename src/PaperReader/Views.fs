@@ -858,20 +858,40 @@ let private playerStatus (model: Model) (r: ReaderState) (dispatch: Msg -> unit)
     | None, false -> []
 
 /// How far through the paper the listener is, as a thin bar.
-let private progressBar (r: ReaderState) : IView =
+let private progressBar (r: ReaderState) (dispatch: Msg -> unit) : IView =
     let segs = r.Script.Segments
     let fraction =
         let d = r.Durations.TryFind r.Current |> Option.defaultValue 1
         (float r.Current + min 1.0 (float r.Offset / float (max 1 d))) / float (max 1 segs.Length)
-    ProgressBar.create [
-        ProgressBar.minimum 0.0
-        ProgressBar.maximum 1.0
-        ProgressBar.value fraction
-        ProgressBar.height 4.0
-        ProgressBar.minHeight 4.0
-        ProgressBar.cornerRadius 2.0
-        ProgressBar.foreground Palette.accent
-        ProgressBar.background Palette.surfaceHigh
+    // a tall strip around the thin bar, so it is easy to tap: the paper goes on from where it is tapped
+    Border.create [
+        Border.height 28.0
+        Border.background "Transparent"
+        Border.onPointerPressed (
+            (fun e ->
+                // the bar itself isn't hit: the strip is
+                match e.Source with
+                | :? Border as strip ->
+                    if strip.Bounds.Width > 0.0 then
+                        let x = e.GetPosition(strip).X / strip.Bounds.Width
+                        dispatch (JumpToSegment(Math.Clamp(int (x * float segs.Length), 0, segs.Length - 1)))
+                | _ -> ()),
+            SubPatchOptions.OnChangeOf segs.Length
+        )
+        Border.child (
+            ProgressBar.create [
+                ProgressBar.minimum 0.0
+                ProgressBar.maximum 1.0
+                ProgressBar.value fraction
+                ProgressBar.height 6.0
+                ProgressBar.minHeight 6.0
+                ProgressBar.cornerRadius 3.0
+                ProgressBar.verticalAlignment VerticalAlignment.Center
+                ProgressBar.isHitTestVisible false
+                ProgressBar.foreground Palette.accent
+                ProgressBar.background Palette.surfaceHigh
+            ]
+        )
     ]
 
 /// Back 15 s, play or pause, ahead 15 s; with speed and the outline at the sides in the player. The same in the
@@ -918,8 +938,92 @@ let private transportRow (model: Model) (playing: bool) (sides: bool) (onPlay: u
         ]
     ]
 
+let private sectionLabel (text: string) : IView =
+    TextBlock.create [
+        TextBlock.text text
+        TextBlock.fontSize 12.0
+        TextBlock.fontWeight FontWeight.Bold
+        TextBlock.foreground Palette.accent
+        TextBlock.margin (Thickness(4.0, 8.0, 0.0, 0.0))
+    ]
+
+/// Going to a place in the paper: a page, a section, or an equation, figure or table (where it is first read). What is
+/// playing now is marked.
 let private outlineOverlay (r: ReaderState) (dispatch: Msg -> unit) : IView =
-    let currentSection = r.Script.Segments.[r.Current].Section
+    let segs = r.Script.Segments
+    let here = segs.[r.Current]
+    let jump (i: int) () = dispatch (JumpToSegment i)
+    // where each visual is first read, by section
+    let visuals =
+        Narration.equationOrder r.Script
+        |> Array.filter (fun (v, _) -> v.Kind <> VisualKind.Inline)
+        |> Array.map (fun (v, seg) -> segs.[seg].Section, (v, seg))
+    let pageStart (p: int) = segs |> Array.tryFindIndex (fun s -> s.Page = p)
+    let row (indent: float) (text: string) (detail: string) (active: bool) (size: float) (weight: FontWeight) (key: obj) (onClick: unit -> unit) =
+        plainButton (if active then Palette.surfaceHigh else "Transparent") [
+            Button.horizontalAlignment HorizontalAlignment.Stretch
+            Button.horizontalContentAlignment HorizontalAlignment.Stretch
+            Button.padding (Thickness(12.0 + indent, 11.0, 12.0, 11.0))
+            Button.cornerRadius 12.0
+            Button.onClick ((fun _ -> onClick ()), SubPatchOptions.OnChangeOf key)
+            Button.content (
+                Grid.create [
+                    Grid.columnDefinitions "*,Auto"
+                    Grid.children [
+                        TextBlock.create [
+                            Grid.column 0
+                            TextBlock.text text
+                            TextBlock.fontSize size
+                            TextBlock.fontWeight weight
+                            TextBlock.foreground (if active then Palette.accent else Palette.text)
+                            TextBlock.textWrapping TextWrapping.Wrap
+                        ]
+                        TextBlock.create [
+                            Grid.column 1
+                            TextBlock.text (if active then "now · " + detail else detail)
+                            TextBlock.fontSize 13.0
+                            TextBlock.foreground (if active then Palette.accent else Palette.faint)
+                            TextBlock.margin (Thickness(10.0, 2.0, 0.0, 0.0))
+                            TextBlock.verticalAlignment VerticalAlignment.Top
+                        ]
+                    ]
+                ]
+            )
+        ]
+    let body: IView list =
+        [ if r.Script.PageCount > 1 then
+              sectionLabel ((Formats.pageNoun r.Paper.Format).ToUpperInvariant() + "S")
+              WrapPanel.create [
+                  WrapPanel.children [
+                      for p in 0 .. r.Script.PageCount - 1 do
+                          match pageStart p with
+                          | Some i ->
+                              let active = here.Page = p
+                              Button.create [
+                                  Button.content (string (p + 1))
+                                  Button.minWidth 48.0
+                                  Button.height 44.0
+                                  Button.margin (Thickness(0.0, 0.0, 8.0, 8.0))
+                                  Button.cornerRadius 14.0
+                                  Button.horizontalContentAlignment HorizontalAlignment.Center
+                                  Button.verticalContentAlignment VerticalAlignment.Center
+                                  Button.fontSize 16.0
+                                  Button.background (if active then Palette.accent else Palette.surfaceHigh)
+                                  Button.foreground (if active then Palette.onAccent else Palette.text)
+                                  Button.onClick ((fun _ -> dispatch (JumpToSegment i)), SubPatchOptions.OnChangeOf(p, i, active))
+                              ]
+                          | None -> ()
+                  ]
+              ]
+          sectionLabel "SECTIONS, EQUATIONS AND FIGURES"
+          for i, s in Array.indexed r.Script.Sections do
+              let depth = if i = 0 then 0 else (s.Title.Split(' ').[0] |> Seq.filter ((=) '.') |> Seq.length |> fun d -> if s.Title.Split(' ').[0].EndsWith "." then d - 1 else d)
+              let first = min s.FirstSegment (segs.Length - 1)
+              row (16.0 * float (max 0 depth)) (if i = 0 then "Start: " + s.Title else s.Title) (sprintf "p. %d" (segs.[first].Page + 1))
+                  (i = here.Section) (if depth = 0 then 16.0 else 15.0) (if depth = 0 then FontWeight.SemiBold else FontWeight.Normal) (box ("section", i)) (jump first)
+              for (_, (v, seg)) in visuals |> Array.filter (fun (sec, _) -> sec = i) do
+                  row (16.0 * float (max 0 depth) + 22.0) ("· " + visualName v) (sprintf "p. %d" (v.Page + 1))
+                      (r.Current >= seg && segs.[r.Current].Show = Some v.Id) 14.0 FontWeight.Normal (box ("visual", v.Id)) (jump seg) ]
     Border.create [
         Border.background Palette.bg
         Border.child (
@@ -930,57 +1034,30 @@ let private outlineOverlay (r: ReaderState) (dispatch: Msg -> unit) : IView =
                         Grid.columnDefinitions "*,Auto"
                         Grid.margin (Thickness(20.0, 12.0, 8.0, 8.0))
                         Grid.children [
-                            TextBlock.create [
+                            StackPanel.create [
                                 Grid.column 0
-                                TextBlock.text "Contents"
-                                TextBlock.fontSize 22.0
-                                TextBlock.fontWeight FontWeight.Bold
-                                TextBlock.foreground Palette.text
-                                TextBlock.verticalAlignment VerticalAlignment.Center
+                                StackPanel.verticalAlignment VerticalAlignment.Center
+                                StackPanel.children [
+                                    TextBlock.create [
+                                        TextBlock.text "Go to"
+                                        TextBlock.fontSize 22.0
+                                        TextBlock.fontWeight FontWeight.Bold
+                                        TextBlock.foreground Palette.text
+                                    ]
+                                    label "Tap a page, a section, or an equation or figure to hear the paper from there." 13.0 Palette.muted
+                                ]
                             ]
                             Border.create [ Grid.column 1; Border.child (iconButton Icons.close 22.0 (fun () -> dispatch ToggleOutline) "close-outline") ]
                         ]
                     ]
                     ScrollViewer.create [
                         ScrollViewer.content (
-                            StackPanel.create [
-                                StackPanel.margin (Thickness(12.0, 0.0, 12.0, 24.0))
-                                StackPanel.children [
-                                    for i, s in Array.indexed r.Script.Sections do
-                                        let active = i = currentSection
-                                        let depth = if i = 0 then 0 else (s.Title.Split(' ').[0] |> Seq.filter ((=) '.') |> Seq.length |> fun d -> if s.Title.Split(' ').[0].EndsWith "." then d - 1 else d)
-                                        plainButton (if active then Palette.surfaceHigh else "Transparent") [
-                                            Button.horizontalAlignment HorizontalAlignment.Stretch
-                                            Button.horizontalContentAlignment HorizontalAlignment.Left
-                                            Button.padding (Thickness(12.0 + 16.0 * float (max 0 depth), 12.0, 12.0, 12.0))
-                                            Button.cornerRadius 12.0
-                                            Button.onClick ((fun _ -> dispatch (JumpToSegment s.FirstSegment)), SubPatchOptions.OnChangeOf(i, s.FirstSegment))
-                                            Button.content (
-                                                TextBlock.create [
-                                                    TextBlock.text (if i = 0 then "Start: " + s.Title else s.Title)
-                                                    TextBlock.fontSize (if depth = 0 then 16.0 else 15.0)
-                                                    TextBlock.fontWeight (if depth = 0 then FontWeight.SemiBold else FontWeight.Normal)
-                                                    TextBlock.foreground (if active then Palette.accent else Palette.text)
-                                                    TextBlock.textWrapping TextWrapping.Wrap
-                                                ]
-                                            )
-                                        ]
-                                ]
-                            ]
+                            StackPanel.create [ StackPanel.margin (Thickness(12.0, 0.0, 12.0, 24.0)); StackPanel.spacing 2.0; StackPanel.children body ]
                         )
                     ]
                 ]
             ]
         )
-    ]
-
-let private sectionLabel (text: string) : IView =
-    TextBlock.create [
-        TextBlock.text text
-        TextBlock.fontSize 12.0
-        TextBlock.fontWeight FontWeight.Bold
-        TextBlock.foreground Palette.accent
-        TextBlock.margin (Thickness(4.0, 8.0, 0.0, 0.0))
     ]
 
 let private equationCard (r: ReaderState) (v: Visual) (firstSegment: int) (ahead: bool) (dispatch: Msg -> unit) : IView =
@@ -3507,7 +3584,7 @@ let private menuOverlay (model: Model) (r: ReaderState) (dispatch: Msg -> unit) 
         dispatch ToggleMenu
         dispatch msg
     studySheet r.Script.Title "" (fun () -> dispatch ToggleMenu) "close-menu"
-        [ menuRow Icons.list "Contents" None "contents" (go ToggleOutline)
+        [ menuRow Icons.list "Go to a page, section or equation" None "contents" (go ToggleOutline)
           menuRow Icons.sigma "Equations and figures" None "equations" (go ToggleEquations)
           menuRow Icons.cards "Flashcards" None "cards" (go (OpenCards None))
           match r.Study with
@@ -3569,10 +3646,12 @@ let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) :
                 sectionName r seg,
                 (if r.Finished then "Finished"
                  else sprintf "%s %d of %d · %s" (capitalize (Formats.pageNoun r.Paper.Format)) (seg.Page + 1) r.Script.PageCount (formatMinutes (remainingMs r model.Settings.Speed)))
-        StackPanel.create [
-            StackPanel.margin (Thickness(8.0, 8.0, 8.0, 4.0))
-            StackPanel.spacing 2.0
-            StackPanel.children [
+        // tap it to go somewhere else in the paper
+        let text =
+            StackPanel.create [
+                Grid.column 0
+                StackPanel.spacing 2.0
+                StackPanel.children [
                 TextBlock.create [
                     TextBlock.text title
                     TextBlock.fontSize 16.0
@@ -3588,7 +3667,33 @@ let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) :
                     TextBlock.foreground Palette.muted
                     TextBlock.textTrimming TextTrimming.CharacterEllipsis
                 ]
+                ]
             ]
+        let goTo =
+            StackPanel.create [
+                Grid.column 1
+                StackPanel.orientation Orientation.Horizontal
+                StackPanel.spacing 5.0
+                StackPanel.verticalAlignment VerticalAlignment.Center
+                StackPanel.margin (Thickness(8.0, 0.0, 0.0, 0.0))
+                StackPanel.children [
+                    icon Icons.list Palette.accent 18.0 false
+                    TextBlock.create [
+                        TextBlock.text "Go to"
+                        TextBlock.fontSize 14.0
+                        TextBlock.fontWeight FontWeight.SemiBold
+                        TextBlock.foreground Palette.accent
+                        TextBlock.verticalAlignment VerticalAlignment.Center
+                    ]
+                ]
+            ]
+        plainButton "Transparent" [
+            Button.horizontalAlignment HorizontalAlignment.Stretch
+            Button.horizontalContentAlignment HorizontalAlignment.Stretch
+            Button.padding (Thickness(8.0, 8.0, 8.0, 4.0))
+            Button.cornerRadius 12.0
+            Button.onClick ((fun _ -> dispatch ToggleOutline), SubPatchOptions.Never)
+            Button.content (Grid.create [ Grid.columnDefinitions "*,Auto"; Grid.children [ text; goTo ] ])
         ]
     // a playback error or "preparing the voice": over the progress bar, or on its side under the equation, where the
     // narrow column of buttons has no room for it
@@ -3637,7 +3742,7 @@ let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) :
                                 StackPanel.spacing 10.0
                                 StackPanel.children [
                                     if not landscape then yield! status
-                                    progressBar r
+                                    progressBar r dispatch
                                 ]
                             ]
                         )

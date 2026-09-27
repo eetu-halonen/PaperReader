@@ -67,7 +67,9 @@ on the Linux desktop and in the browser (WebAssembly).
 - **The player** is made for listening on the move, the same for listening and studying: a huge Play / Pause /
   Continue button at the bottom, Back 15 s, Ask and Skip 15 s above it, and the equation or figure being discussed as
   large as the screen allows, with the sentence being said under it (*Full screen*, or tap it, for larger). At the top:
-  who is talking (*Paper* or *Tutor*), the speed, and ⋯ for everything else: contents, equations and figures,
+  who is talking (*Paper* or *Tutor*), the speed, and ⋯ for everything else. *Go to* (tap the section's name at the
+  top) lists the pages and the sections, each with its equations, figures and tables, marks where you are, and plays
+  the paper from what you tap; tapping the progress bar jumps there too. The ⋯ menu has Go to, equations and figures,
   flashcards, the study plan, the tutor on or off, *Stop at equations*, *Stop at figures and tables*, and Settings.
   When playback stops at an equation, it is ringed and marked *Paused at Equation (n)*, the last sentence heard stays
   under it, and the buttons become *Hear it again*, *Ask* and *Continue*. With the phone on its side, the equation
@@ -239,7 +241,8 @@ A session:
    second, quick call, and dropped when in doubt. A wrong match would skip something you never learned.
 2. **Listen**. The paper's narration plays as usual, up to the end of the section that covers the next ideas. A strip
    under the paper says what the tutor will go over after it. Jumping elsewhere in the paper is fine: the tutor comes
-   in at the end of the stretch you're hearing, and still covers what you skipped.
+   in at the end of the stretch you're hearing, and still covers what you skipped. *Listen to it in the paper* from a
+   review plays the paper from that place first, rather than the questions the session was on.
 3. **Teach**. The tutor's lesson is spoken (Voxtral, in the tutor's voice: another speaker than the paper's, chosen
    when you first study and changeable in Settings), with its equation or figure on screen and
    the sentence being said under it. It connects to what you know ("You already know that…"), explains what the section

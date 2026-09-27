@@ -337,6 +337,8 @@ type Model =
       Concepts: Map<string, Concept>
       /// A paper opened from the Learn screen to study, not to listen.
       StudyOnOpen: string option
+      /// A paper opened to hear a place in it (from a review): studying, the paper plays from there first.
+      ListenAt: int option
       /// How far each paper's study plan is (ideas done, ideas), for the Learn screen.
       Studied: Map<string, int * int>
       /// The list of what the learner knows is open on the Learn screen.
@@ -718,6 +720,7 @@ let init () : Model * Cmd<Msg> =
       LearnOpen = None
       Concepts = (try Store.loadConcepts (paths ()) with _ -> []) |> List.map (fun c -> c.Id, c) |> Map.ofList
       StudyOnOpen = None
+      ListenAt = None
       Studied = Map.empty
       ShowKnown = false
       Viewport = (0.0, 0.0) },
@@ -1742,7 +1745,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                     return paper, script, durations
             }
         model, runTask load (Ok >> PaperLoaded) (errorText >> Error >> PaperLoaded)
-    | PaperLoaded (Error e) -> { model with Notice = Some e; StudyOnOpen = None }, Cmd.none
+    | PaperLoaded (Error e) -> { model with Notice = Some e; StudyOnOpen = None; ListenAt = None }, Cmd.none
     | PaperLoaded (Ok (paper, script, durations)) ->
         let r =
             { Paper = paper
@@ -1768,7 +1771,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         // papers open in Study (with a key), unless the learner turned it off
         let studying = Settings.hasKey model.Settings && (model.StudyOnOpen = Some paper.Id || model.Settings.Study)
         let r, playCmd = if studying then r, Cmd.none else play r model.Settings
-        { model with Screen = Screen.Reader r; StudyOnOpen = None },
+        { model with Screen = Screen.Reader r; StudyOnOpen = None; ListenAt = (if studying then model.ListenAt else None) },
         Cmd.batch [ startSynth r model.Settings; playCmd; (if studying then Cmd.ofMsg OpenStudy else Cmd.none) ]
     | CloseReader ->
         match model.Screen with
@@ -1861,7 +1864,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             r.Help |> Option.iter (fun h -> h.Cancel.Cancel())
             // hearing an equation again from its full-screen view keeps it full screen
             let zoom = if r.Zoom.IsSome && i >= 0 && i < r.Script.Segments.Length && r.Zoom = r.Script.Segments.[i].Show then r.Zoom else None
-            let r = { r with ShowOutline = false; ShowEquations = false; Zoom = zoom; Help = None; Cards = None }
+            let r = { r with ShowOutline = false; ShowEquations = false; ShowMenu = false; Zoom = zoom; Help = None; Cards = None }
             // studying: the tutor waits, and comes in at the end of the stretch now being heard
             let r, stopTutor =
                 match r.Study with
@@ -2460,7 +2463,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             match model.Papers |> List.tryFind (fun p -> p.Id = paperId) with
             | Some paper ->
                 let model, close = update CloseReader model
-                let model, openCmd = update (OpenPaper { paper with LastSegment = segment }) model
+                let model, openCmd = update (OpenPaper { paper with LastSegment = segment }) { model with ListenAt = Some segment }
                 model, Cmd.batch [ close; openCmd ]
             | None -> model, Cmd.none
     | SetRetention r ->
@@ -2531,7 +2534,22 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                   Last = None
                   Cancel = new CancellationTokenSource() }
             let voice = pickTutorVoice model
+            // opened to hear a place (from a review): the paper from there, the tutor after that stretch
+            let listenAt = model.ListenAt |> Option.filter (fun i -> i >= 0 && i < r.Script.Segments.Length)
+            let model = { model with ListenAt = None }
             match plan with
+            | Some plan when listenAt.IsSome ->
+                let r = { r with Current = listenAt.Value; Offset = 0; Finished = false; Held = None }
+                let last =
+                    Study.stops r.Script plan
+                    |> List.tryFind (fun st -> r.Current >= st.First && r.Current <= st.Last)
+                    |> Option.map (fun st -> st.Last)
+                    |> Option.defaultValue (r.Script.Segments.Length - 1)
+                let s = goTo (StudyNow.Listening last) s
+                let r, playCmd = play r model.Settings
+                let s, write = prefetch model.Settings r s model.Concepts
+                setStudy { model with MakeError = None } r s,
+                Cmd.batch [ pauseCmd; playCmd; write; voice; saveStudy id s.Progress; rematch model.Settings r plan progress model.Concepts ]
             | Some plan ->
                 // back to the lesson or question it was left at, else the next step
                 let r, s, cmd =
@@ -2542,9 +2560,10 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                     | None -> advance model.Settings r s model.Concepts
                 setStudy { model with MakeError = None } r s, Cmd.batch [ pauseCmd; cmd; voice; rematch model.Settings r plan progress model.Concepts ]
             | None ->
-                // the paper is read aloud from the start while the tutor reads it and plans
+                // the paper is read aloud from where the listener is while the tutor reads it and plans; what came
+                // before is still taught, after the first stretch
                 let concepts = model.Concepts |> Map.toList |> List.map snd
-                let r = { r with Current = min progress.Heard (r.Script.Segments.Length - 1); Offset = 0; Finished = false; Held = None }
+                let r = { r with Offset = (if listenAt.IsSome then 0 else r.Offset); Finished = false; Held = None }
                 let r, playCmd = play r model.Settings
                 let s = { s with Planning = Some("Getting ready", []) }
                 setStudy { model with MakeError = None } r s, Cmd.batch [ pauseCmd; playCmd; voice; writePlan model.Settings r concepts s.Cancel.Token ]
