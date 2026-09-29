@@ -3472,8 +3472,6 @@ let private tutorOverlay (model: Model) (r: ReaderState) (s: StudyState) (dispat
                   StackPanel.children [
                       label t.Question 15.0 Palette.accent
                       answerView r t.Answer 17.0 t.Show None dispatch
-                      if i = s.Chat.Length - 1 && answer.IsSome && not going && s.Pending.IsNone then
-                          WrapPanel.create [ WrapPanel.children [ textLink "Hear it again" (fun () -> dispatch StudyAgain) ("again", i) ] ]
                   ]
               ]
           match s.Pending with
@@ -3488,7 +3486,7 @@ let private tutorOverlay (model: Model) (r: ReaderState) (s: StudyState) (dispat
           if hasKey && not busy then
               WrapPanel.create [ WrapPanel.children [ for t in taps -> chip (t.Replace("$", "")) (fun () -> dispatch (StudyAsk(t, true))) ] ]
           yield! studyErrors s dispatch ]
-    // one button: pause the answer being said, or go back to the session where it was
+    // the answer's own player, and going back to the session where it was
     let back =
         match s.Now with
         | StudyNow.Listening _ | StudyNow.Starting -> "Continue the paper"
@@ -3499,25 +3497,26 @@ let private tutorOverlay (model: Model) (r: ReaderState) (s: StudyState) (dispat
             StackPanel.spacing 12.0
             StackPanel.children [
                 if hasKey then input
+                if answer.IsSome then transportRow model going false (fun () -> dispatch TogglePlay) dispatch
                 Button.create [
-                    Button.height 60.0
+                    Button.height (if answer.IsSome then 48.0 else 60.0)
                     Button.cornerRadius 24.0
                     Button.horizontalAlignment HorizontalAlignment.Stretch
                     Button.horizontalContentAlignment HorizontalAlignment.Center
                     Button.verticalContentAlignment VerticalAlignment.Center
-                    Button.background Palette.accent
-                    Button.onClick ((fun _ -> dispatch TogglePlay), SubPatchOptions.Never)
+                    Button.background (if answer.IsSome then Palette.surfaceHigh else Palette.accent)
+                    Button.onClick ((fun _ -> dispatch ToggleTutor), SubPatchOptions.Never)
                     Button.content (
                         StackPanel.create [
                             StackPanel.orientation Orientation.Horizontal
                             StackPanel.spacing 10.0
                             StackPanel.children [
-                                icon (if going then Icons.pause else Icons.play) Palette.onAccent 24.0 true
+                                icon Icons.chevronLeft (if answer.IsSome then Palette.accent else Palette.onAccent) 22.0 false
                                 TextBlock.create [
-                                    TextBlock.text (if going then "Pause" else back)
-                                    TextBlock.fontSize 19.0
+                                    TextBlock.text back
+                                    TextBlock.fontSize (if answer.IsSome then 17.0 else 19.0)
                                     TextBlock.fontWeight FontWeight.SemiBold
-                                    TextBlock.foreground Palette.onAccent
+                                    TextBlock.foreground (if answer.IsSome then Palette.text else Palette.onAccent)
                                     TextBlock.verticalAlignment VerticalAlignment.Center
                                 ]
                             ]
@@ -3888,6 +3887,98 @@ let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) :
             ]
             :> IView
         | None -> playerStage model r seg dispatch
+    // jumped elsewhere in the paper: back to where the listener was, or on from here
+    let placeText (p: Timeline.Position) =
+        let at = r.Script.Segments.[min p.Segment (r.Script.Segments.Length - 1)]
+        sprintf "%s · %s %d" (sectionName r at) (Formats.pageNoun r.Paper.Format) (at.Page + 1)
+    let placeRow =
+        match r.Place with
+        | Some p when not tutor ->
+            let button (column: int) (text: string) (primary: bool) (onClick: unit -> unit) : IView =
+                Button.create [
+                    Grid.column column
+                    Button.minHeight 52.0
+                    Button.margin (Thickness(3.0, 0.0))
+                    Button.padding (Thickness(10.0, 6.0))
+                    Button.cornerRadius 18.0
+                    Button.horizontalAlignment HorizontalAlignment.Stretch
+                    Button.horizontalContentAlignment HorizontalAlignment.Center
+                    Button.verticalContentAlignment VerticalAlignment.Center
+                    Button.background (if primary then Palette.accent else Palette.surfaceHigh)
+                    Button.content (
+                        TextBlock.create [
+                            TextBlock.text text
+                            TextBlock.fontSize 15.0
+                            TextBlock.fontWeight FontWeight.SemiBold
+                            TextBlock.foreground (if primary then Palette.onAccent else Palette.text)
+                            TextBlock.textWrapping TextWrapping.Wrap
+                            TextBlock.textAlignment TextAlignment.Center
+                        ]
+                    )
+                    Button.onClick ((fun _ -> onClick ()), SubPatchOptions.Never)
+                ]
+            Some(
+                StackPanel.create [
+                    StackPanel.spacing 6.0
+                    StackPanel.children [
+                        TextBlock.create [
+                            TextBlock.text ("You were at " + placeText p)
+                            TextBlock.fontSize 13.0
+                            TextBlock.foreground Palette.muted
+                            TextBlock.margin (Thickness(8.0, 0.0))
+                            TextBlock.textTrimming TextTrimming.CharacterEllipsis
+                        ]
+                        Grid.create [
+                            Grid.columnDefinitions "*,*"
+                            Grid.children [
+                                button 0 "Back to where you were" true (fun () -> dispatch BackToPlace)
+                                button 1 "Carry on from here" false (fun () -> dispatch (CarryOnHere false))
+                            ]
+                        ]
+                    ]
+                ]
+                :> IView)
+        | _ -> None
+    // "Carry on from here" forgets the place: asked first
+    let confirmHere () : IView =
+        Border.create [
+            Border.background "#99000000"
+            Border.onTapped ((fun _ -> dispatch KeepPlace), SubPatchOptions.Never)
+            Border.child (
+                Border.create [
+                    Border.verticalAlignment VerticalAlignment.Center
+                    Border.horizontalAlignment HorizontalAlignment.Center
+                    Border.maxWidth 420.0
+                    Border.margin (Thickness(16.0))
+                    Border.padding (Thickness(20.0, 20.0, 20.0, 16.0))
+                    Border.cornerRadius 24.0
+                    Border.background Palette.surface
+                    // taps inside the card don't close it
+                    Border.onTapped ((fun e -> e.Handled <- true), SubPatchOptions.Never)
+                    Border.child (
+                        StackPanel.create [
+                            StackPanel.spacing 14.0
+                            StackPanel.children [
+                                label "Carry on from here?" 19.0 Palette.text
+                                label
+                                    (match r.Place with
+                                     | Some p -> sprintf "The paper goes on from here, and where you were (%s) is forgotten." (placeText p)
+                                     | None -> "The paper goes on from here.")
+                                    15.0 Palette.muted
+                                Grid.create [
+                                    Grid.columnDefinitions "*,*"
+                                    Grid.children [
+                                        wideButton 0 "Cancel" false true (fun () -> dispatch KeepPlace)
+                                        wideButton 1 "Carry on here" true true (fun () -> dispatch (CarryOnHere true))
+                                    ]
+                                ]
+                            ]
+                        ]
+                    )
+                ]
+            )
+        ]
+        :> IView
     let buttons =
         let going, playText =
             match r.Study with
@@ -3907,6 +3998,9 @@ let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) :
                                 StackPanel.spacing 10.0
                                 StackPanel.children [
                                     if not landscape then yield! status
+                                    match placeRow with
+                                    | Some v -> v
+                                    | None -> ()
                                     progressBar r dispatch
                                 ]
                             ]
@@ -3990,6 +4084,7 @@ let private readerView (model: Model) (r: ReaderState) (dispatch: Msg -> unit) :
             match r.Zoom with
             | Some v -> zoomOverlay model r v dispatch
             | None -> ()
+            if r.ConfirmHere then confirmHere ()
         ]
     ]
 

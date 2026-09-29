@@ -275,7 +275,12 @@ type ReaderState =
       /// The Remember panel, when open.
       Cards: CardsPanel option
       /// The study session, when open.
-      Study: StudyState option }
+      Study: StudyState option
+      /// Where the listener was before jumping elsewhere in the paper (a review, Go to, back 15 s), to go back to.
+      /// Forgotten when playing on reaches it again.
+      Place: Timeline.Position option
+      /// "Carry on from here" asks first, as it forgets that place.
+      ConfirmHere: bool }
 
 /// A search on the Find papers screen.
 type SearchState =
@@ -379,6 +384,12 @@ type Msg =
     | Forward15
     | CycleSpeed
     | JumpToSegment of int
+    /// Back to where the listener was before jumping elsewhere in the paper.
+    | BackToPlace
+    /// Forgets where the listener was, to go on from here; false asks first.
+    | CarryOnHere of confirmed: bool
+    /// Closes the question "Carry on from here?", keeping the place.
+    | KeepPlace
     | Tick of positionMs: int
     /// A minute has passed: cards and ideas may have come due.
     | Minute
@@ -711,6 +722,17 @@ let private stopsHere (settings: Settings) (r: ReaderState) =
         | VisualKind.Figure | VisualKind.Table -> settings.StopAtFigures
         | _ -> settings.StopAtEquations
     | None -> false
+
+/// Remembers where the listener is before jumping elsewhere; the first place is kept over several jumps.
+let private markPlace (r: ReaderState) : ReaderState =
+    if r.Place.IsSome then r else { r with Place = Some(currentPosition r) }
+
+/// Playing on from one position to the next reaches the place the listener jumped from: it is forgotten.
+let private passPlace (before: Timeline.Position) (after: Timeline.Position) (r: ReaderState) : ReaderState =
+    let key (p: Timeline.Position) = p.Segment, p.OffsetMs
+    match r.Place with
+    | Some p when key before < key p && key after >= key p -> { r with Place = None; ConfirmHere = false }
+    | _ -> r
 
 let init () : Model * Cmd<Msg> =
     let settings = try Store.loadSettings (paths ()) with _ -> Settings.defaults
@@ -1657,6 +1679,34 @@ let private startSearch (settings: Settings) (d: DiscoverState) (query: string) 
     { d with Search = Some search; Failed = None; Expanded = None },
     runTask work (fun r -> SearchDone(id, Ok r)) (fun e -> SearchDone(id, Error(errorText e)))
 
+/// Moves to a place in the paper and plays from there (`mark` first changes what is remembered of where the
+/// listener was). Studying, the tutor comes in at the end of the stretch that place is in.
+let private jump (pos: Timeline.Position) (mark: ReaderState -> ReaderState) (model: Model) : Model * Cmd<Msg> =
+    withReader model (fun r ->
+        let r = mark r
+        r.Help |> Option.iter (fun h -> h.Cancel.Cancel())
+        // hearing an equation again from its full-screen view keeps it full screen
+        let zoom = if r.Zoom.IsSome && pos.Segment >= 0 && pos.Segment < r.Script.Segments.Length && r.Zoom = r.Script.Segments.[pos.Segment].Show then r.Zoom else None
+        let r = { r with ShowOutline = false; ShowEquations = false; ShowMenu = false; Zoom = zoom; Help = None; Cards = None }
+        // studying: the tutor waits, and comes in at the end of the stretch now being heard
+        let r, stopTutor =
+            match r.Study with
+            | Some s ->
+                let _, s, cmd = hold { r with Playing = false } s
+                let now =
+                    match s.Plan with
+                    | Some plan ->
+                        Study.stops r.Script plan
+                        |> List.tryFind (fun st -> pos.Segment >= st.First && pos.Segment <= st.Last)
+                        |> Option.map (fun st -> StudyNow.Listening st.Last)
+                        |> Option.defaultValue s.Now
+                    | None -> StudyNow.Starting
+                { r with Study = Some(goTo now { s with Running = true; ShowPlan = false; ShowTutor = false; Voice = None }) }, cmd
+            | None -> r, Cmd.none
+        let r, cmd = seek r model.Settings pos
+        let r, cmd = if r.Playing then r, cmd else play r model.Settings
+        r, Cmd.batch [ stopTutor; cmd ])
+
 let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
     match msg with
     | Dismiss -> { model with Notice = None }, Cmd.none
@@ -1788,7 +1838,14 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
               Held = None
               Help = None
               Cards = None
-              Study = None }
+              Study = None
+              // opened at a place from a review: where the paper had been listened to, to go back to
+              Place =
+                  match model.ListenAt, model.Papers |> List.tryFind (fun p -> p.Id = paper.Id) with
+                  | Some i, Some before when before.LastSegment <> i && before.LastSegment > 0 && before.LastSegment < script.Segments.Length ->
+                      Some { Segment = before.LastSegment; OffsetMs = 0 }
+                  | _ -> None
+              ConfirmHere = false }
         // papers open in Study (with a key), unless the learner turned it off
         let studying = Settings.hasKey model.Settings && (model.StudyOnOpen = Some paper.Id || model.Settings.Study)
         let r, playCmd = if studying then r, Cmd.none else play r model.Settings
@@ -1812,7 +1869,12 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             // the answer being said: pause it
             let r, s, cmd = hold r s
             setStudy model r s, cmd
-        // otherwise Continue: back to where the session was
+        | Studying (r, ({ Voice = Some v } as s)) when Some v.Id <> (s.Aside |> Option.map (fun a -> a.Id)) && not v.Said.IsEmpty ->
+            // the answer paused: on from there; all said: again from its start
+            let v = if v.At >= v.Said.Length then { v with At = 0; Offset = 0 } else v
+            let s, cmd = sayOn model.Settings r s v
+            setStudy model r s, cmd
+        // no answer: back to where the session was
         | _ -> update ToggleTutor model
     | TogglePlay when (match model with Studying _ -> true | _ -> false) ->
         match model with
@@ -1872,6 +1934,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         | _ -> model, Cmd.none
     | Back15 ->
         withReader model (fun r ->
+            let r = markPlace r
             let pos = currentPosition r
             let amount = int (float jumpMs * model.Settings.Speed)
             seek r model.Settings (Timeline.back (fun i -> r.Durations.TryFind i) amount pos))
@@ -1880,30 +1943,14 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
             let pos = currentPosition r
             let amount = int (float jumpMs * model.Settings.Speed)
             seek r model.Settings (Timeline.forward (fun i -> r.Durations.TryFind i) r.Script.Segments.Length amount pos))
-    | JumpToSegment i ->
-        withReader model (fun r ->
-            r.Help |> Option.iter (fun h -> h.Cancel.Cancel())
-            // hearing an equation again from its full-screen view keeps it full screen
-            let zoom = if r.Zoom.IsSome && i >= 0 && i < r.Script.Segments.Length && r.Zoom = r.Script.Segments.[i].Show then r.Zoom else None
-            let r = { r with ShowOutline = false; ShowEquations = false; ShowMenu = false; Zoom = zoom; Help = None; Cards = None }
-            // studying: the tutor waits, and comes in at the end of the stretch now being heard
-            let r, stopTutor =
-                match r.Study with
-                | Some s ->
-                    let _, s, cmd = hold { r with Playing = false } s
-                    let now =
-                        match s.Plan with
-                        | Some plan ->
-                            Study.stops r.Script plan
-                            |> List.tryFind (fun st -> i >= st.First && i <= st.Last)
-                            |> Option.map (fun st -> StudyNow.Listening st.Last)
-                            |> Option.defaultValue s.Now
-                        | None -> StudyNow.Starting
-                    { r with Study = Some(goTo now { s with Running = true; ShowPlan = false; ShowTutor = false; Voice = None }) }, cmd
-                | None -> r, Cmd.none
-            let r, cmd = seek r model.Settings { Segment = i; OffsetMs = 0 }
-            let r, cmd = if r.Playing then r, cmd else play r model.Settings
-            r, Cmd.batch [ stopTutor; cmd ])
+    | JumpToSegment i -> jump { Segment = i; OffsetMs = 0 } markPlace model
+    | BackToPlace ->
+        match model.Screen with
+        | Screen.Reader { Place = Some p } -> jump p (fun r -> { r with Place = None; ConfirmHere = false }) model
+        | _ -> model, Cmd.none
+    | CarryOnHere false -> withReader model (fun r -> { r with ConfirmHere = r.Place.IsSome }, Cmd.none)
+    | CarryOnHere true -> withReader model (fun r -> { r with Place = None; ConfirmHere = false }, Cmd.none)
+    | KeepPlace -> withReader model (fun r -> { r with ConfirmHere = false }, Cmd.none)
     | CycleSpeed ->
         let i = speeds |> Array.tryFindIndex (fun s -> abs (s - model.Settings.Speed) < 0.01) |> Option.defaultValue 1
         let speed = speeds.[(i + 1) % speeds.Length]
@@ -1912,7 +1959,12 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         Cmd.batch [ saveSettings settings; Cmd.ofEffect (fun _ -> (platform ()).Player.SetSpeed speed) ]
     | Minute -> { model with Clock = DateTime.UtcNow }, Cmd.none
     | Tick position ->
-        withReader model (fun r -> (if r.Playing && not r.Waiting then { r with Offset = position } else r), Cmd.none)
+        withReader model (fun r ->
+            if r.Playing && not r.Waiting then
+                // only steady playing on (a late tick from the clip before a jump would seem to leap)
+                let r = if position >= r.Offset && position - r.Offset < 5000 then passPlace { Segment = r.Current; OffsetMs = r.Offset } { Segment = r.Current; OffsetMs = position } r else r
+                { r with Offset = position }, Cmd.none
+            else r, Cmd.none)
     | ClipEnded gen when
         (match model with
          | Studying (r, { Now = StudyNow.Listening last }) -> gen = r.Generation && r.Playing && r.Current >= last
@@ -1922,6 +1974,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         | Studying (r, s) ->
             // the stretch has been heard: the tutor's turn
             let heard = r.Current + 1
+            let r = passPlace { Segment = r.Current; OffsetMs = r.Offset } { Segment = heard; OffsetMs = 0 } r
             let r =
                 { r with
                     Current = min heard (r.Script.Segments.Length - 1)
@@ -1947,6 +2000,8 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
                 | _ -> model, Cmd.none
             | _ -> model, Cmd.none
         withReader model (fun r ->
+            // playing on past the place jumped from forgets it
+            let r = if gen = r.Generation && r.Playing then passPlace { Segment = r.Current; OffsetMs = r.Offset } { Segment = r.Current + 1; OffsetMs = 0 } r else r
             if gen <> r.Generation || not r.Playing then r, Cmd.none
             elif stopsHere model.Settings r && r.Current + 1 < r.Script.Segments.Length then
                 // the equation has been read and explained: keep it up and wait for the listener
@@ -3158,6 +3213,7 @@ let rec update (msg: Msg) (model: Model) : Model * Cmd<Msg> =
         elif model.Review.IsSome then update CloseReview model
         else
             match model.Screen with
+            | Screen.Reader r when r.ConfirmHere -> update KeepPlace model
             | Screen.Reader r when r.Zoom.IsSome -> update ToggleZoom model
             | Screen.Reader r when r.ShowMenu -> update ToggleMenu model
             | Screen.Reader { Study = Some s } when s.ShowTutor -> update ToggleTutor model
